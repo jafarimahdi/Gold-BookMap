@@ -1,0 +1,26 @@
+# ===== secrets — NEVER commit your real configuration =====
+.env
+
+# ===== runtime data (your live trading activity / large files) =====
+ticks.csv
+mbo.csv
+mbo_*.csv
+ticks_*.csv
+ticks_*.csv.gz
+data/*
+!data/.gitkeep
+logs/*
+!logs/.gitkeep
+bot.lock
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# ===== OS / editor noise =====
+Thumbs.db
+.DS_Store
+ticks*.csv

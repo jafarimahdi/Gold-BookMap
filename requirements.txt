@@ -1,0 +1,21 @@
+# Core analysis
+numpy>=1.24
+pandas>=2.0          # 2.x and 3.x both supported (v3 verified on 3.0.5)
+requests>=2.31       # news headlines + macro data (free, no key)
+textblob>=0.17       # headline sentiment (built-in lexicon fallback)
+
+# AI decision layer (Gemini)
+google-genai>=1.0
+
+# Execution (Windows + a running MT5 terminal; the app degrades
+# gracefully without it, so non-Windows devs can still run analysis)
+MetaTrader5
+
+# BookMap bridge — PRIMARY data source for this edition
+bookmap>=0.1.0       # BookMap Python API addon (pip install bookmap)
+# The addon also works without this package in DEMO mode (synthetic data)
+
+# Optional:
+# python-dotenv      # nicer .env parsing (config.py works without it)
+# databento          # MBO / Level-3 order-event feed (~$33/mo) — future upgrade
+# rithmic / async-rithmic  # direct Rithmic (legacy, not needed with BookMap)
