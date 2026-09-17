@@ -5,7 +5,7 @@ from pathlib import Path
 # ABSOLUTE PATHS - critical when running inside BookMap
 BRIDGE_FILE = os.getenv("BOOKMAP_BRIDGE_FILE") or r"A:\gitHub\Gold-BookMap\ticks.csv"
 MBO_FILE = os.getenv("BOOKMAP_MBO_FILE") or r"A:\gitHub\Gold-BookMap\mbo.csv"
-SYMBOL_ROOT = os.getenv("BOOKMAP_SYMBOL_FILTER") or "MGC"
+SYMBOL_ROOT = os.getenv("BOOKMAP_SYMBOL_FILTER") or "GC"
 CSV_HEADER = "time,event,price,size,level,operation,instrument\n"
 WRITE_MBO = os.getenv("BOOKMAP_WRITE_MBO", "1") == "1"
 
@@ -48,7 +48,16 @@ infos = {}
 stats = {"trades":0,"depth":0,"mbo":0,"mbo_new":0,"mbo_cancel":0}
 
 def should(alias):
-    return SYMBOL_ROOT in alias.upper() if SYMBOL_ROOT else True
+    """v5.4.1 EASY-SWITCH: GC filter accepts MGC too, comma list, empty=all"""
+    if not SYMBOL_ROOT:
+        return True
+    up = alias.upper()
+    if "," in SYMBOL_ROOT:
+        roots = [r.strip().upper() for r in SYMBOL_ROOT.split(",") if r.strip()]
+        return any(r in up for r in roots)
+    if SYMBOL_ROOT.upper() in ("GC", "MGC"):
+        return ("GC" in up or "MGC" in up)
+    return SYMBOL_ROOT.upper() in up
 
 def handle_subscribe_instrument(addon, alias, full_name, is_crypto, pips, size_mult, inst_mult, supported_features=None):
     if supported_features is None:
