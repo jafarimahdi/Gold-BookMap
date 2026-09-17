@@ -136,7 +136,7 @@ def _refresh() -> None:
     # Normalize legacy name: ninjabridge -> bookmapbridge (still supported)
     if g["DATA_SOURCE"] == "ninjabridge":
         g["DATA_SOURCE"] = "bookmapbridge"
-    g["DATA_SYMBOL"] = _fget("DATA_SYMBOL") or _fget("RITHMIC_SYMBOL", "MGC 12-26")
+    g["DATA_SYMBOL"] = _fget("DATA_SYMBOL") or _fget("RITHMIC_SYMBOL", "GC 12-26")
     g["DATA_MARKET"] = _fget("DATA_MARKET", "")
     g["TRADE_MARKET"] = _fget("TRADE_MARKET", "")
 
@@ -443,6 +443,21 @@ def _refresh() -> None:
     # L3 Queue Position Model
     g["QUEUE_POS_ENABLED"] = _fget("QUEUE_POS_ENABLED", "1") == "1"
     g["QUEUE_POS_THRESHOLD"] = _ffloat("QUEUE_POS_THRESHOLD", 0.7)
+
+    # B3 Smart Limit Queue
+    g["LIMIT_ORDER_ENABLED"] = _fget("LIMIT_ORDER_ENABLED", "0") == "1"
+    g["LIMIT_OFFSET_TICKS"] = _fint("LIMIT_OFFSET_TICKS", 1)
+    g["LIMIT_TICK_SIZE"] = _ffloat("LIMIT_TICK_SIZE", 0.1)
+    g["LIMIT_TIMEOUT_SECONDS"] = _fint("LIMIT_TIMEOUT_SECONDS", 10)
+
+    # B2 ML Weight Trainer
+    g["ML_TRAINER_ENABLED"] = _fget("ML_TRAINER_ENABLED", "1") == "1"
+    g["ML_MIN_TRADES"] = _fint("ML_MIN_TRADES", 30)
+    g["ML_WEIGHT_ADJUST_PCT"] = _ffloat("ML_WEIGHT_ADJUST_PCT", 15.0)
+
+    # B6 Walk-Forward
+    g["WALK_FORWARD_DAYS"] = _fint("WALK_FORWARD_DAYS", 30)
+    g["WALK_FORWARD_MONTE_CARLO"] = _fint("WALK_FORWARD_MONTE_CARLO", 1000)
 
     # L5 Reinforcement Learning from Trade Memory
     g["RL_ENABLED"] = _fget("RL_ENABLED", "1") == "1"

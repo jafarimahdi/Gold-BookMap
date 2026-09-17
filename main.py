@@ -1071,6 +1071,14 @@ def main() -> int:
     setup_logging()
     creds = config.credentials_configured()
     logger.info("Credentials: %s", creds)
+    # v5.5 B2/B3/B6 status
+    logger.info("B2 ML trainer: %s min_trades=%s | B3 limit queue: %s offset=%s ticks | B6 walk-forward: %s days MC %s",
+                getattr(config, "ML_TRAINER_ENABLED", True),
+                getattr(config, "ML_MIN_TRADES", 30),
+                getattr(config, "LIMIT_ORDER_ENABLED", False),
+                getattr(config, "LIMIT_OFFSET_TICKS", 1),
+                getattr(config, "WALK_FORWARD_DAYS", 30),
+                getattr(config, "WALK_FORWARD_MONTE_CARLO", 1000))
     logger.info("Runtime: broker=%s execution=%s trading=%s symbol=%s",
                 config.BROKER_NAME or "(not configured)",
                 config.EXECUTION_MODE,

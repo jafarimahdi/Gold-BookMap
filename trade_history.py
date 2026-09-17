@@ -127,8 +127,12 @@ def _today_key(ts: Optional[float] = None) -> str:
 def record_entry(ticket: Any, side: str, price: float, sl: float, tp: float,
                  volume: float, ai_confidence: float = 0.0,
                  signal_strength: float = 0.0,
-                 signal_score: float = 0.0) -> None:
-    """Remember the conditions under which we OPENED a trade."""
+                 signal_score: float = 0.0,
+                 regime: str = "",
+                 volatility_rank: float = 0.0,
+                 atr: float = 0.0,
+                 snapshot_notes: str = "") -> None:
+    """Remember the conditions under which we OPENED a trade. v5.5 B2 adds regime/vol for ML."""
     if ticket is None:
         return
     data = _load()
@@ -144,6 +148,10 @@ def record_entry(ticket: Any, side: str, price: float, sl: float, tp: float,
         "ai_confidence": float(ai_confidence or 0.0),
         "signal_strength": float(signal_strength or 0.0),
         "signal_score": float(signal_score or 0.0),
+        "regime": str(regime or "").upper(),
+        "volatility_rank": float(volatility_rank or 0.0),
+        "atr": float(atr or 0.0),
+        "snapshot_notes": str(snapshot_notes or "")[:500],
     }
     _save(data)
 
@@ -183,6 +191,9 @@ def record_close(ticket: Any, side: str, price: float, reason: str,
         "ai_confidence": float((entry_rec or {}).get("ai_confidence", 0.0)),
         "signal_strength": float((entry_rec or {}).get("signal_strength", 0.0)),
         "signal_score": float((entry_rec or {}).get("signal_score", 0.0)),
+        "regime": str((entry_rec or {}).get("regime", "")).upper(),
+        "volatility_rank": float((entry_rec or {}).get("volatility_rank", 0.0) or 0.0),
+        "atr": float((entry_rec or {}).get("atr", 0.0) or 0.0),
         "age_minutes": round(
             (ts - float((entry_rec or {}).get("opened_ts", ts))) / 60.0, 1),
     }

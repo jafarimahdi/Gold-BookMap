@@ -2704,6 +2704,12 @@
             [],
             [],
             [],
+            [],
+            [],
+            [],
+            [],
+            [],
+            [],
             []
           ]
         },
@@ -2783,12 +2789,12 @@
             "minPixelVolume": 1,
             "showCircleSizeOnToolbar": true,
             "renderingDependentSettings-v2": {
-              "SECTORS": {
+              "GRADIENT": {
                 "circleSize": 40,
                 "circleAlpha": 41,
                 "clusteringSmartParamSliderValue": 52
               },
-              "GRADIENT": {
+              "SECTORS": {
                 "circleSize": 40,
                 "circleAlpha": 41,
                 "clusteringSmartParamSliderValue": 52
@@ -3232,7 +3238,7 @@
         "glTableAndChartHolderSettings": {
           "weightA": 1084.0,
           "weightB": 119.0,
-          "isPnlAndPositionChartShown": true
+          "isPnlAndPositionChartShown": false
         },
         "bookmapBottomPanelSettings": {
           "indicatorSettingsList": [
@@ -3345,11 +3351,11 @@
             "toleranceMode": "ABSOLUTE",
             "currentAbsoluteToleranceValue": 7,
             "currentPercentageToleranceValue": 10,
-            "timeWidth": 1384615384615,
-            "autoBoundDisatanceBase": 92,
+            "timeWidth": 819299044150,
+            "autoBoundDisatanceBase": 66,
             "autoPercentageToleranceValue": 20,
-            "noneRefPrice": 44202,
-            "noneHeight": 308
+            "noneRefPrice": 44142,
+            "noneHeight": 165
           }
         },
         "depthSettings": {
@@ -3371,7 +3377,7 @@
         "columns": [
           {
             "type": "HEATMAP",
-            "width": 2255,
+            "width": 1305,
             "columnResetSettings": {
               "isTurnedOn": false,
               "resetOnDoubleClick": false,
@@ -3470,7 +3476,7 @@
           },
           {
             "type": "COB",
-            "width": 164,
+            "width": 134,
             "columnResetSettings": {
               "isTurnedOn": false,
               "resetOnDoubleClick": false,
@@ -3569,7 +3575,7 @@
           },
           {
             "type": "SVP",
-            "width": 137,
+            "width": 124,
             "columnResetSettings": {
               "isTurnedOn": false,
               "resetOnDoubleClick": false,
@@ -3672,14 +3678,14 @@
     ],
     "mainWindowPosition": {
       "location": {
-        "valueX": -5679,
-        "valueY": -469
+        "valueX": -6151,
+        "valueY": -597
       },
       "size": {
-        "width": 1592,
-        "height": 977
+        "width": 1583,
+        "height": 1399
       },
-      "maximized": true
+      "maximized": false
     },
     "strategiesSettings": {
       "strategies": {

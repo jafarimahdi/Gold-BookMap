@@ -701,20 +701,83 @@ class MT5Executor:
                                        sl=sl, tp=tp, volume=lot_size,
                                        timestamp=now)
 
-        request = {
-            "action": mt5.TRADE_ACTION_DEAL,
-            "symbol": self.symbol,
-            "volume": lot_size,
-            "type": mt5.ORDER_TYPE_BUY if is_buy else mt5.ORDER_TYPE_SELL,
-            "price": price,
-            "sl": sl,
-            "tp": tp,
-            "deviation": 20,
-            "magic": self.magic,
-            "comment": "gold-trading-bot",
-            "type_time": mt5.ORDER_TIME_GTC,
-            "type_filling": self._select_filling_mode(info),
-        }
+        # B3 Smart Limit Queue: if enabled, try to place limit at better queue position
+        use_limit = False
+        limit_price = price
+        try:
+            if getattr(config, "LIMIT_ORDER_ENABLED", False) and getattr(config, "QUEUE_POS_ENABLED", True):
+                l3 = getattr(snapshot, "level3", None)
+                if l3 is not None and hasattr(l3, "order_book"):
+                    # Estimate queue at current best price
+                    tick_size = float(getattr(config, "LIMIT_TICK_SIZE", 0.1))
+                    offset_ticks = int(getattr(config, "LIMIT_OFFSET_TICKS", 1))
+                    # For BUY, we want to buy at bid or slightly above; for SELL at ask or slightly below
+                    # Check queue ahead at current price
+                    # Use snapshot's Level3OrderBookAnalyzer if available via snapshot? We have l3 data but not analyzer
+                    # Simple heuristic: if L2 imbalance against us, place limit 1 tick better
+                    l2_imb = float(getattr(getattr(snapshot, "order_flow", None), "depth_imbalance", 0.0) or 0.0)
+                    # If buying but ask depth heavy (imb negative) -> sellers, better to place limit at bid+1 tick
+                    if is_buy and l2_imb < -0.2:
+                        use_limit = True
+                        limit_price = tick.bid + offset_ticks * tick_size if tick.bid>0 else price - tick_size
+                    elif not is_buy and l2_imb > 0.2:
+                        use_limit = True
+                        limit_price = tick.ask - offset_ticks * tick_size if tick.ask>0 else price + tick_size
+                    # Also check iceberg: if iceberg support below for BUY, place limit at iceberg price
+                    if is_buy and getattr(l3, "iceberg_levels", None):
+                        # Find nearest iceberg support below price
+                        supports = [p for p in l3.iceberg_levels.keys() if p < price and p > price - 5.0]
+                        if supports:
+                            best_support = max(supports)
+                            if l3.iceberg_levels[best_support] >= 2:
+                                use_limit = True
+                                limit_price = best_support
+                                logger.info(f"STEP 4 B3: BUY limit at iceberg support {best_support:.2f} levels {l3.iceberg_levels[best_support]}")
+                    if not is_buy and getattr(l3, "iceberg_levels", None):
+                        resistances = [p for p in l3.iceberg_levels.keys() if p > price and p < price + 5.0]
+                        if resistances:
+                            best_res = min(resistances)
+                            if l3.iceberg_levels[best_res] >= 2:
+                                use_limit = True
+                                limit_price = best_res
+                                logger.info(f"STEP 4 B3: SELL limit at iceberg resistance {best_res:.2f}")
+                    if use_limit:
+                        logger.info(f"STEP 4 B3 Smart Limit: {action} market {price:.2f} -> limit {limit_price:.2f} (imb {l2_imb:+.2f})")
+        except Exception as e:
+            logger.warning(f"STEP 4 B3 queue check failed: {e}")
+            use_limit = False
+
+        if use_limit:
+            # Place LIMIT order
+            request = {
+                "action": mt5.TRADE_ACTION_PENDING,
+                "symbol": self.symbol,
+                "volume": lot_size,
+                "type": mt5.ORDER_TYPE_BUY_LIMIT if is_buy else mt5.ORDER_TYPE_SELL_LIMIT,
+                "price": limit_price,
+                "sl": sl,
+                "tp": tp,
+                "deviation": 20,
+                "magic": self.magic,
+                "comment": "gold-bot B3 limit",
+                "type_time": mt5.ORDER_TIME_GTC,
+                "type_filling": self._select_filling_mode(info),
+            }
+        else:
+            request = {
+                "action": mt5.TRADE_ACTION_DEAL,
+                "symbol": self.symbol,
+                "volume": lot_size,
+                "type": mt5.ORDER_TYPE_BUY if is_buy else mt5.ORDER_TYPE_SELL,
+                "price": price,
+                "sl": sl,
+                "tp": tp,
+                "deviation": 20,
+                "magic": self.magic,
+                "comment": "gold-trading-bot",
+                "type_time": mt5.ORDER_TIME_GTC,
+                "type_filling": self._select_filling_mode(info),
+            }
 
         margin_error = self._validate_margin(action, lot_size, price)
         if margin_error:
@@ -743,6 +806,36 @@ class MT5Executor:
                                        price=price, sl=sl, tp=tp, timestamp=now)
 
         result = mt5.order_send(request)
+        # For pending limit orders, DONE means order placed, not filled yet
+        if use_limit:
+            if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
+                logger.error("STEP 4 B3: limit order_send failed retcode=%s",
+                             getattr(result, "retcode", None))
+                return ExecutionResult(status="ERROR",
+                                       reason=f"limit order_send retcode={getattr(result, 'retcode', None)}",
+                                       symbol=self.symbol, volume=lot_size,
+                                       price=limit_price, sl=sl, tp=tp, timestamp=now)
+            logger.info(f"STEP 4 B3: LIMIT {action} placed @ {limit_price:.2f} lots {lot_size} (market was {price:.2f}) — waiting fill")
+            try:
+                timeout = int(getattr(config, "LIMIT_TIMEOUT_SECONDS", 10))
+                time.sleep(min(timeout, 2))
+                pos = self._wait_for_bot_position(timeout=timeout)
+                if pos:
+                    verified_position = pos
+                else:
+                    return ExecutionResult(status="DEFERRED",
+                                           reason=f"B3 limit {action} @ {limit_price:.2f} placed, waiting fill (queue optimized)",
+                                           order_id=getattr(result, "order", None),
+                                           symbol=self.symbol, volume=lot_size,
+                                           price=limit_price, sl=sl, tp=tp, timestamp=now)
+            except Exception as e:
+                logger.warning(f"STEP 4 B3 limit wait error: {e}")
+                return ExecutionResult(status="DEFERRED",
+                                       reason=f"B3 limit placed @ {limit_price:.2f}, wait error {e}",
+                                       order_id=getattr(result, "order", None),
+                                       symbol=self.symbol, volume=lot_size,
+                                       price=limit_price, sl=sl, tp=tp, timestamp=now)
+
         if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
             logger.error("STEP 4: order_send failed retcode=%s",
                          getattr(result, "retcode", None))
@@ -777,7 +870,11 @@ class MT5Executor:
                 signal_strength=float(getattr(snapshot, "signal_strength",
                                               0.0) or 0.0),
                 signal_score=float(getattr(snapshot, "signal_strength",
-                                           0.0) or 0.0))
+                                           0.0) or 0.0),
+                regime=str(getattr(snapshot, "regime", "") or ""),
+                volatility_rank=float(getattr(getattr(snapshot, "volatility", None), "volatility_rank", 0.0) or 0.0),
+                atr=float(getattr(getattr(snapshot, "volatility", None), "atr", 0.0) or 0.0),
+                snapshot_notes="; ".join(getattr(snapshot, "notes", [])[-3:]))
             fill_price = float(getattr(result, "price", 0.0) or 0.0)
             if fill_price <= 0:
                 fill_price = float(getattr(verified_position, "price_open",

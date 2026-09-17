@@ -1,3 +1,45 @@
+## v5.5.0 — B2 ML Self-Learning + B3 Smart Limit Queue + B6 Walk-Forward (2026-05-11)
+
+GC-only LIVE verified — 581 ticks, 35ms latency (was 24s stale with MGC). Now 3 big features together:
+
+### B2 — ML Self-Learning from trade_memory.json
+- Extended trade_history.record_entry to store regime, volatility_rank, atr, snapshot_notes
+- Extended record_close to carry over regime/vol/atr for post-trade analysis
+- New tools/train_weights.py: loads 200-trade rolling memory, computes WR/PF/expectancy per regime/side/strength/vol/exit_reason
+- Suggests new SIGNAL_W_* weights via simple RL: boost winners +15%, cut losers -15%
+- Writes data/weight_suggestions.json, --apply patches .env automatically after 30+ trades
+- GC benefit: deeper book = cleaner L3 stats, ML more reliable
+
+### B3 — Smart Limit Queue
+- New config: LIMIT_ORDER_ENABLED (default 0 off), LIMIT_OFFSET_TICKS=1, LIMIT_TICK_SIZE=0.1, LIMIT_TIMEOUT_SECONDS=10
+- In step4_mt5_execution.py: before market order, check queue position
+  - If L2 depth imbalance against us (buy but ask heavy, sell but bid heavy) -> place limit 1 tick better
+  - If iceberg support/resistance within $5 -> place limit at iceberg price (best queue)
+- Places MT5 ORDER_TYPE_BUY_LIMIT/SELL_LIMIT with SL/TP, waits LIMIT_TIMEOUT_SECONDS for fill
+- If not filled quickly, returns DEFERRED (pending limit waiting queue optimized fill)
+- Reduces slippage, improves TCA: limit at support gets filled by whale, not chasing
+- Off by default — enable after GC live verified
+
+### B6 — 30-Day Walk-Forward + Monte Carlo
+- New tools/walk_forward.py: replays data/archive/ticks_*.csv.gz through REAL Backtester engine
+- Aggregates equity curve, WR/PF/expectancy per regime/side/session, max DD, Sharpe, L3 metrics (whale WR, iceberg PF)
+- Monte Carlo 1000 shuffles of trades -> DD distribution (mean/median/p95/max)
+- Outputs data/walk_forward_<timestamp>/ with trades_all.csv, equity_curve.csv, summary.txt, report.json
+- Proves strategy on GC institutional feed, not just micro noise
+- Usage: python tools/walk_forward.py --days 30 --monte-carlo 1000
+
+### Integration
+- Config extended: ML_TRAINER_ENABLED, ML_MIN_TRADES, LIMIT_*, WALK_FORWARD_*
+- main.py logs B2/B3/B6 status at startup
+- All three work with GC-only easy-switch (v5.4.2 logic): empty filter=all, GC/MGC family, comma list
+
+### GC LIVE verification
+- After deleting ticks.csv/mbo.csv and opening only GCZ6.COMEX@RITHMIC:
+  - Lines 88437, 581 ticks direct 100%, 20 bid/20 ask, 3000 MBO, age 0.0s 35ms LIVE
+  - STEP1 OK has_data=True, latency 1481ms (was 14-24s with stale 810k lines)
+  - Pipeline total 6279ms (was 48830ms)
+  - MARKET SNAPSHOT GC @ 4409.90, CVD -19, L3 imbalance -0.178, icebergs 283
+
 # Changelog
 
 ## 2026-09-17 — v5.3: MEDIUM 6 Implemented — Footprint & Absorption, Vol Sizing, Iceberg/Spoof, Macro Boost, MBO Archival, TCA Report

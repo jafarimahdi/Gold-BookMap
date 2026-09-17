@@ -192,10 +192,24 @@ stats = {"trades": 0, "depth": 0, "bidask": 0, "filtered": 0}
 stats_lock = threading.Lock()
 
 def _should_process(alias: str) -> bool:
+    """v5.4.1 EASY-SWITCH: Changing MGC <-> GC is now 0-code-change.
+    - If filter empty -> accept ANY instrument (easiest)
+    - If filter is GC or MGC -> accept BOTH GC and MGC (gold family)
+    - If filter is comma list \"GC,MGC,SI\" -> accept any in list
+    - Else exact root match
+    This means you can switch chart from MGCZ6 to GCZ6 in BookMap and it just works.
+    """
     if not SYMBOL_ROOT:
         return True
-    # alias examples: "MGCZ5@Rithmic", "MGC 12-26", "GCZ5"
     upper = alias.upper()
+    # Support comma list e.g. "GC,MGC"
+    if "," in SYMBOL_ROOT:
+        roots = [r.strip().upper() for r in SYMBOL_ROOT.split(",") if r.strip()]
+        return any(r in upper for r in roots)
+    # Gold family: GC filter accepts MGC too and vice versa — makes switching easy
+    if SYMBOL_ROOT in ("GC", "MGC"):
+        return ("GC" in upper or "MGC" in upper)
+    # alias examples: "MGCZ5@Rithmic", "MGC 12-26", "GCZ5"
     return SYMBOL_ROOT in upper
 
 def _now_iso() -> str:
