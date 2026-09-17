@@ -128,6 +128,10 @@ class Level3Events:
     sell_streak: int = 0              # consecutive aggressive sells
     large_order_events: int = 0       # events with size > threshold
     iceberg_events: int = 0           # repeated same-size orders at same price
+    spoof_events: int = 0             # M3: large order adds then cancels <2s
+    iceberg_levels: Dict[float, int] = field(default_factory=dict)  # price -> refill count
+    spoof_levels: Dict[float, int] = field(default_factory=dict)   # price -> spoof count
+    absorption_events: int = 0        # M1: L3 absorption (large limit + small move)
     timestamp: Optional[datetime] = None
 
 
@@ -567,11 +571,19 @@ class OrderBookDepthAnalyzer:
 
     Produces: microprice, depth imbalance, liquidity slope/concentration,
     cumulative Order Flow Imbalance (OFI) and absorption detection.
+
+    v5.3 M1: wall_size from config (50 for MGC), improved absorption:
+    large limit + small price move detection + best-level shrink.
     """
 
-    def __init__(self, levels: int = 5, wall_size: float = 100.0):
+    def __init__(self, levels: int = 5, wall_size: float = None):
         self.levels = levels
-        self.wall_size = wall_size
+        # M1: use config ABSORPTION_WALL_SIZE (50) if not passed
+        try:
+            cfg_wall = float(getattr(config, "ABSORPTION_WALL_SIZE", 50.0))
+        except:
+            cfg_wall = 50.0
+        self.wall_size = wall_size if wall_size is not None else cfg_wall
         self._prev_bids: Dict[float, float] = {}
         self._prev_asks: Dict[float, float] = {}
         self.cumulative_ofi = 0.0
@@ -583,6 +595,14 @@ class OrderBookDepthAnalyzer:
         self._prev_ba_size: float = 0.0
         self._bid_eaten = 0
         self._ask_eaten = 0
+        # M1 improved: track price movement vs wall
+        self._last_mid: float = 0.0
+        self._wall_bid_price: Optional[float] = None
+        self._wall_bid_size: float = 0.0
+        self._wall_ask_price: Optional[float] = None
+        self._wall_ask_size: float = 0.0
+        self._wall_bid_hits: int = 0
+        self._wall_ask_hits: int = 0
 
     # -- helpers ---------------------------------------------------------------
     @staticmethod
@@ -680,29 +700,52 @@ class OrderBookDepthAnalyzer:
     def _update_absorption(self, bids: Dict[float, float], asks: Dict[float, float]):
         """Detect liquidity walls being eaten without price moving through.
 
-        bid absorption = a large resting bid keeps shrinking at the same price
-        (sellers absorbing it) -> bearish. ask absorption -> bullish.
+        v5.3 M1 improved:
+        - Original: best size shrinking at same price (2 consecutive)
+        - New: large wall present + price fails to move through (small move)
+        bid absorption = large resting bid keeps shrinking / price stalls above it -> bearish sellers absorbing
+        ask absorption = large ask shrinking / price stalls below -> bullish buyers absorbing
         """
         bid_top = self._top(bids, "bid")
         ask_top = self._top(asks, "ask")
         bb_price, bb_size = bid_top[0] if bid_top else (None, 0.0)
         ba_price, ba_size = ask_top[0] if ask_top else (None, 0.0)
 
+        # Calculate mid for price-move check
+        best_bid = max(bids) if bids else 0.0
+        best_ask = min(asks) if asks else 0.0
+        mid = (best_bid + best_ask)/2.0 if best_bid and best_ask else 0.0
+
         # -- bid side ----------------------------------------------------------
         if bb_size >= self.wall_size and bb_price is not None:
             if self._prev_bb_price is not None and abs(bb_price - self._prev_bb_price) < 1e-9:
                 if bb_size < self._prev_bb_size - 1e-9:
                     self._bid_eaten += 1
+                    self._wall_bid_hits += 1
                 else:
                     self._bid_eaten = max(0, self._bid_eaten - 1)
+                # Original: 2 consecutive shrinks
                 if self._bid_eaten >= 2:
                     self.absorption_events += 1
-                    self.absorption_net -= 1          # sellers absorbing bids
+                    self.absorption_net -= 1
                     self._bid_eaten = 0
+                # M1 New: wall persists + mid doesn't drop much = absorption
+                if mid and self._last_mid and bb_price:
+                    price_move = abs(mid - self._last_mid)
+                    # If large bid wall and price move < 0.2 * wall threshold relative and wall hit 3x
+                    if price_move < 0.3 and self._wall_bid_hits >= 3:
+                        self.absorption_events += 1
+                        self.absorption_net -= 1
+                        self._wall_bid_hits = 0
             else:
                 self._bid_eaten = 0
+                self._wall_bid_hits = 0
+                self._wall_bid_price = bb_price
+                self._wall_bid_size = bb_size
         else:
             self._bid_eaten = 0
+            if bb_size < self.wall_size * 0.5:
+                self._wall_bid_hits = 0
         self._prev_bb_price, self._prev_bb_size = bb_price, bb_size
 
         # -- ask side ----------------------------------------------------------
@@ -710,17 +753,31 @@ class OrderBookDepthAnalyzer:
             if self._prev_ba_price is not None and abs(ba_price - self._prev_ba_price) < 1e-9:
                 if ba_size < self._prev_ba_size - 1e-9:
                     self._ask_eaten += 1
+                    self._wall_ask_hits += 1
                 else:
                     self._ask_eaten = max(0, self._ask_eaten - 1)
                 if self._ask_eaten >= 2:
                     self.absorption_events += 1
-                    self.absorption_net += 1          # buyers absorbing asks
+                    self.absorption_net += 1
                     self._ask_eaten = 0
+                if mid and self._last_mid and ba_price:
+                    price_move = abs(mid - self._last_mid)
+                    if price_move < 0.3 and self._wall_ask_hits >= 3:
+                        self.absorption_events += 1
+                        self.absorption_net += 1
+                        self._wall_ask_hits = 0
             else:
                 self._ask_eaten = 0
+                self._wall_ask_hits = 0
+                self._wall_ask_price = ba_price
+                self._wall_ask_size = ba_size
         else:
             self._ask_eaten = 0
+            if ba_size < self.wall_size * 0.5:
+                self._wall_ask_hits = 0
         self._prev_ba_price, self._prev_ba_size = ba_price, ba_size
+        if mid:
+            self._last_mid = mid
 
     # -- main update -----------------------------------------------------------
     def update(self, bids: Any, asks: Any) -> None:
@@ -757,29 +814,55 @@ class OrderBookDepthAnalyzer:
 
 
 class FootprintBuilder:
-    """Market footprint: buy/sell volume aggregated at each price level."""
+    """Market footprint: buy/sell volume aggregated at each price level.
+
+    v5.3 M1: Uses BookMap direct side (is_direct=True) when available,
+    aggregates per price level Buy vs Sell, calculates delta imbalance
+    and dominant level. This is key for gold scalping.
+    """
 
     def __init__(self, price_resolution: float = 0.1):
         self.price_resolution = price_resolution
         self.price_levels: Dict[float, Dict[str, float]] = defaultdict(
-            lambda: {"buy": 0.0, "sell": 0.0})
+            lambda: {"buy": 0.0, "sell": 0.0, "direct_buy": 0.0, "direct_sell": 0.0})
 
-    def add_trade(self, price: float, volume: float, side: str) -> None:
+    def add_trade(self, price: float, volume: float, side: str, is_direct: bool = False) -> None:
         bucket = round(float(price) / self.price_resolution) * self.price_resolution
         side_key = "buy" if self._normalize_side(side) == "BUY" else "sell"
         self.price_levels[bucket][side_key] += float(volume)
+        # M1: track direct vs inferred
+        if is_direct:
+            if side_key == "buy":
+                self.price_levels[bucket]["direct_buy"] += float(volume)
+            else:
+                self.price_levels[bucket]["direct_sell"] += float(volume)
 
     @staticmethod
     def _normalize_side(side: Any) -> str:
         s = str(side or "").strip().upper()
-        return "BUY" if s in ("BUY", "B", "BID", "1") else "SELL"
+        if s in ("BUY", "B", "BID", "1"):
+            return "BUY"
+        if s in ("SELL", "S", "ASK", "-1"):
+            return "SELL"
+        return "BUY"
 
     def build_footprint(self, tick_data: List[Dict]) -> FootprintMetrics:
         self.price_levels.clear()
         for tick in tick_data:
+            # M1: use is_direct flag from BookMap if present
+            is_direct = bool(tick.get("is_direct", tick.get("is_bookmap_direct", False)))
+            side = tick.get("side", "BUY")
+            # If side empty, try operation field
+            if not side:
+                op = str(tick.get("operation", "")).upper()
+                if op in ("BUY", "B"):
+                    side = "BUY"
+                elif op in ("SELL", "S"):
+                    side = "SELL"
             self.add_trade(tick.get("price", 0.0),
                            tick.get("volume", 0.0),
-                           tick.get("side", "BUY"))
+                           side,
+                           is_direct=is_direct)
 
         buying_levels: List[float] = []
         selling_levels: List[float] = []
@@ -822,7 +905,14 @@ class FootprintBuilder:
 
 
 class Level3OrderBookAnalyzer:
-    """Real-time order-book reconstruction from individual order events (L3)."""
+    """Real-time order-book reconstruction from individual order events (L3).
+
+    v5.3 MEDIUM M1+M3:
+    - M1: Aggressive buys/sells from tick_data (BookMap direct side) when enabled
+    - M3: Iceberg detection via order_id refill tracking (same id, same price 3x)
+    - M3: Spoof detection via large add -> cancel <2s
+    - Tracks iceberg_levels and spoof_levels for signal votes
+    """
 
     def __init__(self, large_size: float = 100.0):
         self.order_book: Dict[str, List] = {"bids": [], "asks": []}
@@ -838,17 +928,32 @@ class Level3OrderBookAnalyzer:
         self.sell_streak = 0
         self.large_order_events = 0
         self.iceberg_events = 0
+        self.spoof_events = 0
         self.large_size = large_size
         self._last_aggressor: Optional[str] = None
         self._last_new_key: Optional[tuple] = None
+        # M3 trackers
+        self._order_map: Dict[str, Dict] = {}  # order_id -> {price,size,side,add_ts,refills,total_vol}
+        self._iceberg_levels: Dict[float, int] = defaultdict(int)
+        self._spoof_levels: Dict[float, int] = defaultdict(int)
+        self._recent_adds: Dict[str, float] = {}  # order_id -> add timestamp
+        # Config thresholds
+        try:
+            self._iceberg_min_refills = int(getattr(config, "ICEBERG_MIN_REFILLS", 3))
+            self._iceberg_tol = float(getattr(config, "ICEBERG_SAME_PRICE_TOL", 0.10))
+            self._spoof_cancel_sec = float(getattr(config, "SPOOF_CANCEL_SECONDS", 2.0))
+            self._spoof_size_thr = float(getattr(config, "SPOOF_SIZE_THRESHOLD", 100.0))
+        except:
+            self._iceberg_min_refills = 3
+            self._iceberg_tol = 0.10
+            self._spoof_cancel_sec = 2.0
+            self._spoof_size_thr = 100.0
 
     # -- OFI accounting --------------------------------------------------------
     def _ofi_add(self, side: str, size: float) -> None:
-        """Resting liquidity ADDED: bid -> +OFI, ask -> -OFI."""
         self.ofi += size if side in ("bid", "bids") else -size
 
     def _ofi_remove(self, side: str, size: float) -> None:
-        """Resting liquidity REMOVED: bid -> -OFI, ask -> +OFI."""
         self.ofi += -size if side in ("bid", "bids") else size
 
     @staticmethod
@@ -856,45 +961,180 @@ class Level3OrderBookAnalyzer:
         s = str(side or "").upper()
         return "bids" if s in ("BUY", "BID", "B") else "asks"
 
+    def _parse_event_time(self, event: Dict) -> float:
+        """Extract timestamp as float seconds, fallback to now."""
+        try:
+            ts_raw = event.get("timestamp") or event.get("time")
+            if ts_raw:
+                dt = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                return dt.timestamp()
+        except:
+            pass
+        return time.time()
+
+    # -- M1: ingest tick as aggressive flow ----------------------------------
+    def add_tick_as_aggressive(self, price: float, volume: float, side: str):
+        """M1: When BookMap gives direct Buy/Sell, count as aggressive market order."""
+        try:
+            side_u = str(side).upper()
+            is_buy = side_u in ("BUY", "B", "BID")
+            self.market_orders += 1
+            if is_buy:
+                self.aggressive_buys += 1
+                self.aggressive_buy_volume += float(volume)
+            else:
+                self.aggressive_sells += 1
+                self.aggressive_sell_volume += float(volume)
+            agg = "BUY" if is_buy else "SELL"
+            if self._last_aggressor == agg:
+                if is_buy:
+                    self.buy_streak += 1
+                else:
+                    self.sell_streak += 1
+            else:
+                self.buy_streak = 1 if is_buy else 0
+                self.sell_streak = 0 if is_buy else 1
+            self._last_aggressor = agg
+        except:
+            pass
+
     # -- event processing ------------------------------------------------------
     def process_order_event(self, event: Dict) -> None:
         """Apply a NEW / CANCEL / MODIFY / FILL event to the book.
 
-        Convention: `side` is the order's direction. For FILL events with
-        `is_market_order=True`, `side` is the *taker* (aggressive) side --
-        a market BUY lifts resting ASKs, a market SELL hits resting BIDs.
+        v5.2: BookMap MBO types BID_NEW, ASK_NEW, etc.
+        v5.3 M3: order_id tracking for iceberg/spoof
         """
-        event_type = str(event.get("type", "")).upper()
+        raw_type = str(event.get("type", "")).upper()
         side = str(event.get("side", "")).upper()
         price = float(event.get("price", 0.0) or 0.0)
         size = float(event.get("size", 0.0) or 0.0)
+        order_id = str(event.get("order_id") or event.get("id") or event.get("orderId") or "").strip()
+        event_ts = self._parse_event_time(event)
 
-        is_buy = side in ("BUY", "BID", "B")
-        book_side = "bids" if is_buy else "asks"
+        # v5.2: Handle BookMap MBO types
+        if "BID_NEW" in raw_type:
+            event_type = "NEW"
+            is_buy = True
+            book_side = "bids"
+        elif "ASK_NEW" in raw_type:
+            event_type = "NEW"
+            is_buy = False
+            book_side = "asks"
+        elif "BID" in raw_type and "CANCEL" in raw_type:
+            event_type = "CANCEL"
+            is_buy = True
+            book_side = "bids"
+        elif "ASK" in raw_type and "CANCEL" in raw_type:
+            event_type = "CANCEL"
+            is_buy = False
+            book_side = "asks"
+        elif raw_type in ("CANCEL", "CANCELED", "DELETE"):
+            event_type = raw_type
+            is_buy = side in ("BUY", "BID", "B")
+            book_side = "bids" if is_buy else "asks"
+            if price == 0 and size == 0 and not order_id:
+                self.order_events.append(event)
+                return
+        elif "REPLACE" in raw_type or "MODIFY" in raw_type or "UPDATE" in raw_type:
+            event_type = "MODIFY"
+            if "BID" in raw_type:
+                is_buy = True
+            elif "ASK" in raw_type:
+                is_buy = False
+            else:
+                is_buy = side in ("BUY", "BID", "B")
+            book_side = "bids" if is_buy else "asks"
+        else:
+            event_type = raw_type
+            is_buy = side in ("BUY", "BID", "B")
+            book_side = "bids" if is_buy else "asks"
 
-        if size >= self.large_size:
+        if size >= self.large_size and size > 0:
             self.large_order_events += 1
 
-        if event_type in ("NEW", "ADD", "OPEN"):
+        # ---- M3: order_id tracking for iceberg & spoof ----------------------
+        # v5.3 fix: skip invalid order_ids (-1, 0, empty) that come from ticks.csv Mbo fallback
+        # These cause 929 fake icebergs when all events share id -1
+        INVALID_IDS = {"-1", "0", "", "None", "null"}
+        if order_id and order_id not in INVALID_IDS:
+            if event_type in ("NEW", "ADD", "OPEN"):
+                # Check if this order_id existed before at same price -> refill (iceberg)
+                existing = self._order_map.get(order_id)
+                if existing:
+                    # Same price within tolerance -> refill
+                    if abs(existing["price"] - price) <= self._iceberg_tol:
+                        existing["refills"] += 1
+                        existing["total_vol"] += size
+                        existing["last_seen"] = event_ts
+                        existing["price"] = price
+                        existing["size"] = size
+                        # Only count first time threshold met, not every refill (prevents 929 spam)
+                        if existing["refills"] == self._iceberg_min_refills:
+                            self.iceberg_events += 1
+                            self._iceberg_levels[price] += 1
+                            try:
+                                logger.debug(f"ICEBERG detected order {order_id} price {price:.2f} refills {existing['refills']} total {existing['total_vol']:.0f}")
+                            except:
+                                pass
+                    else:
+                        # Price changed, reset
+                        self._order_map[order_id] = {"price": price, "size": size, "side": book_side, "add_ts": event_ts, "last_seen": event_ts, "refills": 0, "total_vol": size}
+                else:
+                    self._order_map[order_id] = {"price": price, "size": size, "side": book_side, "add_ts": event_ts, "last_seen": event_ts, "refills": 0, "total_vol": size}
+                self._recent_adds[order_id] = event_ts
+
+            elif event_type in ("CANCEL", "CANCELED", "DELETE"):
+                existing = self._order_map.get(order_id)
+                if existing:
+                    # Spoof check: large order canceled quickly
+                    age = event_ts - existing.get("add_ts", event_ts)
+                    if age <= self._spoof_cancel_sec and existing.get("size", 0) >= self._spoof_size_thr:
+                        self.spoof_events += 1
+                        self._spoof_levels[existing["price"]] += 1
+                        try:
+                            logger.debug(f"SPOOF detected order {order_id} price {existing['price']:.2f} size {existing['size']:.0f} age {age:.2f}s")
+                        except:
+                            pass
+                    # Keep for iceberg history but mark canceled
+                    existing["canceled_ts"] = event_ts
+                # Also check recent adds without full map (fallback)
+                elif order_id in self._recent_adds:
+                    add_t = self._recent_adds.get(order_id, event_ts)
+                    if (event_ts - add_t) <= self._spoof_cancel_sec and size >= self._spoof_size_thr:
+                        self.spoof_events += 1
+                        if price > 0:
+                            self._spoof_levels[price] += 1
+
+        # ---- Original book logic --------------------------------------------
+        if event_type in ("NEW", "ADD", "OPEN", "BID_NEW", "ASK_NEW"):
             self.limit_orders += 1
-            self._ofi_add(book_side, size)
+            if size > 0:
+                self._ofi_add(book_side, size)
             self.order_book[book_side].append((price, size))
-            # iceberg detection: repeated NEW at same price/size
             key = (book_side, price, size)
             if self._last_new_key == key:
+                # Simple same price/size repeat also counts as iceberg (legacy)
                 self.iceberg_events += 1
+                self._iceberg_levels[price] += 1
             self._last_new_key = key
 
         elif event_type in ("CANCEL", "CANCELED", "DELETE"):
-            self._ofi_remove(book_side, size)
+            if size > 0:
+                self._ofi_remove(book_side, size)
             self._remove_from_book(book_side, price, size)
 
         elif event_type in ("MODIFY", "MODIFIED", "REPLACE", "UPDATE"):
             old_size = float(event.get("old_size", 0.0) or 0.0)
-            self._ofi_remove(book_side, old_size)
-            self._ofi_add(book_side, size)
+            if old_size > 0:
+                self._ofi_remove(book_side, old_size)
+            if size > 0:
+                self._ofi_add(book_side, size)
             self._remove_from_book(book_side, price, old_size)
-            self.order_book[book_side].append((price, size))
+            if size > 0:
+                self.order_book[book_side].append((price, size))
 
         elif event_type in ("FILL", "TRADE", "EXECUTED", "MATCH"):
             if bool(event.get("is_market_order", False)):
@@ -902,14 +1142,13 @@ class Level3OrderBookAnalyzer:
                 if is_buy:
                     self.aggressive_buys += 1
                     self.aggressive_buy_volume += size
-                    self._ofi_remove("asks", size)      # lifted resting asks
+                    self._ofi_remove("asks", size)
                     self._remove_from_book("asks", price, size)
                 else:
                     self.aggressive_sells += 1
                     self.aggressive_sell_volume += size
-                    self._ofi_remove("bids", size)      # hit resting bids
+                    self._ofi_remove("bids", size)
                     self._remove_from_book("bids", price, size)
-                # aggressor streak tracking
                 agg = "BUY" if is_buy else "SELL"
                 if self._last_aggressor == agg:
                     if is_buy:
@@ -921,8 +1160,8 @@ class Level3OrderBookAnalyzer:
                     self.sell_streak = 0 if is_buy else 1
                 self._last_aggressor = agg
             else:
-                # resting limit order filled on its own side
-                self._ofi_remove(book_side, size)
+                if size > 0:
+                    self._ofi_remove(book_side, size)
                 self._remove_from_book(book_side, price, size)
 
         self.order_events.append(event)
@@ -950,6 +1189,46 @@ class Level3OrderBookAnalyzer:
         total = bid_sum + ask_sum
         return (bid_sum - ask_sum) / total if total > 0 else 0.0
 
+    def estimate_queue_position(self, price: float, side: str, order_size: float = 1.0) -> dict:
+        """L3 Queue Position Model: estimate queue position for limit order using MBO order_ids ahead.
+        Returns dict with queue_ahead, queue_total, estimated_fill_prob.
+        """
+        try:
+            book_side = "bids" if str(side).upper() in ("BUY","BID","B") else "asks"
+            levels = self.order_book.get(book_side, [])
+            # Find orders at same price level (within tolerance)
+            tol = float(getattr(__import__('config'), 'ICEBERG_SAME_PRICE_TOL', 0.10))
+            same_price_orders = [(p,s) for p,s in levels if abs(p-price) <= tol]
+            total_at_price = sum(s for _,s in same_price_orders)
+            # Count how many orders ahead (FIFO assumption: earlier order_ids ahead)
+            # Use _order_map to count orders at this price that were added before now
+            ahead_vol = 0.0
+            ahead_count = 0
+            for oid, info in self._order_map.items():
+                if info.get("side") != book_side:
+                    continue
+                if abs(info.get("price",0)-price) <= tol:
+                    ahead_vol += info.get("size",0)
+                    ahead_count += 1
+            # Estimate fill probability: if queue ahead large vs our size, low prob
+            if total_at_price <= 0:
+                fill_prob = 1.0
+            else:
+                # Simple model: prob = 1 - (ahead_vol / (ahead_vol + our_size*2))
+                # More ahead = lower prob
+                fill_prob = max(0.05, min(0.95, 1.0 - (ahead_vol / (ahead_vol + order_size*3 + 1))))
+            return {
+                "price": price,
+                "side": side,
+                "queue_ahead_vol": round(ahead_vol,2),
+                "queue_total_vol": round(total_at_price,2),
+                "queue_ahead_count": ahead_count,
+                "fill_prob": round(fill_prob,3),
+                "recommendation": "PLACE" if fill_prob > float(__import__('config').QUEUE_POS_THRESHOLD if hasattr(__import__('config'),'QUEUE_POS_THRESHOLD') else 0.7) else "WAIT"
+            }
+        except Exception as e:
+            return {"error": str(e), "fill_prob": 0.5}
+
     def analyze(self) -> Level3Events:
         aggr_vol = self.aggressive_buy_volume + self.aggressive_sell_volume
         return Level3Events(
@@ -970,6 +1249,10 @@ class Level3OrderBookAnalyzer:
             sell_streak=self.sell_streak,
             large_order_events=self.large_order_events,
             iceberg_events=self.iceberg_events,
+            spoof_events=self.spoof_events,
+            iceberg_levels=dict(self._iceberg_levels),
+            spoof_levels=dict(self._spoof_levels),
+            absorption_events=0,
             timestamp=datetime.now(timezone.utc),
         )
 
@@ -1588,6 +1871,38 @@ class SignalEngine:
                          % news.minutes_to_next_event)
             return 0.0, "NEUTRAL", 0.0, notes
 
+        # ---- 0a) v5.2 REGIME-ADAPTIVE WEIGHTS ---------------------------------
+        # At banks we never use fixed weights — regime scales them
+        trend_mult = 1.0
+        vwap_mult = 1.0
+        mean_rev_mult = 1.0
+        try:
+            regime_adaptive = bool(getattr(config, "REGIME_ADAPTIVE", True))
+            if regime_adaptive:
+                adx_thr = float(getattr(config, "TREND_ADX_THRESHOLD", 25.0))
+                vol_mult = float(getattr(config, "VOLATILITY_HIGH_MULT", 1.5))
+                range_vwap_w = float(getattr(config, "RANGE_VWAP_WEIGHT", 2.0))
+
+                # Detect high volatility
+                atr = float(volatility.atr or 0.0)
+                vol_rank = float(getattr(volatility, "volatility_rank", 0.0) or 0.0)
+                is_high_vol = vol_rank > 0.6 or (volatility.atr_percent > 0.08)
+
+                if regime == "TREND" and trend.adx >= adx_thr:
+                    trend_mult = 2.0
+                    mean_rev_mult = 0.5
+                    notes.append(f"REGIME TREND ADX {trend.adx:.1f} >= {adx_thr} -> trend weight 2x, mean-reversion 0.5x")
+                elif regime == "RANGE" or trend.adx < 20:
+                    vwap_mult = range_vwap_w
+                    trend_mult = 0.5
+                    notes.append(f"REGIME RANGE ADX {trend.adx:.1f} <20 -> VWAP/POC weight {range_vwap_w}x, trend 0.5x")
+
+                if is_high_vol:
+                    mean_rev_mult *= 0.6
+                    notes.append(f"HIGH VOL rank {vol_rank:.2f} ATR {atr:.2f} ({volatility.atr_percent:.3f}%) -> fade weight 0.3x")
+        except Exception as e:
+            notes.append(f"regime adaptive error: {e}")
+
         # ---- 0b) multi-timeframe confirmation (H1 -> M15 -> M5 vs M1) --------
         # Each higher timeframe votes WITH or AGAINST the M1 signal, weighted by
         # its importance (H1 counts most). Stacked agreement = strong signal;
@@ -1607,12 +1922,13 @@ class SignalEngine:
             notes.append(f"MTF {summary}")
 
         # ---- 1) Trend / momentum ---------------------------------------------
+        # v5.2 regime adaptive: trend_mult scales trend votes
         if trend.trend_direction == "UP":
-            votes.append((+1.0, float(getattr(config, "SIGNAL_W_TREND", 0.5))
-                         + 0.5 * (trend.trend_strength / 100.0)))
+            w = (float(getattr(config, "SIGNAL_W_TREND", 0.5)) + 0.5 * (trend.trend_strength / 100.0)) * trend_mult
+            votes.append((+1.0, w))
         elif trend.trend_direction == "DOWN":
-            votes.append((-1.0, float(getattr(config, "SIGNAL_W_TREND", 0.5))
-                         + 0.5 * (trend.trend_strength / 100.0)))
+            w = (float(getattr(config, "SIGNAL_W_TREND", 0.5)) + 0.5 * (trend.trend_strength / 100.0)) * trend_mult
+            votes.append((-1.0, w))
         else:
             notes.append("trend neutral")
 
@@ -1659,6 +1975,7 @@ class SignalEngine:
                    float(getattr(config, "SIGNAL_W_FOOTPRINT", 0.7))))
 
         # ---- 5) LEVEL 3 order events -----------------------------------------
+        # v5.2: Handle BookMap MBO types + whale detection
         votes.append((np.clip(level3.order_book_imbalance * 2.0, -1.0, 1.0),
                    float(getattr(config, "SIGNAL_W_L3_IMB", 0.6))))
         aggr_vol = level3.aggressive_buy_volume + level3.aggressive_sell_volume
@@ -1673,6 +1990,113 @@ class SignalEngine:
         if level3.sell_streak >= 3:
             votes.append((-1.0, 0.3))
 
+        # v5.2 C1: L3 WHALE WALL vote — institutional key level
+        # Large orders >=100 lots within 0.5% of price are whale walls
+        try:
+            whale_thr = float(getattr(config, "L3_WHALE_THRESHOLD", 100.0))
+            whale_prox = float(getattr(config, "L3_WHALE_PROXIMITY_PCT", 0.5)) / 100.0
+            whale_w = float(getattr(config, "SIGNAL_W_L3_WHALE", 1.5))
+            # order_book contains (price, size) tuples
+            whale_bids = []
+            whale_asks = []
+            for p, s in (level3.order_book.get("bids", []) or []):
+                if s >= whale_thr and price > 0 and abs(p - price)/price <= whale_prox:
+                    whale_bids.append((p, s))
+            for p, s in (level3.order_book.get("asks", []) or []):
+                if s >= whale_thr and price > 0 and abs(p - price)/price <= whale_prox:
+                    whale_asks.append((p, s))
+            # Also check order_events for recent whales
+            for ev in (level3.order_events[-500:] or []):
+                try:
+                    ev_price = float(ev.get("price", 0) or 0)
+                    ev_size = float(ev.get("size", 0) or 0)
+                    ev_side = str(ev.get("side", "")).upper()
+                    ev_type = str(ev.get("type", "")).upper()
+                    if ev_size >= whale_thr and ev_price > 0 and abs(ev_price-price)/price <= whale_prox:
+                        if "BID" in ev_type or ev_side in ("BUY","BID","B"):
+                            if not any(abs(ev_price-p)<0.1 for p,_ in whale_bids):
+                                whale_bids.append((ev_price, ev_size))
+                        elif "ASK" in ev_type or ev_side in ("SELL","ASK","S"):
+                            if not any(abs(ev_price-p)<0.1 for p,_ in whale_asks):
+                                whale_asks.append((ev_price, ev_size))
+                except:
+                    continue
+
+            total_whale_bid = sum(s for _, s in whale_bids)
+            total_whale_ask = sum(s for _, s in whale_asks)
+            if total_whale_bid > 0 or total_whale_ask > 0:
+                if total_whale_bid > total_whale_ask * 1.2:
+                    votes.append((+1.0, whale_w))
+                    notes.append(f"L3 whale support {len(whale_bids)} walls {total_whale_bid:.0f} lots near {whale_bids[0][0]:.1f} -> BUY")
+                elif total_whale_ask > total_whale_bid * 1.2:
+                    votes.append((-1.0, whale_w))
+                    notes.append(f"L3 whale resistance {len(whale_asks)} walls {total_whale_ask:.0f} lots near {whale_asks[0][0]:.1f} -> SELL")
+                else:
+                    # balanced whales -> no vote but note
+                    notes.append(f"L3 whales balanced bid {total_whale_bid:.0f} ask {total_whale_ask:.0f}")
+
+            # Large order events vote (institutional)
+            if level3.large_order_events >= 5:
+                # If large events predominantly bid side (OFI positive) -> bullish
+                if level3.ofi > 0:
+                    votes.append((+1.0, 0.8))
+                    notes.append(f"L3 large orders {level3.large_order_events} OFI +{level3.ofi:.0f} -> BUY")
+                elif level3.ofi < 0:
+                    votes.append((-1.0, 0.8))
+                    notes.append(f"L3 large orders {level3.large_order_events} OFI {level3.ofi:.0f} -> SELL")
+
+            # Iceberg detection vote (M1 + M3 enhanced)
+            iceberg_w = float(getattr(config, "SIGNAL_W_ICEBERG", 1.0))
+            if level3.iceberg_events >= 2:
+                if level3.order_book_imbalance > 0.2:
+                    votes.append((+1.0, iceberg_w))
+                    notes.append(f"L3 icebergs {level3.iceberg_events} imb +{level3.order_book_imbalance:.2f} -> BUY (M3)")
+                elif level3.order_book_imbalance < -0.2:
+                    votes.append((-1.0, iceberg_w))
+                    notes.append(f"L3 icebergs {level3.iceberg_events} imb {level3.order_book_imbalance:.2f} -> SELL (M3)")
+                else:
+                    # Even without imbalance, iceberg presence = support/resistance
+                    if level3.iceberg_levels:
+                        # Find dominant iceberg price
+                        try:
+                            dom_price = max(level3.iceberg_levels, key=lambda k: level3.iceberg_levels[k])
+                            if dom_price < price:
+                                votes.append((+1.0, iceberg_w * 0.6))
+                                notes.append(f"ICEBERG_SUPPORT {level3.iceberg_events} @ {dom_price:.1f} -> BUY")
+                            else:
+                                votes.append((-1.0, iceberg_w * 0.6))
+                                notes.append(f"ICEBERG_RESISTANCE {level3.iceberg_events} @ {dom_price:.1f} -> SELL")
+                        except:
+                            pass
+
+            # M3 Spoof detection vote
+            try:
+                spoof_w = float(getattr(config, "SIGNAL_W_SPOOF", 0.8))
+                if level3.spoof_events >= 1:
+                    # Spoof = fake wall, opposite signal (spoof bid -> bearish, spoof ask -> bullish)
+                    # If spoof on bid side (fake support) -> price likely to fall when removed -> SELL
+                    # If spoof on ask side (fake resistance) -> price likely to rise -> BUY
+                    # We infer from spoof_levels vs price
+                    spoof_bid = sum(1 for p in (level3.spoof_levels or {}) if p < price)
+                    spoof_ask = sum(1 for p in (level3.spoof_levels or {}) if p > price)
+                    if spoof_bid > spoof_ask:
+                        # More spoof bids = fake support removed -> bearish? Actually spoof bids pulled = price drops
+                        votes.append((-1.0, spoof_w))
+                        notes.append(f"SPOOF_RESISTANCE fake bids {spoof_bid} -> SELL (M3)")
+                    elif spoof_ask > spoof_bid:
+                        votes.append((+1.0, spoof_w))
+                        notes.append(f"SPOOF_SUPPORT fake asks {spoof_ask} -> BUY (M3)")
+                    else:
+                        # Balanced spoof, use imbalance
+                        if level3.order_book_imbalance > 0.1:
+                            votes.append((-1.0, spoof_w * 0.5))
+                            notes.append(f"SPOOF balanced but bid heavy -> fade -> SELL")
+            except Exception as se:
+                notes.append(f"spoof vote error: {se}")
+
+        except Exception as e:
+            notes.append(f"L3 whale calc error: {e}")
+
         # ---- 6) CVD-price divergence -----------------------------------------
         if divergence > 0:
             votes.append((+1.0, float(getattr(config, "SIGNAL_W_DIVERGENCE", 1.2))))
@@ -1682,19 +2106,20 @@ class SignalEngine:
             notes.append("bearish CVD divergence (price up, selling up)")
 
         # ---- 7) Volume profile (regime-aware) --------------------------------
+        # v5.2 regime adaptive: vwap_mult and mean_rev_mult
         if volume_profile.vwap:
             votes.append((np.sign(price - volume_profile.vwap),
-                   float(getattr(config, "SIGNAL_W_VWAP", 0.6))))
+                   float(getattr(config, "SIGNAL_W_VWAP", 0.6)) * vwap_mult))
         if volume_profile.poc:
-            votes.append((np.sign(price - volume_profile.poc), 0.4))
+            votes.append((np.sign(price - volume_profile.poc), 0.4 * vwap_mult))
         # VWAP z-score mean-reversion: only fade extremes in a RANGE regime
         z = volume_profile.vwap_zscore
         if regime == "RANGE" and abs(z) > 1.5:
             # v3: compressed volatility strengthens the fade; an expanding
             # regime (high volatility_rank) weakens it -- breakouts run.
-            fade_w = 0.8 if float(volatility.volatility_rank or 0.0) < 0.5 else 0.4
+            fade_w = (0.8 if float(volatility.volatility_rank or 0.0) < 0.5 else 0.4) * mean_rev_mult
             votes.append((-np.sign(z) * min(abs(z) / 2.0, 1.0), fade_w))
-            notes.append("VWAP z-score %.1f -> mean reversion fade" % z)
+            notes.append("VWAP z-score %.1f -> mean reversion fade (adaptive %.2f)" % (z, fade_w))
 
         # ---- 7b) order blocks / supply-demand zones --------------------------
         # Price near a demand zone -> likely bounce (bullish). Price near a
@@ -1756,37 +2181,75 @@ class SignalEngine:
 
         # ---- 8) Macro (CHANGE-based: gold trades the DIRECTION of the macro
         # driver, not its level -- see docs/GOLD_MARKET_DRIVERS.md) -----------
-        # Rising yields raise gold's opportunity cost -> bearish (~2% relative
-        # 5-session move in the 10Y = full-strength vote).
+        # v5.3 M4: Boosted weight during HIGH, DXY veto logic
+        try:
+            macro_high_w = float(getattr(config, "SIGNAL_W_MACRO_HIGH", 1.0))
+            news_high_w = float(getattr(config, "NEWS_SENTIMENT_HIGH_WEIGHT", 1.0))
+            news_low_w = float(getattr(config, "NEWS_SENTIMENT_LOW_WEIGHT", 0.4))
+        except:
+            macro_high_w = 1.0
+            news_high_w = 1.0
+            news_low_w = 0.4
+
+        # Rising yields raise gold's opportunity cost -> bearish
         y_chg = macro.yield_change_5d
         if abs(y_chg) > 1e-6:
-            v = (-np.clip(y_chg / 0.02, -1.0, 1.0), 0.8)
+            # M4: increase weight to 1.0 during HIGH events
+            w_yield = macro_high_w if news.impact_level == "HIGH" else 0.8
+            v = (-np.clip(y_chg / 0.02, -1.0, 1.0), w_yield)
             votes.append(v); macro_pairs.append(v)
-            notes.append("10Y %s %.2f%%/5d" %
-                         ("rising" if y_chg > 0 else "falling", abs(y_chg) * 100.0))
-        # Rising dollar pressures USD-priced gold -> bearish (~1% = full vote).
+            notes.append("10Y %s %.2f%%/5d (w %.1f)" %
+                         ("rising" if y_chg > 0 else "falling", abs(y_chg) * 100.0, w_yield))
+        # Rising dollar pressures USD-priced gold -> bearish
         d_chg = macro.usd_change_5d
         if abs(d_chg) > 1e-6:
-            v = (-np.clip(d_chg / 0.01, -1.0, 1.0), 0.6)
+            w_dxy = macro_high_w if news.impact_level == "HIGH" else 0.6
+            v = (-np.clip(d_chg / 0.01, -1.0, 1.0), w_dxy)
             votes.append(v); macro_pairs.append(v)
-            notes.append("DXY %s %.2f%%/5d" %
-                         ("rising" if d_chg > 0 else "falling", abs(d_chg) * 100.0))
+            notes.append("DXY %s %.2f%%/5d (w %.1f)" %
+                         ("rising" if d_chg > 0 else "falling", abs(d_chg) * 100.0, w_dxy))
         # VIX stress spike vs its own 20-session median -> safe-haven bid.
         v_spk = macro.vix_spike
         if v_spk > 0.05:
-            v = (+np.clip(v_spk / 0.20, 0.0, 1.0), 0.4)
+            w_vix = macro_high_w if news.impact_level == "HIGH" else 0.4
+            v = (+np.clip(v_spk / 0.20, 0.0, 1.0), w_vix)
             votes.append(v); macro_pairs.append(v)
-            notes.append("VIX stress +%.0f%% vs 20d median" % (v_spk * 100.0))
+            notes.append("VIX stress +%.0f%% vs 20d median (w %.1f)" % (v_spk * 100.0, w_vix))
         if macro.risk_sentiment == "RISK_OFF":
-            v = (+1.0, 0.5)
+            w_risk = macro_high_w if news.impact_level == "HIGH" else 0.5
+            v = (+1.0, w_risk)
             votes.append(v); macro_pairs.append(v)
-            notes.append("risk-off -> safe haven bid")
+            notes.append(f"risk-off -> safe haven bid (w {w_risk})")
         elif macro.risk_sentiment == "RISK_ON":
             v = (-1.0, 0.4)
             votes.append(v); macro_pairs.append(v)
 
         # ---- 9) News sentiment ----------------------------------------------
-        votes.append((news.sentiment_score, 0.4))
+        # M4: weight 0.4 normally, 1.0 during HIGH impact
+        sentiment_w = news_high_w if news.impact_level == "HIGH" else news_low_w
+        votes.append((news.sentiment_score, sentiment_w))
+        if news.impact_level == "HIGH":
+            notes.append(f"HIGH impact sentiment {news.sentiment_score:+.2f} weight {sentiment_w} (boosted)")
+
+        # ---- 9b) M4 DXY_RISING_VETO ------------------------------------------
+        # Gold is DXY inverse: if DXY rising + correlation negative -> veto longs
+        try:
+            if bool(getattr(config, "DXY_VETO_ENABLED", True)):
+                dxy_thr = float(getattr(config, "DXY_RISING_THRESHOLD_PCT", 0.3)) / 100.0
+                corr_thr = float(getattr(config, "DXY_CORR_THRESHOLD", -0.15))
+                # DXY rising = positive 5d change
+                if d_chg > dxy_thr and macro.dxy_correlation < corr_thr:
+                    # DXY rising + negative corr = bearish for gold
+                    votes.append((-1.0, 0.9))
+                    notes.append(f"DXY_RISING_VETO: DXY +{d_chg*100:.2f}% 5d, corr {macro.dxy_correlation:.2f} -> SELL bias")
+                    # If signal would be BUY, cap it
+                    # (handled later via opposition, but note it)
+                # Also veto longs explicitly if strong DXY rise
+                if d_chg > dxy_thr * 1.5 and macro.dxy_correlation < -0.20:
+                    # Store for later capping
+                    notes.append(f"DXY strong rise +{d_chg*100:.2f}% corr {macro.dxy_correlation:.2f} -> BUY veto risk")
+        except Exception as e:
+            notes.append(f"DXY veto error: {e}")
 
         # ---- weighted composite ----------------------------------------------
         total_weight = sum(w for _, w in votes) or 1.0
@@ -2119,6 +2582,65 @@ def _save_book_state(bids: Dict[float, float], asks: Dict[float, float]) -> None
         pass
 
 
+def _cross_market_check(current_cvd: float, current_price: float) -> dict:
+    """L1 Cross-Market Confirmation (GC, SI, DXY).
+    Reads GC bridge file if configured, computes CVD direction alignment.
+    Returns dict with boost and notes.
+    """
+    try:
+        import config as cfg
+        if not getattr(cfg, "CROSS_MARKET_ENABLED", False):
+            return {"boost": 0.0, "notes": []}
+        gc_file = getattr(cfg, "GC_BRIDGE_FILE", "") or getattr(cfg, "CROSS_MARKET_GC_FILE", "")
+        si_file = getattr(cfg, "SI_BRIDGE_FILE", "")
+        notes = []
+        boost = 0.0
+        # GC confirmation
+        if gc_file:
+            try:
+                from pathlib import Path
+                p = Path(gc_file)
+                if p.exists():
+                    # Read last 500 lines quickly
+                    import csv
+                    # Handle gz?
+                    if str(p).lower().endswith(".gz"):
+                        import gzip
+                        fh = gzip.open(p, "rt", encoding="utf-8", errors="replace")
+                    else:
+                        fh = open(p, "r", encoding="utf-8", errors="replace")
+                    with fh:
+                        lines = fh.readlines()[-1000:]
+                    buys = sells = 0
+                    for line in lines:
+                        if not line.strip() or line.startswith("time"):
+                            continue
+                        try:
+                            row = next(csv.reader([line]))
+                            if len(row) < 7:
+                                continue
+                            side = str(row[3] or "").upper()
+                            vol = float(row[2] or 0)
+                            if side in ("BUY","B","1"):
+                                buys += vol
+                            elif side in ("SELL","S","-1"):
+                                sells += vol
+                        except:
+                            continue
+                    gc_cvd = buys - sells
+                    # Same direction?
+                    if (gc_cvd > 0 and current_cvd > 0) or (gc_cvd < 0 and current_cvd < 0):
+                        boost += float(getattr(cfg, "CROSS_MARKET_CONF_BOOST", 15.0))
+                        notes.append(f"CROSS-MARKET GC CVD {gc_cvd:+.0f} aligns with MGC {current_cvd:+.0f} -> +{boost:.0f}% conf")
+                    else:
+                        notes.append(f"CROSS-MARKET GC CVD {gc_cvd:+.0f} vs MGC {current_cvd:+.0f} divergence")
+            except Exception as e:
+                notes.append(f"cross-market GC error: {e}")
+        return {"boost": boost, "notes": notes}
+    except Exception as e:
+        return {"boost": 0.0, "notes": [f"cross-market error {e}"]}
+
+
 def _detect_divergence(close: np.ndarray, cvd: float, lookback: int = 15) -> float:
     """CVD-price divergence: +1 bullish, -1 bearish, 0 none."""
     close = np.asarray(close, dtype=float)
@@ -2247,12 +2769,33 @@ def analyze_market(market_data: Dict[str, Any],
     footprint = FootprintBuilder().build_footprint(tick_data)
 
     # ---- level 3 -------------------------------------------------------------
-    l3 = Level3OrderBookAnalyzer()
+    # v5.3 M1+M3: L3 analyzer now ingests tick_data as aggressive flow + order_id tracking
+    l3 = Level3OrderBookAnalyzer(large_size=float(getattr(config, "L3_WHALE_THRESHOLD", 100.0)))
     for ev in market_data.get("order_events") or []:
         l3.process_order_event(ev)
     if book:
         l3.update_order_book(book.get("bids", []), book.get("asks", []))
+
+    # M1: Feed tick_data direct side into L3 aggressive counters (BookMap direct Buy/Sell)
+    try:
+        aggressive_from_ticks = bool(getattr(config, "AGGRESSIVE_FROM_TICKS", True))
+        if aggressive_from_ticks:
+            for t in tick_data[-5000:]:  # last 5k ticks for performance
+                side = t.get("side")
+                if side:
+                    l3.add_tick_as_aggressive(float(t.get("price", 0) or 0), float(t.get("volume", 0) or 0), side)
+    except Exception as e:
+        notes.append(f"L3 tick ingest error: {e}")
+
     level3 = l3.analyze()
+
+    # M1: If L2 absorption zero but L3 has wall hits, carry over
+    if level3.iceberg_events > 0:
+        notes.append(f"M3 Icebergs: {level3.iceberg_events} levels {len(level3.iceberg_levels)}")
+    if level3.spoof_events > 0:
+        notes.append(f"M3 Spoofs: {level3.spoof_events} levels {len(level3.spoof_levels)}")
+    if order_flow.absorption_events == 0 and level3.iceberg_events >= 2:
+        notes.append(f"M1 Footprint: absorption via icebergs {level3.iceberg_events}")
 
     # ---- volume profile ------------------------------------------------------
     vp = VolumeProfileAnalyzer().analyze(high, low, close, vol) if len(close) else \
@@ -2338,6 +2881,19 @@ def analyze_market(market_data: Dict[str, Any],
         recent_closes=(close[-8:] if len(close) else None),
         asia_range=asia_range or None)
     notes.extend(sig_notes)
+
+    # L1 Cross-Market Confirmation
+    try:
+        cm = _cross_market_check(order_flow.cvd, price)
+        if cm.get("boost", 0) > 0:
+            confidence = min(100.0, confidence + cm["boost"])
+            notes.extend(cm.get("notes", []))
+        else:
+            # Even without boost, log notes if present
+            if cm.get("notes"):
+                notes.extend(cm["notes"][:2])
+    except Exception as e:
+        notes.append(f"L1 cross-market error {e}")
 
     # v4.4: expose the macro backdrop (-1..+1) to the position manager
     # (macro-aware defense). Default 0.0 = no macro read = old behavior.

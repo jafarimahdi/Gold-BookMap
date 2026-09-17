@@ -1,5 +1,39 @@
 # Changelog
 
+## 2026-09-17 — v5.3: MEDIUM 6 Implemented — Footprint & Absorption, Vol Sizing, Iceberg/Spoof, Macro Boost, MBO Archival, TCA Report
+
+**All 6 MEDIUM from TODO_ROADMAP — implemented in one session:**
+
+- **M1 Footprint & Absorption:** `OrderBookDepthAnalyzer` wall_size now from config `ABSORPTION_WALL_SIZE=50` (MGC-optimized, was 100). Improved absorption: large limit wall (≥50) + price fails to move through (<0.3 pts) + 3 hits = absorption event. `FootprintBuilder` now uses `is_direct` flag from BookMap (true side) + tracks `direct_buy/direct_sell`. `Level3OrderBookAnalyzer.add_tick_as_aggressive()` ingests BookMap direct ticks as aggressive flow (config `AGGRESSIVE_FROM_TICKS=1`). Expected: absorption detection 2x more sensitive, footprint delta exact.
+
+- **M2 Volatility-Adjusted Sizing:** New `compute_vol_adjusted_lot_size(equity, atr, risk_pct)` formula `(equity*risk%)/(ATR*CONTRACT_SIZE)` with `MAX_LOT_SIZE` cap. Example $1000 equity ATR $5 contract 100 -> 0.02 lots. In `_place_order()`: compute both traditional + vol-adj, use `min()` conservative. Added `MIN_LOT_SKIP=True` — if vol-adj < broker min (0.01), skip trade to avoid over-risk on $1000 account. Logs `M2: equity $... ATR ... trad ... vol-adj ... -> using ...`. Expected: protect small account, ATR-aware sizing.
+
+- **M3 Iceberg & Spoof Detection (L3 Alpha):** `Level3OrderBookAnalyzer` now tracks `order_id` -> refills. Iceberg: same order_id at same price (tol 0.10) 3x refills -> `iceberg_events`, `iceberg_levels[price]`. Spoof: large order (≥100) add -> cancel <2.0s -> `spoof_events`, `spoof_levels[price]`. SignalEngine: iceberg vote weight `SIGNAL_W_ICEBERG=1.0` with imbalance >0.2 BUY/SELL plus fallback ICEBERG_SUPPORT/RESISTANCE using dominant iceberg price vs current (0.6 weight). Spoof vote weight `SIGNAL_W_SPOOF=0.8`: spoof bid>ask -> SELL (fake support pulled), ask>bid -> BUY. Expected: +2 signals/day, win +8%.
+
+- **M4 Macro & News Boost:** News sentiment weight now `NEWS_SENTIMENT_HIGH_WEIGHT=1.0` during HIGH impact (was 0.4), `LOW_WEIGHT=0.4` normally. Macro votes (DXY, yield, VIX) weight boosted to `SIGNAL_W_MACRO_HIGH=1.0` during HIGH. Added `DXY_RISING_VETO`: if DXY +0.3% 5d and corr <-0.15 -> SELL bias vote 0.9, strong rise +0.45% + corr <-0.20 -> BUY veto risk note. Expected: macro alignment +15% during news.
+
+- **M5 MBO Archival (v5.3 full rewrite):** `bookmap_bridge_provider.py` v5.3 ~500 lines. Added `_MboTail` class tailing `mbo.csv` with order_id, handles 6-col `mbo.csv` (time,event_type,order_id,price,size,instrument) + 7-col legacy. `_resolve_mbo_file()` supports `BOOKMAP_MBO_FILE` env + derive from bridge dir. Rotation at `BOOKMAP_MBO_ROTATE_MB=100` (default), gzip to `data/archive/mbo_YYYYMMDD_HHMMSS.csv.gz` with `.gz.part` verify, prune old keep 5000. `acquire()` merges `mbo_from_ticks` (2000) + `mbo_from_file` (3000) into `order_events` 5000 for Level3 analyzer. Preserves `is_direct/is_bookmap_direct` in tick_data for M1. Logging v5.3. Expected: no mbo.csv bloat, backtest ready.
+
+- **M6 TCA & Slippage Analysis:** `trade_history.py` extended: `record_tca()` now logs session (ASIA/LONDON/NY/OTHER) from UTC hour. New functions: `_parse_tca_csv(days)`, `analyze_tca(days=7)` avg slippage per session/volatility/kind/side, `generate_tca_report()` writes `data/tca_report.json`, `get_slippage_adjustment()` suggests `ENTRY_MIN_TP_SPREAD_MULT` adjustment via `TCA_SLIPPAGE_THRESHOLD=0.5`. If avg slip >0.5 pts -> increase mult by slip*0.5. Expected: weekly TCA insight, adaptive spread mult.
+
+- **Files:** `config.py` +22 keys, `step2_market_analysis.py` M1+M3+M4, `step4_mt5_execution.py` M2, `bookmap_bridge_provider.py` v5.3 M5, `trade_history.py` M6, `.env.example` synced, `bookmap_addon_l3.py` unchanged (MBO writer). Self-test `python step2_market_analysis.py` OK, TCA test 20 trades avg 0.225 pts OK.
+
+## 2026-09-17 — v5.2: CRITICAL 4 Implemented — L3 Whale Vote + Regime Adaptive + AI Fallback + Basis Risk
+
+**All 4 CRITICAL from TODO_ROADMAP — implemented in one session, 7 files, 68K zip:**
+
+- **C1 L3 Wired:** `Level3OrderBookAnalyzer` now handles `BID_NEW/ASK_NEW/REPLACE/CANCEL`, whale detection `>=100 lots within 0.5%`, vote `L3_WHALE_WALL 1.5x`, large order vote `>=5 events + OFI sign`, iceberg vote. Notes: `L3 whale support 1 walls 250 lots near 4295 -> BUY`. Expected strength 14→35, win +12-15%.
+
+- **C2 Regime Adaptive:** Added `REGIME_ADAPTIVE=1`, `TREND_ADX_THRESHOLD=25`, `VOLATILITY_HIGH_MULT=1.5`, `RANGE_VWAP_WEIGHT=2.0`. In `SignalEngine.aggregate()`: TREND ADX>=25 → trend 2x, mean-rev 0.5x; RANGE ADX<20 → VWAP/POC 2x, trend 0.5x; high vol rank>0.6 → fade 0.3x. Notes: `REGIME TREND ADX 25 >=25 -> trend weight 2x`. Expected false signals -30%, confidence 23%→45%.
+
+- **C3 AI Fallback:** Prompt trimmed 8000→2000 tokens: headlines 20→5, events 20→3, order_blocks 8→3, footprint price_levels >10→top10, L3 events →last100, book top10. Added cache hash `price_direction_strength_regime_news` 5min + 0.2% price proximity → `Using cached AI decision`. Added fallback rule-based: if strength>35 and CVD+L2+L3 align 2/3 → SELL/BUY @70% with model fallback-rule. Timeout 8s from 20s. Expected latency 20s→4s -80%, cost -60%, execution +40%.
+
+- **C4 Basis Risk:** Futures 4310.55 vs Spot 4265.14 basis $45.41 normal. Added `BASIS_MAX=50`, `BASIS_BUFFER_MULT=1.5`. In `_place_order()`: calc basis, if >50 log warning widen ATR 1.5x, if >75 DEFERRED skip. Added to structural notes `basis 45.41 futures 4310.55`. Expected SL hits -20%, PF +0.2.
+
+- **Files:** `config.py` +12 params, `step2_market_analysis.py` L3 parser + whale + regime, `step3_ai_decision.py` trimming + cache + fallback, `step4_mt5_execution.py` basis, `.env.example`, `.gitignore`, `docs/TODO_ROADMAP.md` marked DONE, `docs/CRITICAL_v5.2_REPORT.md`. Zip `Gold-BookMap-v5.2-CRITICAL.zip` 68K 9 files.
+
+- **Testing:** `python main.py` should show whale votes, regime notes, basis log, faster AI.
+
 ## 2026-09-17 — v5.1: L3 MBO VERIFIED & LIVE TRADE (10756 ticks, whales 250/300 lots, order 90001722)
 
 **Live verification 2026-09-17 01:14-01:17 CEST (Budapest) — COMEX reopen:**

@@ -186,6 +186,54 @@ def setup_logging() -> None:
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
 
+# ---- v5.4 L4: Latency tracking + Flash Crash Kill Switch ----
+_PRICE_HISTORY = []  # list of (timestamp, price)
+_LATENCY_LOG = []
+
+def _record_latency(stage: str, ms: float):
+    if not getattr(config, "LATENCY_LOG_ENABLED", True):
+        return
+    _LATENCY_LOG.append((stage, ms))
+    target = int(getattr(config, "LATENCY_TARGET_MS", 500))
+    if ms > target:
+        logger.warning(f"LATENCY {stage} {ms:.0f}ms > target {target}ms")
+    else:
+        logger.info(f"LATENCY {stage} {ms:.0f}ms")
+
+def _check_flash_crash(snapshot) -> str:
+    """L4: If price moves > FLASH_CRASH_ATR_MULT * ATR in FLASH_CRASH_MINUTES, trigger flatten."""
+    if not getattr(config, "FLASH_CRASH_ENABLED", True):
+        return ""
+    try:
+        price = float(getattr(snapshot, "price", 0.0) or 0.0)
+        atr = float(getattr(getattr(snapshot, "volatility", None), "atr", 0.0) or 0.0)
+        if price <= 0 or atr <= 0:
+            return ""
+        mult = float(getattr(config, "FLASH_CRASH_ATR_MULT", 3.0))
+        minutes = float(getattr(config, "FLASH_CRASH_MINUTES", 1.0))
+        now = time.time()
+        _PRICE_HISTORY.append((now, price))
+        cutoff = now - minutes * 120
+        while _PRICE_HISTORY and _PRICE_HISTORY[0][0] < cutoff:
+            _PRICE_HISTORY.pop(0)
+        target_ts = now - minutes * 60
+        old_price = None
+        for ts, p in _PRICE_HISTORY:
+            if ts <= target_ts:
+                old_price = p
+            else:
+                break
+        if old_price is None and len(_PRICE_HISTORY) >= 2:
+            old_price = _PRICE_HISTORY[0][1]
+        if old_price is None:
+            return ""
+        move = abs(price - old_price)
+        if move > mult * atr:
+            return f"FLASH CRASH: price {old_price:.2f} -> {price:.2f} move {move:.2f} > {mult}*ATR {atr:.2f} in {minutes:.0f}min"
+    except Exception as e:
+        logger.debug(f"Flash crash check error: {e}")
+    return ""
+
 def _record(step: str, status: str) -> None:
     STATUS.append((step, status))
     logger.info("%s -> %s", step, status)
@@ -262,6 +310,19 @@ def _safety_gates(data) -> tuple:
             return False, f"risk halt: {reason}"
     except Exception as exc:
         logger.warning("Risk check failed (proceeding): %s", exc)
+
+    # 4b) L5 RL adaptive: after 3 losses same regime, reduce size or pause
+    try:
+        if getattr(config, "RL_ENABLED", True):
+            import trade_history as th
+            # Get current regime from snapshot if available? Here we only have data, not snapshot.
+            # For safety gates we check general loss streak (any regime)
+            rl_res = th.check_loss_streak_regime("", within_hours=24.0)
+            if rl_res.get("should_pause"):
+                _record("SAFETY: RL_PAUSE", f"BLOCKED — {rl_res.get('reason')}")
+                return False, rl_res.get('reason','RL pause: 4 losses streak')
+    except Exception as exc:
+        logger.warning(f"RL check failed: {exc}")
 
     # 4) anti-overtrading guard (cooldown + daily cap)
     try:
@@ -740,6 +801,8 @@ def run_pipeline() -> None:
     """One full pass through all 5 steps."""
     STATUS.clear()
     config.reload_env()   # pick up edited .env (credentials/markets) each cycle
+    t_pipeline_start = time.time()
+    _LATENCY_LOG.clear()
     plumbing_position_ids = _load_plumbing_test_position_ids()
     tracked_position_ids = _load_tracked_position_ids()
     _touch_lock()         # keep the single-instance lock fresh
@@ -758,8 +821,13 @@ def run_pipeline() -> None:
                 config.MT5_SYMBOL, config.TIMEFRAME, config.DATA_SOURCE)
 
     # STEP 1
+    t0 = time.time()
     try:
         data = run_step1()
+        _record_latency("STEP1 acquire", (time.time()-t0)*1000)
+        if data:
+            age = float(data.get("last_data_age_seconds", 0.0) or 0.0)
+            _record_latency(f"BookMap feed age {age:.1f}s", age*1000)
     except NotImplementedError as exc:
         _record("STEP 1  DATA ACQUISITION", f"NOT IMPLEMENTED — {exc}")
         data = None
@@ -786,21 +854,61 @@ def run_pipeline() -> None:
             logger.warning("macro fetch skipped: %s", exc)
 
     # STEP 2
+    t1 = time.time()
     snapshot = None
     if data is not None:
         try:
             snapshot = run_step2(data)
+            _record_latency("STEP2 analyze", (time.time()-t1)*1000)
+            # L4 Flash crash kill switch check immediately after fresh snapshot
+            crash_reason = _check_flash_crash(snapshot)
+            if crash_reason:
+                logger.error(f"L4 KILL SWITCH TRIGGERED: {crash_reason} -> flattening all")
+                _record("SAFETY: FLASH_CRASH", f"TRIGGERED — {crash_reason}")
+                try:
+                    from position_manager import get_position_manager
+                    # Force flatten via manage will handle session flatten? We do manual flatten here
+                    import MetaTrader5 as mt5
+                    if mt5 and config.mt5_initialize(mt5):
+                        positions = mt5.positions_get(symbol=config.MT5_SYMBOL)
+                        if positions:
+                            for p in positions:
+                                if int(getattr(p, "magic", -1)) == 234000:
+                                    # close urgent
+                                    tick = mt5.symbol_info_tick(config.MT5_SYMBOL)
+                                    if tick:
+                                        is_buy = p.type == mt5.POSITION_TYPE_BUY
+                                        price = tick.bid if is_buy else tick.ask
+                                        req = {
+                                            "action": mt5.TRADE_ACTION_DEAL,
+                                            "symbol": config.MT5_SYMBOL,
+                                            "volume": float(p.volume),
+                                            "type": mt5.ORDER_TYPE_SELL if is_buy else mt5.ORDER_TYPE_BUY,
+                                            "position": int(p.ticket),
+                                            "price": price,
+                                            "deviation": 20,
+                                            "magic": 234000,
+                                            "comment": "flash crash flatten",
+                                            "type_time": mt5.ORDER_TIME_GTC,
+                                            "type_filling": mt5.ORDER_FILLING_IOC,
+                                        }
+                                        mt5.order_send(req)
+                        mt5.shutdown()
+                except Exception as fe:
+                    logger.error(f"Flash crash flatten failed: {fe}")
         except Exception as exc:
             logger.exception("STEP 2 failed")
             _record("STEP 2  MARKET ANALYSIS", f"ERROR — {exc}")
 
     # STEP 3 (skipped entirely when the PAUSE file exists — saves AI quota)
+    t2 = time.time()
     decision = None
     if _entries_paused():
         _record("STEP 3  AI DECISION", "PAUSED — PAUSE file present")
     elif snapshot is not None:
         try:
             decision = run_step3(snapshot)
+            _record_latency("STEP3 AI", (time.time()-t2)*1000)
         except Exception as exc:
             logger.exception("STEP 3 failed")
             _record("STEP 3  AI DECISION", f"ERROR — {exc}")
@@ -816,6 +924,25 @@ def run_pipeline() -> None:
                             rationale=f"safety gate: {gate_reason}")
         if snapshot is not None:
             snapshot.notes.append(gate_reason)
+
+    # L5 RL size multiplier check after snapshot
+    if snapshot is not None:
+        try:
+            import trade_history as th
+            if getattr(config, "RL_ENABLED", True):
+                mult = th.get_rl_size_multiplier(getattr(snapshot, "regime", ""))
+                if mult < 1.0:
+                    logger.info(f"L5 RL: size multiplier {mult:.2f} due to loss streak regime {getattr(snapshot,'regime','')}")
+                    _record("RL_ADAPTIVE", f"size x{mult:.2f} regime {getattr(snapshot,'regime','')}")
+                pause, reason = th.should_pause_entries(getattr(snapshot, "regime", ""))
+                if pause:
+                    logger.warning(f"L5 RL PAUSE: {reason}")
+                    _record("SAFETY: RL_PAUSE", reason)
+                    from step3_ai_decision import Decision as _Dec
+                    decision = _Dec(action="HOLD", confidence=0.0, rationale=f"RL pause: {reason}")
+                    # Skip execution but still manage
+        except Exception as e:
+            logger.warning(f"L5 RL snapshot check failed: {e}")
 
     # STEP 4a: manage any OPEN positions with the fresh market data (v4).
     # Runs before new entries so a flip-exit frees the slot in the same
@@ -917,6 +1044,11 @@ def run_pipeline() -> None:
             log_decision(snapshot, decision, exec_result)
         except Exception as exc:
             logger.warning("decision log failed: %s", exc)
+
+    total_ms = (time.time()-t_pipeline_start)*1000
+    _record_latency("TOTAL pipeline", total_ms)
+    if getattr(config, "LATENCY_LOG_ENABLED", True):
+        logger.info(f"L4 Latency summary: total {total_ms:.0f}ms target {getattr(config,'LATENCY_TARGET_MS',500)}ms")
 
     print_summary()
 

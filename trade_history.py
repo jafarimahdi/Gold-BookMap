@@ -266,6 +266,7 @@ def record_tca(kind: str, ticket: Any, intended: float, actual: float,
 
     kind: "ENTRY" or "EXIT". Slippage is in price points, signed so that
     POSITIVE always means "worse than intended" (paid more / got less).
+    v5.3 M6: also logs session and stores for weekly TCA report.
     """
     try:
         intended = float(intended or 0.0)
@@ -273,16 +274,271 @@ def record_tca(kind: str, ticket: Any, intended: float, actual: float,
         if intended <= 0 or actual <= 0:
             return
         slip = round(actual - intended, 2)
+        # Determine session from UTC hour
+        utc_hour = datetime.now(timezone.utc).hour
+        if 0 <= utc_hour < 7:
+            session = "ASIA"
+        elif 8 <= utc_hour < 13:
+            session = "LONDON"
+        elif 13 <= utc_hour < 22:
+            session = "NY"
+        else:
+            session = "OTHER"
         new_file = not os.path.exists(tca_path())
         with open(tca_path(), "a", newline="", encoding="utf-8") as fh:
             w = csv.writer(fh)
             if new_file:
                 w.writerow(["utc_time", "kind", "ticket", "intended",
-                            "actual", "slippage_pts", "volume", "note"])
+                            "actual", "slippage_pts", "volume", "note", "session"])
             w.writerow([_utc_iso(), kind, ticket, intended, actual,
-                        slip, volume, note[:40]])
+                        slip, volume, note[:40], session])
     except Exception as exc:
         logger.warning("tca log write failed: %s", exc)
+
+
+# --------------------------------------------------------------------------- #
+# M6 TCA & Slippage Analysis (v5.3)
+# --------------------------------------------------------------------------- #
+
+def _parse_tca_csv(days: int = 7) -> List[Dict[str, Any]]:
+    """Read tca_log.csv and return rows within last `days` days."""
+    path = tca_path()
+    if not os.path.exists(path):
+        return []
+    rows: List[Dict[str, Any]] = []
+    cutoff = time.time() - days * 86400
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            reader = csv.DictReader(fh)
+            for r in reader:
+                try:
+                    # Parse utc_time
+                    ts_str = r.get("utc_time", "")
+                    try:
+                        dt = datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S")
+                        dt = dt.replace(tzinfo=timezone.utc)
+                        ts = dt.timestamp()
+                    except:
+                        ts = time.time()
+                    if ts < cutoff:
+                        continue
+                    rows.append({
+                        "utc_time": ts_str,
+                        "timestamp": ts,
+                        "kind": r.get("kind", ""),
+                        "ticket": r.get("ticket", ""),
+                        "intended": float(r.get("intended", 0) or 0),
+                        "actual": float(r.get("actual", 0) or 0),
+                        "slippage_pts": float(r.get("slippage_pts", 0) or 0),
+                        "volume": float(r.get("volume", 0) or 0),
+                        "note": r.get("note", ""),
+                        "session": r.get("session", "UNKNOWN"),
+                    })
+                except Exception:
+                    continue
+    except Exception as exc:
+        logger.warning(f"TCA parse failed: {exc}")
+    return rows
+
+
+def analyze_tca(days: int = 7) -> Dict[str, Any]:
+    """M6: Analyze TCA log for avg slippage per session, per kind, per volatility proxy.
+
+    Returns dict with:
+    - total_trades, avg_slippage, max_slippage
+    - per_session: {ASIA, LONDON, NY, OTHER} -> avg, count
+    - per_kind: {ENTRY, EXIT} -> avg, count
+    - per_side: {BUY, SELL} -> avg, count (from note field)
+    - suggestion: recommended ENTRY_MIN_TP_SPREAD_MULT adjustment
+    """
+    rows = _parse_tca_csv(days=days)
+    if not rows:
+        return {"total_trades": 0, "avg_slippage": 0.0, "message": "No TCA data in last %d days" % days}
+
+    total = len(rows)
+    slips = [r["slippage_pts"] for r in rows]
+    avg_slip = sum(slips) / total if total else 0.0
+    max_slip = max(slips, key=abs) if slips else 0.0
+
+    # Per session
+    per_session: Dict[str, Dict] = {}
+    for sess in ("ASIA", "LONDON", "NY", "OTHER", "UNKNOWN"):
+        sess_rows = [r for r in rows if r["session"] == sess]
+        if sess_rows:
+            per_session[sess] = {
+                "count": len(sess_rows),
+                "avg_slippage": round(sum(r["slippage_pts"] for r in sess_rows) / len(sess_rows), 3),
+                "max_slippage": round(max((r["slippage_pts"] for r in sess_rows), key=abs), 3),
+            }
+
+    # Per kind
+    per_kind: Dict[str, Dict] = {}
+    for kind in ("ENTRY", "EXIT"):
+        k_rows = [r for r in rows if r["kind"] == kind]
+        if k_rows:
+            per_kind[kind] = {
+                "count": len(k_rows),
+                "avg_slippage": round(sum(r["slippage_pts"] for r in k_rows) / len(k_rows), 3),
+            }
+
+    # Per side from note
+    per_side: Dict[str, Dict] = {}
+    for side in ("BUY", "SELL"):
+        s_rows = [r for r in rows if side in str(r["note"]).upper()]
+        if s_rows:
+            per_side[side] = {
+                "count": len(s_rows),
+                "avg_slippage": round(sum(r["slippage_pts"] for r in s_rows) / len(s_rows), 3),
+            }
+
+    # Slippage suggestion: if avg slippage > 0.5 pts, increase spread mult
+    suggestion = {}
+    try:
+        import config as cfg
+        current_mult = float(getattr(cfg, "ENTRY_MIN_TP_SPREAD_MULT", 3.0))
+        # If avg slippage high, need larger TP to pay toll
+        if abs(avg_slip) > float(getattr(cfg, "TCA_SLIPPAGE_THRESHOLD", 0.5)):
+            # Increase mult by slippage factor
+            suggested = current_mult + abs(avg_slip) * 0.5
+            suggestion = {
+                "current_mult": current_mult,
+                "suggested_mult": round(suggested, 1),
+                "reason": f"Avg slippage {avg_slip:.2f} pts > threshold, increase TP spread mult to cover costs",
+                "action": "increase" if suggested > current_mult else "keep",
+            }
+        else:
+            suggestion = {
+                "current_mult": current_mult,
+                "suggested_mult": current_mult,
+                "reason": f"Avg slippage {avg_slip:.2f} pts within threshold, keep current",
+                "action": "keep",
+            }
+    except Exception as e:
+        suggestion = {"error": str(e)}
+
+    return {
+        "total_trades": total,
+        "avg_slippage": round(avg_slip, 3),
+        "max_slippage": round(max_slip, 3),
+        "per_session": per_session,
+        "per_kind": per_kind,
+        "per_side": per_side,
+        "suggestion": suggestion,
+        "days": days,
+        "generated_utc": _utc_iso(),
+    }
+
+
+def tca_report_path() -> str:
+    return os.path.join(_base_dir(), "tca_report.json")
+
+
+def generate_tca_report(days: int = 7) -> Dict[str, Any]:
+    """M6: Generate weekly TCA report and save to data/tca_report.json"""
+    try:
+        report = analyze_tca(days=days)
+        path = tca_report_path()
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(report, fh, indent=2)
+        os.replace(tmp, path)
+        logger.info(f"TCA report generated: {report['total_trades']} trades, avg slip {report['avg_slippage']} pts -> {path}")
+        return report
+    except Exception as exc:
+        logger.warning(f"TCA report generation failed: {exc}")
+        return {"error": str(exc)}
+
+
+def get_slippage_adjustment() -> float:
+    """M6: Return suggested ENTRY_MIN_TP_SPREAD_MULT based on recent slippage."""
+    try:
+        report = analyze_tca(days=7)
+        sugg = report.get("suggestion", {})
+        return float(sugg.get("suggested_mult", 0) or 0)
+    except:
+        return 0.0
+
+
+
+# --------------------------------------------------------------------------- #
+# L5 Reinforcement Learning from Trade Memory (v5.4)
+# --------------------------------------------------------------------------- #
+
+def _load_closed_with_regime() -> list:
+    """Load closed trades, attempt to infer regime if stored."""
+    try:
+        data = _load()
+        return data.get("closed", [])
+    except:
+        return []
+
+def check_loss_streak_regime(current_regime: str = "", loss_streak_thr: int = None, within_hours: float = 24.0) -> dict:
+    """L5: After N losses in same regime, suggest size reduction or pause.
+    Returns {"should_reduce": bool, "should_pause": bool, "streak": int, "reason": str}
+    """
+    try:
+        import config as cfg
+        thr = int(loss_streak_thr if loss_streak_thr is not None else getattr(cfg, "RL_LOSS_STREAK", 3))
+        regime = str(current_regime or "").upper()
+        closed = _load_closed_with_regime()
+        # Filter recent closes within hours
+        now = time.time()
+        cutoff = now - within_hours*3600
+        recent = [c for c in closed if float(c.get("closed_ts",0)) >= cutoff]
+        # Count consecutive losses from most recent backwards
+        streak = 0
+        for rec in reversed(recent):
+            # If regime filtering, check if rec has regime info (stored in notes or signal?)
+            # For now, count all if regime empty or rec doesn't have regime; else match
+            rec_regime = str(rec.get("regime", "") or rec.get("signal_score", "")).upper()
+            # If current_regime specified and rec has regime, require match
+            if regime and rec_regime and regime not in rec_regime and rec_regime not in regime:
+                # If regimes don't match, break streak? Actually we want same regime losses
+                # If rec regime exists and differs, don't count but don't break
+                continue
+            if float(rec.get("pnl_usd_est",0)) < 0:
+                streak += 1
+            else:
+                break
+        should_reduce = streak >= thr
+        should_pause = streak >= thr + 1
+        reason = ""
+        if should_pause:
+            reason = f"L5 RL: {streak} consecutive losses in regime {regime or 'ANY'} -> PAUSE suggested"
+        elif should_reduce:
+            reason = f"L5 RL: {streak} losses in regime {regime or 'ANY'} -> reduce size 50%"
+        return {"should_reduce": should_reduce, "should_pause": should_pause, "streak": streak, "reason": reason}
+    except Exception as e:
+        return {"should_reduce": False, "should_pause": False, "streak": 0, "reason": f"RL error {e}"}
+
+def get_rl_size_multiplier(current_regime: str = "") -> float:
+    """L5: Returns size multiplier based on loss streak. 1.0 normal, 0.5 reduced, 0.0 paused."""
+    try:
+        import config as cfg
+        if not getattr(cfg, "RL_ENABLED", True):
+            return 1.0
+        res = check_loss_streak_regime(current_regime)
+        if res.get("should_pause"):
+            return 0.0
+        if res.get("should_reduce"):
+            reduce_pct = float(getattr(cfg, "RL_SIZE_REDUCE_PCT", 50.0))
+            return max(0.1, 1.0 - reduce_pct/100.0)
+        return 1.0
+    except:
+        return 1.0
+
+def should_pause_entries(current_regime: str = "") -> tuple:
+    """L5: Returns (pause: bool, reason: str) if RL says pause."""
+    try:
+        import config as cfg
+        if not getattr(cfg, "RL_ENABLED", True):
+            return False, ""
+        res = check_loss_streak_regime(current_regime)
+        if res.get("should_pause"):
+            return True, res.get("reason","")
+        return False, ""
+    except Exception as e:
+        return False, str(e)
 
 
 # --------------------------------------------------------------------------- #

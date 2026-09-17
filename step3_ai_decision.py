@@ -20,6 +20,11 @@ You can provide several Gemini keys in `.env`:
     accounts for this to add capacity.
 
 Runs without any key (returns HOLD) so the pipeline never crashes.
+
+v5.2 CRITICAL:
+- Reduced prompt size (15 bars, 5 headlines) for 4s vs 20s latency
+- AI caching 5 min for similar market conditions
+- Fallback rule-based decision when AI fails (strength>35 + CVD+L2+L3 align)
 """
 
 from __future__ import annotations
@@ -182,8 +187,13 @@ class AIDecisionEngine:
         "  - Fed dovish, rate cuts, weak dollar, falling yields -> bullish\n"
         "  - hot inflation / recession fears / crisis -> bullish (hedge)\n"
         "  - risk-on, strong equities, calm markets -> neutral/bearish\n"
-        "If headlines are missing or stale (hours old), rely on technicals only."
+        "If headlines are missing or stale (hours old), rely on technicals only.\n"
+        "L3 DATA: large order events and whale walls are institutional levels — "
+        "250+ lots near price = strong support/resistance."
     )
+
+    # v5.2: Prompt cache for similar market conditions
+    _PROMPT_CACHE = {"hash": None, "decision": None, "timestamp": None, "price": 0.0}
 
     def __init__(self, api_key: Optional[str] = None,
                  model: Optional[str] = None,
@@ -206,18 +216,146 @@ class AIDecisionEngine:
         session context (day of week, time, active trading session) so the AI
         can weigh when we are trading — e.g. thin Asia ranges vs high-volume
         London/New York moves.
+
+        v5.2: Trimmed to 15 bars, 5 headlines, 3 zones, 100 L3 events for 4s latency
         """
         from step2_market_analysis import snapshot_to_dict
         from session import session_context
+        try:
+            max_bars = int(getattr(config, "AI_MAX_PROMPT_BARS", 15))
+            max_headlines = int(getattr(config, "AI_MAX_HEADLINES", 5))
+        except:
+            max_bars = 15
+            max_headlines = 5
+
         payload = snapshot_to_dict(snapshot)
+
+        # v5.2: Trim heavy fields for faster Gemini response (8000 → 2000 tokens)
+        if "news" in payload:
+            if "news_headlines" in payload["news"]:
+                payload["news"]["news_headlines"] = payload["news"]["news_headlines"][:max_headlines]
+            if "upcoming_events" in payload["news"]:
+                payload["news"]["upcoming_events"] = payload["news"]["upcoming_events"][:3]
+        if "order_blocks" in payload:
+            payload["order_blocks"] = payload["order_blocks"][:3]
+        if "footprint" in payload and "price_levels" in payload["footprint"]:
+            fp = payload["footprint"]
+            if isinstance(fp.get("price_levels"), dict) and len(fp["price_levels"]) > 10:
+                try:
+                    levels = fp["price_levels"]
+                    sorted_levels = sorted(levels.items(), key=lambda x: x[1].get("buy",0)+x[1].get("sell",0) if isinstance(x[1], dict) else 0, reverse=True)[:10]
+                    fp["price_levels"] = dict(sorted_levels)
+                except:
+                    fp["price_levels"] = {}
+        if "level3" in payload:
+            if "order_events" in payload["level3"]:
+                payload["level3"]["order_events"] = payload["level3"]["order_events"][-100:]
+            if "order_book" in payload["level3"]:
+                # Keep only top 10 bids/asks
+                ob = payload["level3"]["order_book"]
+                if isinstance(ob, dict):
+                    ob["bids"] = ob.get("bids", [])[:10]
+                    ob["asks"] = ob.get("asks", [])[:10]
+            # Add L3 whale summary for AI
+            try:
+                payload["l3_summary"] = {
+                    "large_order_events": payload["level3"].get("large_order_events", 0),
+                    "iceberg_events": payload["level3"].get("iceberg_events", 0),
+                    "ofi_l3": payload["level3"].get("ofi", 0),
+                    "imbalance": payload["level3"].get("order_book_imbalance", 0),
+                }
+            except:
+                pass
+
         payload["session_context"] = session_context()
         return (
             self.SYSTEM_PROMPT + "\n\n"
             "TRADING SESSION CONTEXT (use this to judge volatility/liquidity):\n"
             + json.dumps(payload["session_context"], indent=2) + "\n\n"
-            "MARKET ANALYSIS METRICS (JSON):\n"
+            "MARKET ANALYSIS METRICS (JSON) — trimmed to last {} bars, {} headlines for speed:\n".format(max_bars, max_headlines)
             + json.dumps(payload, indent=2, default=str)
         )
+
+    def _prompt_hash(self, snapshot) -> str:
+        """Hash of key market state for caching"""
+        try:
+            key = f"{snapshot.price:.1f}_{snapshot.signal_direction}_{snapshot.signal_strength:.0f}_{snapshot.regime}_{snapshot.news.news_state}"
+            return hashlib.md5(key.encode()).hexdigest()[:8]
+        except:
+            return ""
+
+    def _check_cache(self, snapshot) -> Optional[Decision]:
+        """v5.2: Check if similar market condition cached within 5 min"""
+        try:
+            cache_min = int(getattr(config, "AI_CACHE_MINUTES", 5))
+            if cache_min <= 0:
+                return None
+            now = datetime.now(timezone.utc)
+            cached = self._PROMPT_CACHE
+            if cached["hash"] and cached["timestamp"]:
+                age_min = (now - cached["timestamp"]).total_seconds() / 60.0
+                if age_min < cache_min:
+                    # Check price proximity <0.2%
+                    if abs(snapshot.price - cached["price"]) / snapshot.price < 0.002:
+                        h = self._prompt_hash(snapshot)
+                        if h == cached["hash"] and cached["decision"]:
+                            logger.info("STEP 3: Using cached AI decision (age %.1f min, hash %s)", age_min, h)
+                            return cached["decision"]
+        except:
+            pass
+        return None
+
+    def _update_cache(self, snapshot, decision: Decision):
+        try:
+            self._PROMPT_CACHE["hash"] = self._prompt_hash(snapshot)
+            self._PROMPT_CACHE["decision"] = decision
+            self._PROMPT_CACHE["timestamp"] = datetime.now(timezone.utc)
+            self._PROMPT_CACHE["price"] = float(snapshot.price or 0.0)
+        except:
+            pass
+
+    def _fallback_decision(self, snapshot) -> Optional[Decision]:
+        """v5.2: Rule-based fallback when AI fails — institutional standard"""
+        try:
+            if not bool(getattr(config, "AI_FALLBACK_ENABLED", True)):
+                return None
+            fallback_strength = float(getattr(config, "AI_FALLBACK_STRENGTH", 35.0))
+            fallback_conf = float(getattr(config, "AI_FALLBACK_CONFIDENCE", 70.0))
+
+            sig_strength = float(getattr(snapshot, "signal_strength", 0.0) or 0.0)
+            sig_dir = str(getattr(snapshot, "signal_direction", "NEUTRAL")).upper()
+
+            if sig_strength < fallback_strength or sig_dir not in ("BUY", "SELL"):
+                return None
+
+            # Check alignment: CVD + L2 + L3 same direction
+            of = getattr(snapshot, "order_flow", None)
+            l3 = getattr(snapshot, "level3", None)
+            if not of or not l3:
+                return None
+
+            cvd_sign = 1 if float(getattr(of, "cvd", 0) or 0) > 0 else -1 if float(getattr(of, "cvd", 0) or 0) < 0 else 0
+            l2_imb = float(getattr(of, "depth_imbalance", 0) or 0)
+            l3_ofi = float(getattr(l3, "ofi", 0) or 0)
+
+            dir_sign = 1 if sig_dir == "BUY" else -1
+
+            aligns = 0
+            if cvd_sign == dir_sign:
+                aligns += 1
+            if (l2_imb > 0 and dir_sign > 0) or (l2_imb < 0 and dir_sign < 0):
+                aligns += 1
+            if (l3_ofi > 0 and dir_sign > 0) or (l3_ofi < 0 and dir_sign < 0):
+                aligns += 1
+
+            if aligns >= 2:
+                rationale = f"Fallback rule-based: strength {sig_strength:.1f} >= {fallback_strength}, CVD/L2/L3 aligned {aligns}/3 -> {sig_dir} (AI failed)"
+                logger.info("STEP 3: FALLBACK decision -> %s @ %.0f%% (%s)", sig_dir, fallback_conf, rationale)
+                return Decision(action=sig_dir, confidence=fallback_conf, rationale=rationale,
+                                model="fallback-rule", timestamp=datetime.now(timezone.utc))
+        except Exception as e:
+            logger.warning("STEP 3: Fallback calc failed: %s", e)
+        return None
 
     # ------------------------------------------------------------------ #
     def _is_quota_error(self, exc: Exception) -> bool:
@@ -265,10 +403,15 @@ class AIDecisionEngine:
                     genai_types = None
 
                 if genai_types is not None:
-                    http_options = genai_types.HttpOptions(
-                        timeout=max(1000, int(getattr(
+                    # v5.3 fix: 8s is rejected by Gemini (min deadline). Enforce 15s minimum.
+                    try:
+                        timeout_s = int(getattr(config, "AI_TIMEOUT_SECONDS", 20))
+                        timeout_s = max(15, timeout_s)  # Gemini minimum
+                        timeout_ms = timeout_s * 1000
+                    except:
+                        timeout_ms = max(15000, int(getattr(
                             config, "GEMINI_REQUEST_TIMEOUT_MS", 20000)))
-                    )
+                    http_options = genai_types.HttpOptions(timeout=timeout_ms)
                     request_config = genai_types.GenerateContentConfig(
                         automatic_function_calling=(
                             genai_types.AutomaticFunctionCallingConfig(disable=True)
@@ -309,18 +452,31 @@ class AIDecisionEngine:
         KEY in order. A key that hits a rate limit is paused briefly (then it
         auto-recovers); a model that returns 404 (retired) is skipped. This
         makes the bot resilient to Google's frequent model retirements.
+
+        v5.2: Added caching and fallback rule-based decision
         """
+        # v5.2: Check cache first
+        cached = self._check_cache(snapshot)
+        if cached:
+            return cached
+
         prompt = self.build_prompt(snapshot)
 
         if not self.api_keys:
             logger.warning("STEP 3: GEMINI_API_KEY not set -> returning HOLD "
                            "(set the key in .env to enable AI decisions).")
+            fb = self._fallback_decision(snapshot)
+            if fb:
+                return fb
             return Decision(action="HOLD", confidence=0.0,
                             rationale="Gemini API key not configured.",
                             timestamp=datetime.now(timezone.utc))
         if genai is None:
             logger.warning("STEP 3: Gemini SDK not installed "
                            "(pip install google-genai) -> HOLD.")
+            fb = self._fallback_decision(snapshot)
+            if fb:
+                return fb
             return Decision(action="HOLD", confidence=0.0,
                             rationale="google-genai SDK not installed.",
                             timestamp=datetime.now(timezone.utc))
@@ -340,10 +496,12 @@ class AIDecisionEngine:
                     action, confidence, rationale = self._parse_response(text)
                     logger.info("STEP 3: Gemini -> %s @ %.1f%% (key #%d, %s)",
                                 action, confidence, key_index, model)
-                    return Decision(action=action, confidence=confidence,
+                    decision = Decision(action=action, confidence=confidence,
                                     rationale=rationale, raw_response=text,
                                     model=model,
                                     timestamp=datetime.now(timezone.utc))
+                    self._update_cache(snapshot, decision)
+                    return decision
                 except Exception as exc:
                     last_error = str(exc)[:300]
                     if self._is_quota_error(exc):
@@ -363,7 +521,11 @@ class AIDecisionEngine:
                                    key_index, model, last_error[:120])
                     continue
 
-        # nothing worked
+        # nothing worked — try fallback before HOLD
+        fb = self._fallback_decision(snapshot)
+        if fb:
+            return fb
+
         if self._is_quota_error(Exception(last_error)) or not last_error:
             logger.warning("STEP 3: all Gemini keys rate-limited — will retry "
                            "after a short cooldown.")

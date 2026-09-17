@@ -511,6 +511,35 @@ class Backtester:
     def run(self) -> dict:
         args = self.args
         # v4.4.3: archives are gzipped — accept both ticks.csv and .csv.gz
+        # L2: Also check for mbo.csv.gz alongside ticks.csv for L3 metrics
+        mbo_path = None
+        try:
+            from pathlib import Path as _P
+            tick_p = _P(args.file)
+            # Look for mbo.csv, mbo.csv.gz in same dir or data/archive
+            candidates = [
+                tick_p.parent / "mbo.csv",
+                tick_p.parent / "mbo.csv.gz",
+                tick_p.parent / (tick_p.stem + "_mbo.csv.gz"),
+                _P("data") / "mbo.csv",
+                _P("data") / "mbo.csv.gz",
+            ]
+            # Also check archive
+            import glob
+            for cand in candidates:
+                if cand.exists():
+                    mbo_path = cand
+                    break
+            if not mbo_path:
+                # Check data/archive/mbo_*.csv.gz latest
+                arch = sorted(_P("data/archive").glob("mbo_*.csv.gz"), reverse=True)
+                if arch:
+                    mbo_path = arch[0]
+            if mbo_path:
+                print(f"L2: Found MBO file {mbo_path} for L3 backtest")
+        except Exception as e:
+            print(f"L2 MBO check error: {e}")
+
         if str(args.file).lower().endswith(".gz"):
             import gzip
             fh = gzip.open(args.file, "rt", encoding="utf-8", errors="replace")
@@ -579,6 +608,26 @@ class Backtester:
         for e in self.equity_curve:
             peak = max(peak, e)
             mdd = max(mdd, peak - e)
+        # L2 L3 metrics: whale win rate, iceberg profit factor from trades
+        l3_metrics = {}
+        try:
+            whale_trades = [t for t in trades if "whale" in str(t.get("reason","")).lower() or "L3" in str(t.get("reason",""))]
+            iceberg_trades = [t for t in trades if "iceberg" in str(t.get("reason","")).lower()]
+            if whale_trades:
+                w_wins = [t for t in whale_trades if t["pnl_usd"]>0]
+                l3_metrics["whale_trades"] = len(whale_trades)
+                l3_metrics["whale_win_rate"] = round(100*len(w_wins)/len(whale_trades),1) if whale_trades else 0
+                l3_metrics["whale_pnl"] = round(sum(t["pnl_usd"] for t in whale_trades),2)
+            if iceberg_trades:
+                i_wins = [t for t in iceberg_trades if t["pnl_usd"]>0]
+                i_gross_w = sum(t["pnl_usd"] for t in i_wins)
+                i_gross_l = -sum(t["pnl_usd"] for t in iceberg_trades if t["pnl_usd"]<=0)
+                l3_metrics["iceberg_trades"] = len(iceberg_trades)
+                l3_metrics["iceberg_win_rate"] = round(100*len(i_wins)/len(iceberg_trades),1) if iceberg_trades else 0
+                l3_metrics["iceberg_profit_factor"] = round(i_gross_w/i_gross_l,2) if i_gross_l>0 else 0
+        except Exception as e:
+            l3_metrics["error"] = str(e)
+
         rule_counts: Dict[str, int] = {}
         try:
             with open(pm_mod.JOURNAL_PATH, "r", encoding="utf-8") as fh:
@@ -615,6 +664,8 @@ class Backtester:
             "skipped": {k: v for k, v in self.stats.items()
                         if k.startswith("skip_")},
             "rule_counts": rule_counts,
+            "l3_metrics": l3_metrics,
+            "mbo_file": str(mbo_path) if 'mbo_path' in locals() and mbo_path else "",
         }
         # persist
         self.workdir.mkdir(parents=True, exist_ok=True)
@@ -644,6 +695,8 @@ class Backtester:
             f"max drawdown: ${r['max_drawdown_usd']}",
             f"avg hold        : {r['avg_hold_min']} min",
             f"PM rule usage   : {r['rule_counts']}",
+            f"L3 metrics      : {r.get('l3_metrics',{})}",
+            f"MBO file        : {r.get('mbo_file','')}",
             "AI              : OFF (deterministic score gate — the report",
             "                  measures the SIGNAL layer, not the AI layer)",
             "switches        : TRADING_ENABLED/PM_ENABLE forced ON for the",

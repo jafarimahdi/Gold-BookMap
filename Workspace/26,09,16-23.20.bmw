@@ -1789,7 +1789,7 @@
         "isInMainWindow": true,
         "timeLine": {
           "staticTimeLine": true,
-          "staticPosition": 0.9
+          "staticPosition": 0.8612956810631229
         },
         "studies": {
           "icebergDetector": {
@@ -2299,11 +2299,11 @@
             "toleranceMode": "ABSOLUTE",
             "currentAbsoluteToleranceValue": 7,
             "currentPercentageToleranceValue": 10,
-            "timeWidth": 16830114872777,
-            "autoBoundDisatanceBase": 390,
+            "timeWidth": 482334596233,
+            "autoBoundDisatanceBase": 55,
             "autoPercentageToleranceValue": 20,
-            "noneRefPrice": 43652,
-            "noneHeight": 1146
+            "noneRefPrice": 43321,
+            "noneHeight": 164
           }
         },
         "depthSettings": {
@@ -2325,7 +2325,7 @@
         "columns": [
           {
             "type": "HEATMAP",
-            "width": 2356,
+            "width": 1271,
             "columnResetSettings": {
               "isTurnedOn": false,
               "resetOnDoubleClick": false,
@@ -2424,7 +2424,7 @@
           },
           {
             "type": "COB",
-            "width": 100,
+            "width": 164,
             "columnResetSettings": {
               "isTurnedOn": false,
               "resetOnDoubleClick": false,
@@ -2523,7 +2523,7 @@
           },
           {
             "type": "SVP",
-            "width": 100,
+            "width": 137,
             "columnResetSettings": {
               "isTurnedOn": false,
               "resetOnDoubleClick": false,
@@ -2626,14 +2626,14 @@
     ],
     "mainWindowPosition": {
       "location": {
-        "valueX": -6152,
-        "valueY": -605
+        "valueX": -5170,
+        "valueY": -597
       },
       "size": {
-        "width": 1200,
-        "height": 800
+        "width": 1592,
+        "height": 1399
       },
-      "maximized": true
+      "maximized": false
     },
     "strategiesSettings": {
       "strategies": {

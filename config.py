@@ -352,6 +352,104 @@ def _refresh() -> None:
     g["BOOKMAP_MBO_FILE"] = _fget("BOOKMAP_MBO_FILE", "")  # optional separate MBO file
     g["BOOKMAP_ADDON_NAME"] = _fget("BOOKMAP_ADDON_NAME", "GoldBookMapBridge")
 
+    # ---- CRITICAL v5.2: L3 Whale + Regime Adaptive + AI Fallback + Basis ----
+    g["L3_WHALE_THRESHOLD"] = _ffloat("L3_WHALE_THRESHOLD", 100.0)  # lots
+    g["L3_WHALE_PROXIMITY_PCT"] = _ffloat("L3_WHALE_PROXIMITY_PCT", 0.5)  # % near price
+    g["L3_WHALE_WEIGHT"] = _ffloat("L3_WHALE_WEIGHT", 1.5)
+    g["SIGNAL_W_L3_WHALE"] = _ffloat("SIGNAL_W_L3_WHALE", 1.5)
+
+    g["REGIME_ADAPTIVE"] = _fget("REGIME_ADAPTIVE", "1") == "1"
+    g["TREND_ADX_THRESHOLD"] = _ffloat("TREND_ADX_THRESHOLD", 25.0)
+    g["VOLATILITY_HIGH_MULT"] = _ffloat("VOLATILITY_HIGH_MULT", 1.5)
+    g["RANGE_VWAP_WEIGHT"] = _ffloat("RANGE_VWAP_WEIGHT", 2.0)
+
+    g["AI_TIMEOUT_SECONDS"] = _fint("AI_TIMEOUT_SECONDS", 20)
+    g["AI_FALLBACK_ENABLED"] = _fget("AI_FALLBACK_ENABLED", "1") == "1"
+    g["AI_FALLBACK_STRENGTH"] = _ffloat("AI_FALLBACK_STRENGTH", 35.0)
+    g["AI_FALLBACK_CONFIDENCE"] = _ffloat("AI_FALLBACK_CONFIDENCE", 70.0)
+    g["AI_CACHE_MINUTES"] = _fint("AI_CACHE_MINUTES", 5)
+    g["AI_MAX_PROMPT_BARS"] = _fint("AI_MAX_PROMPT_BARS", 15)
+    g["AI_MAX_HEADLINES"] = _fint("AI_MAX_HEADLINES", 5)
+
+    g["BASIS_MAX"] = _ffloat("BASIS_MAX", 50.0)  # max futures-spot basis $
+    g["BASIS_BUFFER_MULT"] = _ffloat("BASIS_BUFFER_MULT", 1.5)
+    g["BASIS_WARN_PCT"] = _ffloat("BASIS_WARN_PCT", 1.0)  # % basis change warning
+
+    # ---- MEDIUM v5.3: M1-M6 ----
+    # M1 Footprint & Absorption
+    g["FOOTPRINT_ENABLED"] = _fget("FOOTPRINT_ENABLED", "1") == "1"
+    g["ABSORPTION_WALL_SIZE"] = _ffloat("ABSORPTION_WALL_SIZE", 50.0)
+    g["ABSORPTION_MIN_EVENTS"] = _fint("ABSORPTION_MIN_EVENTS", 2)
+    g["AGGRESSIVE_FROM_TICKS"] = _fget("AGGRESSIVE_FROM_TICKS", "1") == "1"
+
+    # M2 Volatility-adjusted position sizing
+    g["VOL_ADJUSTED_LOTS"] = _fget("VOL_ADJUSTED_LOTS", "1") == "1"
+    g["VOL_LOT_RISK_PCT"] = _ffloat("VOL_LOT_RISK_PCT", 1.0)
+    g["MIN_LOT_SKIP"] = _fget("MIN_LOT_SKIP", "1") == "1"
+    g["VOL_ATR_FALLBACK_PCT"] = _ffloat("VOL_ATR_FALLBACK_PCT", 0.5)
+
+    # M3 Iceberg & Spoof Detection
+    g["ICEBERG_ENABLED"] = _fget("ICEBERG_ENABLED", "1") == "1"
+    g["ICEBERG_MIN_REFILLS"] = _fint("ICEBERG_MIN_REFILLS", 3)
+    g["ICEBERG_SAME_PRICE_TOL"] = _ffloat("ICEBERG_SAME_PRICE_TOL", 0.10)
+    g["SPOOF_ENABLED"] = _fget("SPOOF_ENABLED", "1") == "1"
+    g["SPOOF_CANCEL_SECONDS"] = _ffloat("SPOOF_CANCEL_SECONDS", 2.0)
+    g["SPOOF_SIZE_THRESHOLD"] = _ffloat("SPOOF_SIZE_THRESHOLD", 100.0)
+    g["SIGNAL_W_ICEBERG"] = _ffloat("SIGNAL_W_ICEBERG", 1.0)
+    g["SIGNAL_W_SPOOF"] = _ffloat("SIGNAL_W_SPOOF", 0.8)
+
+    # M4 Macro & News weight boost
+    g["NEWS_SENTIMENT_HIGH_WEIGHT"] = _ffloat("NEWS_SENTIMENT_HIGH_WEIGHT", 1.0)
+    g["NEWS_SENTIMENT_LOW_WEIGHT"] = _ffloat("NEWS_SENTIMENT_LOW_WEIGHT", 0.4)
+    g["DXY_VETO_ENABLED"] = _fget("DXY_VETO_ENABLED", "1") == "1"
+    g["DXY_RISING_THRESHOLD_PCT"] = _ffloat("DXY_RISING_THRESHOLD_PCT", 0.3)
+    g["DXY_CORR_THRESHOLD"] = _ffloat("DXY_CORR_THRESHOLD", -0.15)
+    g["SIGNAL_W_MACRO_HIGH"] = _ffloat("SIGNAL_W_MACRO_HIGH", 1.0)
+
+    # M5 MBO archival
+    g["BOOKMAP_MBO_ROTATE_MB"] = _ffloat_first(["BOOKMAP_MBO_ROTATE_MB", "MBO_ROTATE_MB"], 100.0)
+    g["BOOKMAP_MBO_ARCHIVE_KEEP_DAYS"] = _ffloat_first(["BOOKMAP_MBO_ARCHIVE_KEEP_DAYS", "MBO_ARCHIVE_KEEP_DAYS"], 0.0)
+
+    # M6 TCA & Slippage
+    g["TCA_ENABLED"] = _fget("TCA_ENABLED", "1") == "1"
+    g["TCA_REPORT_DAYS"] = _fint("TCA_REPORT_DAYS", 7)
+    g["TCA_SLIPPAGE_THRESHOLD"] = _ffloat("TCA_SLIPPAGE_THRESHOLD", 0.5)
+    g["TCA_ADJUST_SPREAD_MULT"] = _fget("TCA_ADJUST_SPREAD_MULT", "1") == "1"
+
+    # ---- LOW v5.4: L1-L6 ----
+    # L4 Latency & Kill Switch
+    g["LATENCY_LOG_ENABLED"] = _fget("LATENCY_LOG_ENABLED", "1") == "1"
+    g["LATENCY_TARGET_MS"] = _fint("LATENCY_TARGET_MS", 500)
+    g["FLASH_CRASH_ENABLED"] = _fget("FLASH_CRASH_ENABLED", "1") == "1"
+    g["FLASH_CRASH_ATR_MULT"] = _ffloat("FLASH_CRASH_ATR_MULT", 3.0)
+    g["FLASH_CRASH_MINUTES"] = _ffloat("FLASH_CRASH_MINUTES", 1.0)
+
+    # L6 Volatility Regime PM (adaptive giveback)
+    g["PM_VOL_ADAPTIVE"] = _fget("PM_VOL_ADAPTIVE", "1") == "1"
+    g["PM_VOL_HIGH_GIVEBACK"] = _ffloat("PM_VOL_HIGH_GIVEBACK", 0.30)
+    g["PM_VOL_LOW_GIVEBACK"] = _ffloat("PM_VOL_LOW_GIVEBACK", 0.60)
+    g["PM_VOL_HIGH_RANK"] = _ffloat("PM_VOL_HIGH_RANK", 0.6)
+    g["PM_VOL_LOW_RANK"] = _ffloat("PM_VOL_LOW_RANK", 0.3)
+
+    # L1 Cross-Market Confirmation
+    g["CROSS_MARKET_ENABLED"] = _fget("CROSS_MARKET_ENABLED", "0") == "1"
+    g["CROSS_MARKET_CONF_BOOST"] = _ffloat("CROSS_MARKET_CONF_BOOST", 15.0)
+    g["GC_BRIDGE_FILE"] = _fget("GC_BRIDGE_FILE", "")
+    g["SI_BRIDGE_FILE"] = _fget("SI_BRIDGE_FILE", "")
+
+    # L2 Backtest L3
+    g["BACKTEST_L3_ENABLED"] = _fget("BACKTEST_L3_ENABLED", "1") == "1"
+
+    # L3 Queue Position Model
+    g["QUEUE_POS_ENABLED"] = _fget("QUEUE_POS_ENABLED", "1") == "1"
+    g["QUEUE_POS_THRESHOLD"] = _ffloat("QUEUE_POS_THRESHOLD", 0.7)
+
+    # L5 Reinforcement Learning from Trade Memory
+    g["RL_ENABLED"] = _fget("RL_ENABLED", "1") == "1"
+    g["RL_LOSS_STREAK"] = _fint("RL_LOSS_STREAK", 3)
+    g["RL_SIZE_REDUCE_PCT"] = _ffloat("RL_SIZE_REDUCE_PCT", 50.0)
+    g["RL_PAUSE_MINUTES"] = _fint("RL_PAUSE_MINUTES", 30)
+
     # ---- Databento (optional future) --------------------------------------
     g["DATABENTO_DATASET"] = _fget("DATABENTO_DATASET", "GLBX.MDP3")
     g["DATABENTO_SCHEMA"] = _fget("DATABENTO_SCHEMA", "mbo")

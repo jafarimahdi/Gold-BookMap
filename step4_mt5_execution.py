@@ -204,6 +204,49 @@ class MT5Executor:
         lots = max(0.01, min(lots, config.MAX_LOT_SIZE))
         return float(np_round2(lots))
 
+    def compute_vol_adjusted_lot_size(self, equity: float, atr: float,
+                                      risk_pct: Optional[float] = None) -> float:
+        """M2: Volatility-adjusted lot sizing.
+
+        Formula: lots = (equity * risk%) / (ATR * contract_size)
+        This ensures 1% risk = same dollar risk regardless of volatility.
+        Example: $1000 equity, ATR $5, contract 100 -> lots = (1000*0.01)/(5*100) = 0.02
+        If ATR high, lots smaller (protect), if low, larger (but capped).
+
+        Returns raw lots before broker clamping.
+        """
+        try:
+            risk_pct = risk_pct if risk_pct is not None else float(getattr(config, "VOL_LOT_RISK_PCT", 1.0))
+        except:
+            risk_pct = 1.0
+        if atr <= 0 or config.CONTRACT_SIZE <= 0 or equity <= 0:
+            return config.LOT_SIZE
+        # Fallback ATR % if atr too small
+        try:
+            fallback_pct = float(getattr(config, "VOL_ATR_FALLBACK_PCT", 0.5)) / 100.0
+            if atr < equity * fallback_pct * 0.01:  # sanity
+                pass
+        except:
+            pass
+        risk_amount = equity * risk_pct / 100.0
+        lots = risk_amount / (atr * config.CONTRACT_SIZE)
+        # Don't clamp to 0.01 here — let caller decide to skip if too small
+        lots = min(lots, float(getattr(config, "MAX_LOT_SIZE", 1.0)))
+        return float(lots)
+
+    def _check_min_lot_skip(self, calculated_lots: float, info) -> Optional[str]:
+        """M2: If broker min lot > calculated risk-based lots, skip trade (don't over-risk)."""
+        try:
+            if not bool(getattr(config, "MIN_LOT_SKIP", True)):
+                return None
+            min_lot = float(getattr(info, "volume_min", 0.01) or 0.01)
+            if calculated_lots < min_lot - 1e-9:
+                return (f"Vol-adjusted lots {calculated_lots:.4f} < broker min {min_lot:.2f} — "
+                        f"would over-risk, SKIPPED (equity too small for ATR)")
+        except Exception:
+            pass
+        return None
+
     # ------------------------------------------------------------------ #
     def _calc_sl_tp(self, action: str, price: float, atr: float,
                     news_state: str) -> tuple:
@@ -402,6 +445,32 @@ class MT5Executor:
             return ExecutionResult(status="ERROR", reason="symbol info unavailable",
                                    symbol=self.symbol, price=price, timestamp=now)
 
+        # v5.2 C4: Basis risk check (futures vs spot)
+        # Futures 4310 vs Spot 4265 = $45 basis normal, but if >50 or widening fast -> risk
+        try:
+            futures_price = float(getattr(snapshot, "price", 0.0) or 0.0)
+            basis = futures_price - price if futures_price > 0 and price > 0 else 0.0
+            basis_max = float(getattr(config, "BASIS_MAX", 50.0))
+            basis_buffer_mult = float(getattr(config, "BASIS_BUFFER_MULT", 1.5))
+            if abs(basis) > basis_max and basis_max > 0:
+                logger.warning("STEP 4: Basis wide: futures %.2f spot %.2f basis %.2f > max %.2f — widening SL buffer %.1fx",
+                               futures_price, price, basis, basis_max, basis_buffer_mult)
+                # Will widen SL later via buffer multiplier
+                # For now just log, but if basis > 1.5*max, skip
+                if abs(basis) > basis_max * 1.5:
+                    reason = f"Basis too wide: {basis:.2f} > {basis_max*1.5:.2f} (futures {futures_price:.2f} vs spot {price:.2f}) — DEFERRED"
+                    logger.warning("STEP 4: %s", reason)
+                    return ExecutionResult(status="DEFERRED", reason=reason,
+                                           symbol=self.symbol, price=price,
+                                           timestamp=now)
+            # Store basis for later SL widening
+            self._last_basis = basis
+            self._last_futures = futures_price
+        except Exception as e:
+            logger.warning("STEP 4: Basis calc failed: %s", e)
+            self._last_basis = 0.0
+            self._last_futures = 0.0
+
         # CFD spread guard: main.py's spread gate watches the DATA feed
         # (futures bid/ask); this checks the actual broker spread on the trade
         # symbol right before ordering. A wide spread is an instant edge loss.
@@ -499,6 +568,19 @@ class MT5Executor:
             price * 0.005  # 0.5% fallback
         src_price = getattr(snapshot, "price", 0.0) or price
         atr = src_atr * (price / src_price) if src_price > 0 else src_atr
+
+        # v5.2 C4: Widen ATR if basis wide
+        try:
+            basis = float(getattr(self, "_last_basis", 0.0) or 0.0)
+            basis_max = float(getattr(config, "BASIS_MAX", 50.0))
+            basis_buffer_mult = float(getattr(config, "BASIS_BUFFER_MULT", 1.5))
+            if abs(basis) > basis_max and basis_max > 0:
+                atr *= basis_buffer_mult
+                logger.info("STEP 4: Basis %.2f > max %.2f — ATR widened to %.2f (mult %.1fx)",
+                            basis, basis_max, atr, basis_buffer_mult)
+        except:
+            pass
+
         # v4: structural stops — SL behind demand/supply zones (order blocks),
         # POC or strong round numbers; TP in front of opposing structure.
         # Falls back to the old ATR multiples when no structure exists.
@@ -507,6 +589,12 @@ class MT5Executor:
             sl, tp, struct_notes = compute_structural_stops(
                 action, price, atr, snapshot, news_state)
             if struct_notes:
+                # Add basis info to notes
+                try:
+                    if abs(self._last_basis) > 5:
+                        struct_notes.append(f"basis {self._last_basis:.2f} futures {self._last_futures:.2f}")
+                except:
+                    pass
                 logger.info("STEP 4: structural stops: %s",
                             "; ".join(struct_notes))
         except Exception:
@@ -520,12 +608,63 @@ class MT5Executor:
                                    tp=tp, timestamp=now)
 
         # --- position sizing ----------------------------------------------------
+        # v5.3 M2: Volatility-adjusted sizing + min lot skip guard
         equity = self._account_equity()
         stop_distance = abs(price - sl)
-        lot_size = self.compute_lot_size(equity, stop_distance) \
-            if equity else config.LOT_SIZE
+
+        # Calculate both traditional (stop-based) and vol-adjusted (ATR-based)
+        traditional_lots = self.compute_lot_size(equity, stop_distance) if equity else config.LOT_SIZE
+
+        # M2 vol-adjusted: lots = (equity * 1%) / (ATR * contract_size)
+        vol_lots_raw = 0.0
+        try:
+            if bool(getattr(config, "VOL_ADJUSTED_LOTS", True)) and equity and atr > 0:
+                vol_lots_raw = self.compute_vol_adjusted_lot_size(equity, atr)
+                # Use the MORE CONSERVATIVE (smaller) of the two to avoid over-risk
+                lot_size_candidate = min(traditional_lots, vol_lots_raw) if vol_lots_raw > 0 else traditional_lots
+                logger.info(f"STEP 4 M2: equity ${equity:.2f} ATR {atr:.2f} stop {stop_distance:.2f} "
+                            f"trad {traditional_lots:.4f} vol-adj {vol_lots_raw:.4f} -> using {lot_size_candidate:.4f}")
+                lot_size = lot_size_candidate
+            else:
+                lot_size = traditional_lots
+        except Exception as e:
+            logger.warning(f"STEP 4 M2 calc failed {e}, using traditional")
+            lot_size = traditional_lots
+
+        # M2: Check if calculated lots < broker min -> skip (don't over-risk $1000 account with 0.01 lots)
+        try:
+            skip_reason = self._check_min_lot_skip(vol_lots_raw if vol_lots_raw > 0 else lot_size, info)
+            if skip_reason:
+                logger.info(f"STEP 4 M2: {skip_reason}")
+                return ExecutionResult(status="SKIPPED", reason=skip_reason,
+                                       symbol=self.symbol, price=price, sl=sl, tp=tp,
+                                       volume=float(getattr(info, 'volume_min', 0.01)),
+                                       timestamp=now)
+        except Exception:
+            pass
+
         if news_state == "WARNING":
             lot_size = lot_size * config.NEWS_REDUCE_SIZE_PCT  # shrink during news
+
+        # L5 RL adaptive: reduce size after loss streak
+        try:
+            if getattr(config, "RL_ENABLED", True):
+                import trade_history as th
+                regime = str(getattr(snapshot, "regime", "") or "")
+                mult = th.get_rl_size_multiplier(regime)
+                if mult < 1.0:
+                    if mult <= 0.0:
+                        reason = f"RL pause: loss streak in regime {regime} -> no new entries"
+                        logger.info(f"STEP 4 L5: {reason}")
+                        return ExecutionResult(status="SKIPPED", reason=reason,
+                                               symbol=self.symbol, price=price, sl=sl, tp=tp,
+                                               volume=lot_size, timestamp=now)
+                    old_lot = lot_size
+                    lot_size = lot_size * mult
+                    logger.info(f"STEP 4 L5 RL: size {old_lot:.4f} * {mult:.2f} -> {lot_size:.4f} regime {regime}")
+        except Exception as e:
+            logger.warning(f"STEP 4 L5 RL error: {e}")
+
         lot_size = self._normalize_volume(lot_size, info)
 
         # v4.4 COST GUARD: a target closer than ENTRY_MIN_TP_SPREAD_MULT

@@ -1221,32 +1221,47 @@ class PositionManager:
                             "position not in profit; structural SL stays "
                             "the protection", threat_title, threat_mins)
         # v4.3: profit ratchet — never give back more than PM_PROFIT_GIVEBACK
-        # of the best gain once the trade has earned >= 1 x ATR
+        # v5.4 L6: volatility-adaptive giveback (high vol 30% / low vol 60%) + regime/macro
         if getattr(config, "PM_PROFIT_LOCK_ENABLE", True) and best_gain > 0:
-            # v4.4 adaptive lock: arm earlier and give back less when the
-            # market is a RANGE, or when the macro backdrop fights us
             lock_min_atr = config.PM_PROFIT_LOCK_MIN_ATR
             giveback = config.PM_PROFIT_GIVEBACK
+            adaptive_tags = []
             if getattr(config, "PM_REGIME_ADAPTIVE", True):
                 if str(getattr(snapshot, "regime", "") or "").upper() == "RANGE":
                     lock_min_atr = min(lock_min_atr, config.PM_REGIME_LOCK_ATR)
                     giveback = min(giveback, config.PM_REGIME_GIVEBACK)
+                    adaptive_tags.append(f"RANGE:{giveback*100:.0f}%")
             if getattr(config, "PM_MACRO_DEFENSE", True):
                 pos_sign = 1.0 if is_buy else -1.0
                 macro_bias = float(getattr(snapshot, "macro_bias", 0.0) or 0.0)
                 if (-pos_sign * macro_bias) >= config.PM_MACRO_OPP_THRESHOLD:
                     lock_min_atr = min(lock_min_atr, config.PM_MACRO_LOCK_ATR)
                     giveback = min(giveback, config.PM_MACRO_GIVEBACK)
+                    adaptive_tags.append(f"MACRO:{giveback*100:.0f}%")
+            # L6 volatility regime
+            if getattr(config, "PM_VOL_ADAPTIVE", True):
+                vol_rank = float(getattr(getattr(snapshot, "volatility", None), "volatility_rank", 0.5) or 0.5)
+                try:
+                    high_rank = float(getattr(config, "PM_VOL_HIGH_RANK", 0.6))
+                    low_rank = float(getattr(config, "PM_VOL_LOW_RANK", 0.3))
+                    high_gb = float(getattr(config, "PM_VOL_HIGH_GIVEBACK", 0.30))
+                    low_gb = float(getattr(config, "PM_VOL_LOW_GIVEBACK", 0.60))
+                    if vol_rank >= high_rank:
+                        giveback = min(giveback, high_gb)
+                        adaptive_tags.append(f"HIGH_VOL:{vol_rank:.2f}->{giveback*100:.0f}%")
+                    elif vol_rank <= low_rank:
+                        giveback = max(giveback, low_gb)
+                        adaptive_tags.append(f"LOW_VOL:{vol_rank:.2f}->{giveback*100:.0f}%")
+                except Exception as e:
+                    logger.debug(f"L6 vol adaptive error: {e}")
             if best_gain >= lock_min_atr * atr:
                 lock = entry + sign * best_gain * (1.0 - giveback)
                 if lock * sign > cur_sl * sign + min_step:
+                    extra = f" ({', '.join(adaptive_tags)})" if adaptive_tags else ""
+                    base_gb = float(getattr(config, "PM_PROFIT_GIVEBACK", 0.5))
+                    adaptive_flag = " (adaptive)" if (giveback != base_gb or adaptive_tags) else ""
                     cands.append((lock, "PROFIT_LOCK",
-                                  f"profit ratchet: best gain {best_gain:.1f} "
-                                  f"pts — never give back more than "
-                                  f"{giveback*100:.0f}%"
-                                  + (" (adaptive: range/macro defense)" if
-                                     giveback < config.PM_PROFIT_GIVEBACK
-                                     else "")))
+                                  f"profit ratchet: best {best_gain:.1f} pts, giveback {giveback*100:.0f}%{adaptive_flag}{extra}"))
         if cands:
             sl_candidate, rule, reason = max(cands, key=lambda c: c[0] * sign)
         else:
