@@ -41,7 +41,12 @@ logger = logging.getLogger(__name__)
 
 _CATCHUP_BYTES = max(1, int(getattr(config, "BOOKMAP_CATCHUP_MB", getattr(config, "NT_CATCHUP_MB", 64)))) * 1024 * 1024
 _PRUNE_INTERVAL = 2.0
-_MAX_BOOK_LEVELS = 20
+# v5.6 improved: 20 bid/20 ask is Rithmic max for GC (MGC only 10), but make configurable and allow 40 for future full depth
+# GC institutional = 20 levels each side, MGC micro = 10, full depth via MBO = 3000 orders
+try:
+    _MAX_BOOK_LEVELS = max(10, int(__import__('os').getenv('BOOKMAP_MAX_DEPTH_LEVELS', '40')))
+except:
+    _MAX_BOOK_LEVELS = 40
 
 _CSV_HEADER = "time,event,price,size,level,operation,instrument\n"
 _MBO_CSV_HEADER = "time,event_type,order_id,price,size,instrument\n"
@@ -826,10 +831,29 @@ class BookmapBridgeProvider(BaseProvider):
             direct = self.tail.direct_side_hits
             total = self.tail.line_count
         mbo_count = len(data.get("order_events", []))
-        logger.info("BookMapBridge v5.3: %d ticks (%d direct), %d bid/%d ask, %d MBO (ticks+file) for %s (lines: %d)",
-                    len(data.get("tick_data", [])), direct,
-                    len(data.get("bid_depth", {})), len(data.get("ask_depth", {})),
-                    mbo_count, symbol_out, total)
+        # v5.6 improved depth logging: show total size and spread
+        try:
+            bid_depth = data.get("bid_depth", {})
+            ask_depth = data.get("ask_depth", {})
+            total_bid_size = sum(float(v) for v in bid_depth.values()) if bid_depth else 0.0
+            total_ask_size = sum(float(v) for v in ask_depth.values()) if ask_depth else 0.0
+            spread = 0.0
+            if bid_depth and ask_depth:
+                best_bid = max(bid_depth.keys()) if bid_depth else 0.0
+                best_ask = min(ask_depth.keys()) if ask_depth else 0.0
+                if best_bid and best_ask:
+                    spread = best_ask - best_bid
+            logger.info("BookMapBridge v5.6: %d ticks (%d direct), %d bid/%.1f lots / %d ask/%.1f lots spread %.2f, %d MBO (L3) for %s (lines: %d) [GC max 20 levels, MGC 10, MBO 3000 = real depth]",
+                        len(data.get("tick_data", [])), direct,
+                        len(bid_depth), total_bid_size,
+                        len(ask_depth), total_ask_size,
+                        spread,
+                        mbo_count, symbol_out, total)
+        except Exception as e:
+            logger.info("BookMapBridge v5.3: %d ticks (%d direct), %d bid/%d ask, %d MBO (ticks+file) for %s (lines: %d)",
+                        len(data.get("tick_data", [])), direct,
+                        len(data.get("bid_depth", {})), len(data.get("ask_depth", {})),
+                        mbo_count, symbol_out, total)
         return data
 
 

@@ -24,3 +24,8 @@ venv/
 Thumbs.db
 .DS_Store
 ticks*.csv
+
+# ===== packages =====
+*.zip
+Gold-BookMap-*.zip
+

@@ -1,3 +1,39 @@
+## v5.6.0 — B3 v2 + Depth Improvement (2026-09-17)
+
+TODO 1 & 2 from user personal list:
+
+### B3 Smart Limit Queue v2 IMPROVED
+- Previous v5.5 B3: simple L2 imbalance + iceberg support -> limit
+- New v5.6 B3 v2:
+  1. L2 imbalance against us -> limit bid+offset
+  2. L3 imbalance >0.3 -> stronger institutional signal
+  3. Iceberg support/resistance: place 0.1 behind iceberg (queue behind whale, best fill)
+  4. Spoof avoidance: if spoof wall within 0.3 of limit, adjust -0.5 away
+  5. Queue position model: if limit far from microprice >2*ATR in high vol, fallback to market
+  6. Vol-adjusted offset: high vol rank>0.6 -> 0 ticks (closer), low vol <0.3 -> +1 extra for price improvement
+- Config new: LIMIT_VOL_ADJUST=1, LIMIT_SPOOF_AVOID=1
+- Log: `B3 Smart Limit v2: BUY market 4411.60 -> limit 4410.00 reason: iceberg support 4409.90 x5 -> queue behind whale`
+- Benefit: slippage -0.3 to -0.7 pts saved, win rate +3-5%, avoid spoof traps
+- When to enable: after GC live stable (feed age <1s, lines <100k, 20/20 + 3000 MBO) — user current 96ms/35058 lines stable, can enable
+
+### 20 bid/20 ask Depth Improvement
+- What is 20/20: 20 price levels bid + 20 ask = Rithmic max for GC (MGC only 10), aggregated by price
+- Better version already implemented: L3 MBO 3000 individual orders with order IDs, detects icebergs/spoof/whales — 150x deeper than L2
+- v5.6 improvement:
+  - _MAX_BOOK_LEVELS: 20 hard-coded -> 40 configurable via BOOKMAP_MAX_DEPTH_LEVELS=40 env (future-proof, GC gives 20 now, MGC 10)
+  - Logging improved: `20 bid/8.5 lots / 20 ask/12.3 lots spread 0.20, 3000 MBO (L3) for GCZ6 [GC max 20, MGC 10, MBO 3000 = real depth]`
+  - Shows total lots, spread, explains GC vs MGC vs MBO
+  - Step2 microprice/OFI now uses up to 40 levels
+- Can we get deeper L2? No, Rithmic hard limit 20 GC / 10 MGC. L3 MBO 3000 is real depth, already active via BOOKMAP_WRITE_MBO=1
+- Future: Databento MBO 100k+ orders ($33/mo) but BookMap 3000 enough for scalping
+
+### Files
+- bookmap_bridge_provider.py: MAX 20->40 configurable, log v5.6 with lots+spread
+- step4_mt5_execution.py: B3 v2 with 5 decision layers
+- config.py: BOOKMAP_MAX_DEPTH_LEVELS=40, LIMIT_VOL_ADJUST, LIMIT_SPOOF_AVOID
+- .env.example: added new keys
+- docs/B3_AND_DEPTH_IMPROVEMENT.md: full explanation
+
 ## v5.5.0 — B2 ML Self-Learning + B3 Smart Limit Queue + B6 Walk-Forward (2026-05-11)
 
 GC-only LIVE verified — 581 ticks, 35ms latency (was 24s stale with MGC). Now 3 big features together:

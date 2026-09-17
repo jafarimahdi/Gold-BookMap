@@ -351,6 +351,7 @@ def _refresh() -> None:
     g["BOOKMAP_WRITE_MBO"] = _fget("BOOKMAP_WRITE_MBO", "0") == "1"  # also write MBO stream to mbo.csv
     g["BOOKMAP_MBO_FILE"] = _fget("BOOKMAP_MBO_FILE", "")  # optional separate MBO file
     g["BOOKMAP_ADDON_NAME"] = _fget("BOOKMAP_ADDON_NAME", "GoldBookMapBridge")
+    g["BOOKMAP_MAX_DEPTH_LEVELS"] = _fint("BOOKMAP_MAX_DEPTH_LEVELS", 40)
 
     # ---- CRITICAL v5.2: L3 Whale + Regime Adaptive + AI Fallback + Basis ----
     g["L3_WHALE_THRESHOLD"] = _ffloat("L3_WHALE_THRESHOLD", 100.0)  # lots
@@ -449,6 +450,8 @@ def _refresh() -> None:
     g["LIMIT_OFFSET_TICKS"] = _fint("LIMIT_OFFSET_TICKS", 1)
     g["LIMIT_TICK_SIZE"] = _ffloat("LIMIT_TICK_SIZE", 0.1)
     g["LIMIT_TIMEOUT_SECONDS"] = _fint("LIMIT_TIMEOUT_SECONDS", 10)
+    g["LIMIT_VOL_ADJUST"] = _fget("LIMIT_VOL_ADJUST", "1") == "1"
+    g["LIMIT_SPOOF_AVOID"] = _fget("LIMIT_SPOOF_AVOID", "1") == "1"
 
     # B2 ML Weight Trainer
     g["ML_TRAINER_ENABLED"] = _fget("ML_TRAINER_ENABLED", "1") == "1"
