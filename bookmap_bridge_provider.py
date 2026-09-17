@@ -492,6 +492,36 @@ class BookmapBridgeProvider(BaseProvider):
                 self._trades = [{"timestamp": t["ts"].isoformat(), "price": t["price"], "volume": t["volume"]} for t in st.ticks]
                 raw_bids = dict(st.bids)
                 raw_asks = dict(st.asks)
+                # v5.2 C4: Clean crossed book even when best_bid/ask are 0 (no Bid/Ask events, only Depth)
+                # Old logic used best_bid/best_ask from Bid/Ask events, but BookMap L3 only sends DepthBid/DepthAsk
+                # New: derive best from depth itself and uncross
+                if raw_bids and raw_asks:
+                    best_bid_depth = max(raw_bids.keys()) if raw_bids else 0.0
+                    best_ask_depth = min(raw_asks.keys()) if raw_asks else 0.0
+                    # If crossed (bid >= ask), remove crossing levels
+                    if best_bid_depth and best_ask_depth and best_bid_depth >= best_ask_depth:
+                        # Keep bids < ask and asks > bid
+                        raw_bids = {p: s for p, s in raw_bids.items() if p < best_ask_depth}
+                        raw_asks = {p: s for p, s in raw_asks.items() if p > best_bid_depth}
+                        # Recalculate after cleaning
+                        if raw_bids and raw_asks:
+                            best_bid_depth = max(raw_bids.keys())
+                            best_ask_depth = min(raw_asks.keys())
+                            # If still crossed (extreme), keep only 20 levels each side sorted and ensure best bid < best ask
+                            if best_bid_depth >= best_ask_depth:
+                                # Take top 20 bids and top 20 asks and force uncross by mid
+                                sorted_bids = sorted(raw_bids.items(), key=lambda kv: -kv[0])
+                                sorted_asks = sorted(raw_asks.items(), key=lambda kv: kv[0])
+                                # Find mid from tick_data last price or average
+                                mid_price = 0.0
+                                if st.ticks:
+                                    mid_price = st.ticks[-1]["price"]
+                                elif sorted_bids and sorted_asks:
+                                    mid_price = (sorted_bids[0][0] + sorted_asks[0][0]) / 2.0
+                                if mid_price > 0:
+                                    raw_bids = {p: s for p, s in sorted_bids if p < mid_price}
+                                    raw_asks = {p: s for p, s in sorted_asks if p > mid_price}
+                # Also apply old filter with best_bid/best_ask if available (for NT compatibility)
                 if st.best_ask:
                     kept = {p: s for p, s in raw_bids.items() if p <= st.best_ask}
                     if kept:
