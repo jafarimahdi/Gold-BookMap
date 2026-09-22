@@ -1094,24 +1094,24 @@ class Level3OrderBookAnalyzer:
                         # v5.9: track first_seen for persistence scoring
                         if "first_seen" not in existing:
                             existing["first_seen"] = existing.get("add_ts", event_ts)
-                        # Only count first time threshold met, not every refill (prevents 929 spam)
-                        if existing["refills"] == self._iceberg_min_refills:
-                            self.iceberg_events += 1
-                            self._iceberg_levels[price] += 1
-                            # v5.9 heatmap meta: compute age and score
+                        # v7.0 P2 FIX: update meta on every refill >= MIN, not only ==, so age/score grows to institutional
+                        if existing["refills"] >= self._iceberg_min_refills:
+                            # Always update heatmap meta so we get age/score institutional w1.6
                             try:
                                 first = existing.get("first_seen", event_ts)
                                 age = max(1.0, event_ts - first)
                                 total_sz = existing.get("total_vol", size)
-                                # Persistence score = refills * log(age) * total_size
                                 import math
                                 score = existing["refills"] * math.log(max(1.0, age)) * total_sz
-                                # Store per price level meta (aggregate)
                                 meta = self._iceberg_meta.get(price, {"refills":0, "first_seen":first, "last_seen":event_ts, "total_size":0.0, "age_sec":0.0, "score":0.0})
-                                meta["refills"] = meta.get("refills",0) + 1
+                                # For order_id path, aggregate per price
+                                if existing["refills"] == self._iceberg_min_refills:
+                                    meta["refills"] = meta.get("refills",0) + 1
+                                else:
+                                    meta["refills"] = max(meta.get("refills",0), existing["refills"] - self._iceberg_min_refills + 1)
                                 meta["first_seen"] = min(meta.get("first_seen", first), first)
                                 meta["last_seen"] = max(meta.get("last_seen", event_ts), event_ts)
-                                meta["total_size"] = meta.get("total_size",0.0) + total_sz
+                                meta["total_size"] = meta.get("total_size",0.0) + size
                                 meta["age_sec"] = max(1.0, meta["last_seen"] - meta["first_seen"])
                                 meta["score"] = meta["refills"] * math.log(max(1.0, meta["age_sec"])) * meta["total_size"]
                                 self._iceberg_meta[price] = meta
@@ -1121,6 +1121,10 @@ class Level3OrderBookAnalyzer:
                                     logger.debug(f"ICEBERG meta error {ie}")
                                 except:
                                     pass
+                            # Only count event first time threshold met (prevents 929 spam)
+                            if existing["refills"] == self._iceberg_min_refills:
+                                self.iceberg_events += 1
+                                self._iceberg_levels[price] += 1
                     else:
                         # Price changed, reset
                         self._order_map[order_id] = {"price": price, "size": size, "side": book_side, "add_ts": event_ts, "first_seen": event_ts, "last_seen": event_ts, "refills": 0, "total_vol": size}
@@ -1157,10 +1161,28 @@ class Level3OrderBookAnalyzer:
                 self._ofi_add(book_side, size)
             self.order_book[book_side].append((price, size))
             key = (book_side, price, size)
-            if self._last_new_key == key:
+            # v7.0 P2 FIX: legacy only when order_id invalid, to avoid double-count with MBO order_id path
+            is_invalid_oid = (not order_id) or (str(order_id).strip() in ("-1","0","","None","null"))
+            if self._last_new_key == key and is_invalid_oid:
                 # Simple same price/size repeat also counts as iceberg (legacy)
                 self.iceberg_events += 1
                 self._iceberg_levels[price] += 1
+                # v7.0 P2 FIX: legacy path also creates iceberg_meta age/score so we get institutional w1.6 even without same order_id
+                try:
+                    import math as _math
+                    now_ts = event_ts
+                    meta = self._iceberg_meta.get(price)
+                    if not meta:
+                        meta = {"refills":0, "first_seen":now_ts, "last_seen":now_ts, "total_size":0.0, "age_sec":1.0, "score":0.0}
+                    meta["refills"] += 1
+                    meta["last_seen"] = now_ts
+                    meta["total_size"] = meta.get("total_size",0.0) + size
+                    meta["age_sec"] = max(1.0, meta["last_seen"] - meta["first_seen"])
+                    # score = refills * log(age) * total_size — grows to institutional after minutes
+                    meta["score"] = meta["refills"] * _math.log(max(1.0, meta["age_sec"])) * meta["total_size"]
+                    self._iceberg_meta[price] = meta
+                except Exception:
+                    pass
             self._last_new_key = key
 
         elif event_type in ("CANCEL", "CANCELED", "DELETE"):

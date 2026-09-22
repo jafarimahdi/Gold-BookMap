@@ -143,7 +143,12 @@ def handle_mbo(addon, alias, event_type, order_id, price_level, size_level):
             price = pl  # fallback raw is already correct
 
     # Write to ticks.csv as Mbo + to mbo.csv detailed
-    write_line(now_iso(), "Mbo", price, size, -1, event_type, alias)
+    # v7.0 P2 FIX: include order_id in level field (was -1) so we get real iceberg meta age/score w1.6
+    try:
+        oid_lvl = str(order_id) if str(order_id).strip() not in ("-1","0","","None","null") else -1
+    except:
+        oid_lvl = -1
+    write_line(now_iso(), "Mbo", price, size, oid_lvl, event_type, alias)
     try:
         with open(MBO_FILE, "a", encoding="utf-8") as f:
             f.write(f"{now_iso()},{event_type},{order_id},{price:.4f},{size:.4f},{alias}\n")

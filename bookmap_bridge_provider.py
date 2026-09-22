@@ -814,8 +814,21 @@ class BookmapBridgeProvider(BaseProvider):
                         pass
                 # Combine, deduplicate by (order_id, type, price) keeping latest
                 # v5.3 fix: filter invalid order_ids (-1) that cause iceberg spam
+                # v7.0 P2 FIX: proper dedup to avoid double counting same MBO from ticks.csv + mbo.csv
                 combined_raw = mbo_from_ticks + mbo_from_file
-                combined = [e for e in combined_raw if str(e.get("order_id","")).strip() not in ("-1","0","","None")]
+                filtered = [e for e in combined_raw if str(e.get("order_id","")).strip() not in ("-1","0","","None")]
+                # Deduplicate: keep latest by (order_id, type, price) key
+                dedup_dict = {}
+                for ev in filtered:
+                    key = (str(ev.get("order_id","")), str(ev.get("type","")).upper(), round(float(ev.get("price",0)),2))
+                    # Keep latest timestamp (overwrite)
+                    dedup_dict[key] = ev
+                combined = list(dedup_dict.values())
+                # Sort by timestamp to preserve order
+                try:
+                    combined.sort(key=lambda x: x.get("timestamp",""))
+                except Exception:
+                    pass
                 # Keep last 5000
                 if len(combined) > 5000:
                     combined = combined[-5000:]

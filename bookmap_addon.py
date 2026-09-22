@@ -411,8 +411,13 @@ def handle_mbo(addon, alias: str, event_type: str, order_id: str, price_level: i
     price = _price_from_level(price_level, pips)
     size = _size_from_level(size_level, size_mult)
     # Write to same ticks.csv as Mbo event for provider's order_events, or to separate mbo.csv
-    # We'll write to ticks.csv as Mbo + to mbo.csv for archive
-    writer.write_line(_now_iso(), "Mbo", price, size, -1, event_type, alias)
+    # v7.0 P2 FIX: write order_id into level column (was -1) so bridge_provider can extract real order_id
+    # and avoid legacy w0.8 path, getting age/score institutional w1.6 directly from ticks.csv alone
+    try:
+        oid_for_level = str(order_id) if str(order_id).strip() not in ("-1","0","","None","null") else -1
+    except:
+        oid_for_level = -1
+    writer.write_line(_now_iso(), "Mbo", price, size, oid_for_level, event_type, alias)
     # Also append to mbo.csv
     try:
         mbo_path = Path(MBO_FILE)
