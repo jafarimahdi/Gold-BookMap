@@ -230,7 +230,7 @@ class AIDecisionEngine:
 
         payload = snapshot_to_dict(snapshot)
 
-        # v5.2: Trim heavy fields for faster Gemini response (8000 → 2000 tokens)
+        # v5.8 L3 Enhanced: Trim + add L3 top levels, net flow, queue
         if "news" in payload:
             if "news_headlines" in payload["news"]:
                 payload["news"]["news_headlines"] = payload["news"]["news_headlines"][:max_headlines]
@@ -251,21 +251,57 @@ class AIDecisionEngine:
             if "order_events" in payload["level3"]:
                 payload["level3"]["order_events"] = payload["level3"]["order_events"][-100:]
             if "order_book" in payload["level3"]:
-                # Keep only top 10 bids/asks
                 ob = payload["level3"]["order_book"]
                 if isinstance(ob, dict):
                     ob["bids"] = ob.get("bids", [])[:10]
                     ob["asks"] = ob.get("asks", [])[:10]
-            # Add L3 whale summary for AI
+            # v5.8 Enhanced L3 summary for AI
             try:
-                payload["l3_summary"] = {
-                    "large_order_events": payload["level3"].get("large_order_events", 0),
-                    "iceberg_events": payload["level3"].get("iceberg_events", 0),
-                    "ofi_l3": payload["level3"].get("ofi", 0),
-                    "imbalance": payload["level3"].get("order_book_imbalance", 0),
+                l3 = payload["level3"]
+                # Top 3 L3 bid/ask levels by size
+                bids = sorted(l3.get("order_book", {}).get("bids", []), key=lambda x: x[1] if len(x)>1 else 0, reverse=True)[:3]
+                asks = sorted(l3.get("order_book", {}).get("asks", []), key=lambda x: x[1] if len(x)>1 else 0, reverse=True)[:3]
+                # Net aggressive flow
+                buy_vol = float(l3.get("aggressive_buy_volume", 0) or 0)
+                sell_vol = float(l3.get("aggressive_sell_volume", 0) or 0)
+                net_flow = buy_vol - sell_vol
+                # Iceberg levels with refills
+                icebergs = l3.get("iceberg_levels", {}) or {}
+                top_icebergs = sorted(icebergs.items(), key=lambda kv: kv[1], reverse=True)[:3]
+                # Spoof levels
+                spoofs = l3.get("spoof_levels", {}) or {}
+                # Queue pos proxy: use imbalance + bid/ask ratio from order_flow if available
+                payload["l3_enhanced"] = {
+                    "top_bids": [{"price": float(p), "size": float(s), "dist_pct": round(abs(float(p)-float(payload.get("price",0)))/float(payload.get("price",1))*100,3) if payload.get("price") else 0} for p,s in bids],
+                    "top_asks": [{"price": float(p), "size": float(s), "dist_pct": round(abs(float(p)-float(payload.get("price",0)))/float(payload.get("price",1))*100,3) if payload.get("price") else 0} for p,s in asks],
+                    "net_aggressive_flow_M5": round(net_flow,1),
+                    "aggressive_buys": l3.get("aggressive_buys",0),
+                    "aggressive_sells": l3.get("aggressive_sells",0),
+                    "buy_volume": round(buy_vol,1),
+                    "sell_volume": round(sell_vol,1),
+                    "top_icebergs": [{"price": float(k), "refills": int(v)} for k,v in top_icebergs],
+                    "spoof_levels": [{"price": float(k), "count": int(v)} for k,v in list(spoofs.items())[:3]],
+                    "large_order_events": l3.get("large_order_events",0),
+                    "iceberg_events": l3.get("iceberg_events",0),
+                    "spoof_events": l3.get("spoof_events",0),
+                    "ofi_l3": l3.get("ofi",0),
+                    "imbalance": round(l3.get("order_book_imbalance",0),3),
+                    "buy_streak": l3.get("buy_streak",0),
+                    "sell_streak": l3.get("sell_streak",0),
                 }
-            except:
-                pass
+                # Keep old summary for backward compat
+                payload["l3_summary"] = payload["l3_enhanced"]
+            except Exception as e:
+                try:
+                    payload["l3_summary"] = {
+                        "large_order_events": payload["level3"].get("large_order_events", 0),
+                        "iceberg_events": payload["level3"].get("iceberg_events", 0),
+                        "ofi_l3": payload["level3"].get("ofi", 0),
+                        "imbalance": payload["level3"].get("order_book_imbalance", 0),
+                        "error": str(e)[:100]
+                    }
+                except:
+                    pass
 
         payload["session_context"] = session_context()
         return (
@@ -315,23 +351,66 @@ class AIDecisionEngine:
             pass
 
     def _fallback_decision(self, snapshot) -> Optional[Decision]:
-        """v5.2: Rule-based fallback when AI fails — institutional standard"""
+        """v5.8 L3 Enhanced: Rule-based fallback when AI fails — fast 10s, uses L3 whale+iceberg+netflow"""
         try:
             if not bool(getattr(config, "AI_FALLBACK_ENABLED", True)):
                 return None
             fallback_strength = float(getattr(config, "AI_FALLBACK_STRENGTH", 35.0))
             fallback_conf = float(getattr(config, "AI_FALLBACK_CONFIDENCE", 70.0))
+            l3_enabled = bool(getattr(config, "AI_FALLBACK_L3_ENABLED", True))
+            netflow_thr = float(getattr(config, "L3_NET_FLOW_THRESHOLD", 100.0))
 
             sig_strength = float(getattr(snapshot, "signal_strength", 0.0) or 0.0)
             sig_dir = str(getattr(snapshot, "signal_direction", "NEUTRAL")).upper()
 
-            if sig_strength < fallback_strength or sig_dir not in ("BUY", "SELL"):
-                return None
-
-            # Check alignment: CVD + L2 + L3 same direction
+            # Even if strength low, L3 can trigger if strong
             of = getattr(snapshot, "order_flow", None)
             l3 = getattr(snapshot, "level3", None)
             if not of or not l3:
+                return None
+
+            # L3 Enhanced fallback: whale + iceberg + net flow
+            if l3_enabled:
+                try:
+                    # Net aggressive flow
+                    net_flow = float(getattr(l3, "aggressive_buy_volume", 0) - getattr(l3, "aggressive_sell_volume", 0))
+                    whale_bids = []
+                    whale_asks = []
+                    price = float(getattr(snapshot, "price", 0) or 0)
+                    thr = float(getattr(config, "L3_WHALE_THRESHOLD", 100.0))
+                    for p,s in (getattr(l3, "order_book", {}).get("bids", []) or []):
+                        if s >= thr and price>0 and abs(p-price)/price <= 0.005:
+                            whale_bids.append((p,s))
+                    for p,s in (getattr(l3, "order_book", {}).get("asks", []) or []):
+                        if s >= thr and price>0 and abs(p-price)/price <= 0.005:
+                            whale_asks.append((p,s))
+                    iceberg = int(getattr(l3, "iceberg_events", 0) or 0)
+                    # Strong L3 BUY: whale bid + iceberg + net buy flow
+                    if len(whale_bids)>0 and iceberg>=2 and net_flow > netflow_thr:
+                        rationale = f"L3 FALLBACK BUY: whale bid {len(whale_bids)} + iceberg {iceberg} + net flow +{net_flow:.0f} -> BUY (AI failed, M5)"
+                        logger.info("STEP 3: L3 FALLBACK BUY @ %.0f%% (%s)", fallback_conf, rationale)
+                        return Decision(action="BUY", confidence=fallback_conf, rationale=rationale, model="fallback-l3", timestamp=datetime.now(timezone.utc))
+                    if len(whale_asks)>0 and iceberg>=2 and net_flow < -netflow_thr:
+                        rationale = f"L3 FALLBACK SELL: whale ask {len(whale_asks)} + iceberg {iceberg} + net flow {net_flow:.0f} -> SELL (AI failed, M5)"
+                        logger.info("STEP 3: L3 FALLBACK SELL @ %.0f%% (%s)", fallback_conf, rationale)
+                        return Decision(action="SELL", confidence=fallback_conf, rationale=rationale, model="fallback-l3", timestamp=datetime.now(timezone.utc))
+                    # Spoof invert fallback
+                    spoof_events = int(getattr(l3, "spoof_events", 0) or 0)
+                    if spoof_events>=1:
+                        spoof_levels = getattr(l3, "spoof_levels", {}) or {}
+                        spoof_bid = sum(1 for p in spoof_levels if p < price)
+                        spoof_ask = sum(1 for p in spoof_levels if p > price)
+                        if spoof_ask>0 and net_flow>50:
+                            rationale = f"L3 FALLBACK SPOOF_INVERT fake asks {spoof_ask} + net buy {net_flow:.0f} -> BUY trap"
+                            return Decision(action="BUY", confidence=fallback_conf, rationale=rationale, model="fallback-spoof", timestamp=datetime.now(timezone.utc))
+                        if spoof_bid>0 and net_flow<-50:
+                            rationale = f"L3 FALLBACK SPOOF_INVERT fake bids {spoof_bid} + net sell {net_flow:.0f} -> SELL trap"
+                            return Decision(action="SELL", confidence=fallback_conf, rationale=rationale, model="fallback-spoof", timestamp=datetime.now(timezone.utc))
+                except Exception as e:
+                    logger.debug("L3 fallback error: %s", e)
+
+            # Original fallback: CVD+L2+L3 align
+            if sig_strength < fallback_strength or sig_dir not in ("BUY", "SELL"):
                 return None
 
             cvd_sign = 1 if float(getattr(of, "cvd", 0) or 0) > 0 else -1 if float(getattr(of, "cvd", 0) or 0) < 0 else 0
@@ -494,6 +573,51 @@ class AIDecisionEngine:
                 try:
                     text = self._call_with_key(key, model, prompt)
                     action, confidence, rationale = self._parse_response(text)
+                    # v5.8 L3 Confidence Calibration
+                    try:
+                        if bool(getattr(config, "AI_CONF_CALIBRATION", True)) and action in ("BUY","SELL"):
+                            l3 = getattr(snapshot, "level3", None)
+                            of = getattr(snapshot, "order_flow", None)
+                            if l3 and of:
+                                dir_sign = 1 if action=="BUY" else -1
+                                net_flow = float(getattr(l3, "aggressive_buy_volume",0) - getattr(l3, "aggressive_sell_volume",0))
+                                ofi_l3 = float(getattr(l3, "ofi",0) or 0)
+                                whale_thr = float(getattr(config, "L3_WHALE_THRESHOLD",100.0))
+                                price = float(getattr(snapshot, "price",0) or 0)
+                                whale_confirm = False
+                                # Check whale in direction
+                                bids = getattr(l3, "order_book", {}).get("bids", []) if hasattr(l3, "order_book") else []
+                                asks = getattr(l3, "order_book", {}).get("asks", []) if hasattr(l3, "order_book") else []
+                                if dir_sign>0:
+                                    # BUY needs bid whale + positive flow
+                                    has_whale_bid = any(s>=whale_thr and price>0 and abs(p-price)/price<=0.005 for p,s in bids)
+                                    if has_whale_bid and net_flow>50 and ofi_l3>0:
+                                        whale_confirm = True
+                                else:
+                                    has_whale_ask = any(s>=whale_thr and price>0 and abs(p-price)/price<=0.005 for p,s in asks)
+                                    if has_whale_ask and net_flow<-50 and ofi_l3<0:
+                                        whale_confirm = True
+                                boost = float(getattr(config, "AI_L3_CONF_BOOST",15.0))
+                                penalty = float(getattr(config, "AI_L3_CONF_PENALTY",20.0))
+                                if whale_confirm:
+                                    confidence = min(95.0, confidence + boost)
+                                    rationale += f" [L3 CONFIRMS whale+flow+OFI +{boost:.0f}%]"
+                                else:
+                                    # Check conflict: whale opposite or flow opposite
+                                    conflict = False
+                                    if dir_sign>0 and (net_flow<-50 or ofi_l3<-100):
+                                        conflict = True
+                                    if dir_sign<0 and (net_flow>50 or ofi_l3>100):
+                                        conflict = True
+                                    if conflict:
+                                        confidence = max(0.0, confidence - penalty)
+                                        rationale += f" [L3 CONFLICTS flow/OFI -{penalty:.0f}% -> reduce]"
+                                        if confidence < 55:
+                                            action = "HOLD"
+                                            rationale += " -> HOLD due L3 conflict"
+                    except Exception as ce:
+                        logger.debug("L3 conf calibration error: %s", ce)
+
                     logger.info("STEP 3: Gemini -> %s @ %.1f%% (key #%d, %s)",
                                 action, confidence, key_index, model)
                     decision = Decision(action=action, confidence=confidence,

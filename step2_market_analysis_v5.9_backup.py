@@ -1948,46 +1948,14 @@ class SignalEngine:
         except Exception as e:
             notes.append(f"regime adaptive error: {e}")
 
-        # ---- 0a2) v6.0 Kill Zones: London 09-11 CET trend, otherwise range
-        killzone = "OFF"
-        kz_trend_boost = 1.0
-        kz_range_boost = 1.0
-        try:
-            if getattr(config, "V6_KILLZONES_ENABLED", False):
-                from datetime import datetime, timezone
-                now_utc = datetime.now(timezone.utc)
-                bud_hour = (now_utc.hour + 2) % 24  # Budapest CEST UTC+2
-                bud_min = now_utc.minute
-                killzone = _get_killzone(bud_hour, bud_min)
-                if killzone in ("LONDON", "NY"):
-                    kz_trend_boost = float(getattr(config, "V6_KZ_TREND_BOOST", 2.0))
-                    kz_range_boost = 0.5
-                    # Boost trend_mult already set
-                    trend_mult *= kz_trend_boost
-                    notes.append(f"v6.0 KillZone {killzone} {bud_hour:02d}:{bud_min:02d} Budapest -> TREND boost {kz_trend_boost}x trend_mult now {trend_mult:.1f}x")
-                else:
-                    kz_trend_boost = 0.5
-                    kz_range_boost = float(getattr(config, "V6_KZ_RANGE_BOOST", 2.0))
-                    vwap_mult *= kz_range_boost
-                    trend_mult *= kz_trend_boost
-                    notes.append(f"v6.0 KillZone OFF {bud_hour:02d}:{bud_min:02d} -> RANGE boost {kz_range_boost}x vwap_mult now {vwap_mult:.1f}x")
-        except Exception as kze:
-            notes.append(f"killzone v6 error: {kze}")
-
         # ---- 0b) multi-timeframe confirmation (H1 -> M15 -> M5 vs M1) --------
         # Each higher timeframe votes WITH or AGAINST the M1 signal, weighted by
         # its importance (H1 counts most). Stacked agreement = strong signal;
         # disagreement weakens it — this filters trades that fight the trend.
         mtf_trends = mtf_trends or {}
-        # v6.0 M5 scalper: M5 boss 1.2, M15 0.8, H1 0.4
-        if getattr(config, "V6_4TEAMS_ENABLED", False):
-            tf_weights = {"H1": float(getattr(config, "V6_MTF_H1_WEIGHT", 0.4)),
-                          "M15": float(getattr(config, "V6_MTF_M15_WEIGHT", 0.8)),
-                          "M5": float(getattr(config, "V6_MTF_M5_WEIGHT", 1.2))}
-        else:
-            tf_weights = {"H1": float(getattr(config, "SIGNAL_W_H1", 1.0)),
-                          "M15": float(getattr(config, "SIGNAL_W_M15", 0.8)),
-                          "M5": float(getattr(config, "SIGNAL_W_M5", 0.6))}
+        tf_weights = {"H1": float(getattr(config, "SIGNAL_W_H1", 1.0)),
+                      "M15": float(getattr(config, "SIGNAL_W_M15", 0.8)),
+                      "M5": float(getattr(config, "SIGNAL_W_M5", 0.6))}
         for tf_name in ("H1", "M15", "M5"):
             tf_dir = mtf_trends.get(tf_name)
             if tf_dir == "UP":
@@ -2067,20 +2035,9 @@ class SignalEngine:
                    float(getattr(config, "SIGNAL_W_OFI", 0.9))))
         votes.append((np.clip(order_flow.depth_imbalance * 2.5, -1.0, 1.0),
                    float(getattr(config, "SIGNAL_W_DEPTH", 0.7))))
-        # v6.0 RESTORED microprice for M5 bank
-        if getattr(config, "V6_MICROPRICE_ENABLED", False):
-            try:
-                if order_flow.microprice and price>0:
-                    micro_dev = (order_flow.microprice - order_flow.mid_price) / price * 10000
-                    if abs(micro_dev) > 0.5:
-                        s = float(np.clip(micro_dev / 5.0, -1.0, 1.0))
-                        w = float(getattr(config, "V6_MICROPRICE_WEIGHT", 0.8))
-                        votes.append((s, w))
-                        notes.append(f"v6.0 microprice {order_flow.microprice:.2f} vs mid {order_flow.mid_price:.2f} dev {micro_dev:+.1f}bps -> {'BUY' if s>0 else 'SELL'} w{w}")
-            except Exception as me:
-                notes.append(f"microprice v6 error: {me}")
-        else:
-            notes.append("microprice vote removed v5.8.1 (L3 OFI better)")
+        # v5.8.1 CLEAN: microprice deleted (similar to OFI, L3 OFI better)
+        # if order_flow.microprice: votes.append(...)  # DELETED
+        notes.append("microprice vote removed v5.8.1 (L3 OFI better)")
         # absorption: net ask-absorption (buyers) vs bid-absorption (sellers)
         votes.append((np.clip(order_flow.absorption_net * 0.5, -1.0, 1.0),
                    float(getattr(config, "SIGNAL_W_ABSORB", 0.5))))
@@ -2390,42 +2347,6 @@ class SignalEngine:
             votes.append((-1.0, float(getattr(config, "SIGNAL_W_DIVERGENCE", 1.2))))
             notes.append("bearish CVD divergence (price up, selling up)")
 
-        # ---- 6b) v6.0 Liquidity Sweep / Stop Hunt --------------------------------
-        try:
-            if getattr(config, "V6_SWEEP_ENABLED", False) and recent_closes is not None:
-                # Need high/low/close/volume from recent_closes? Use trend data if available
-                # For now use recent_closes as close, and approximate high/low from close + ATR
-                # Better: use market_data candles if available via recent_closes is close array
-                # We'll try to get high/low from order_flow or use close as proxy
-                # Use close array for sweep detection with volume from order_flow
-                close_arr = np.asarray(recent_closes, dtype=float) if recent_closes is not None else np.array([price])
-                # Approximate high/low as close +/- ATR*0.5 if not available
-                atr = float(volatility.atr or 1.0)
-                high_arr = close_arr + atr*0.3
-                low_arr = close_arr - atr*0.3
-                # Volume array approximated from order_flow or use ones
-                vol_arr = np.ones_like(close_arr) * 100
-                try:
-                    # Try to get real high/low if available in market_data via volatility or elsewhere
-                    # For now use close_arr for sweep
-                    sweep = _detect_liquidity_sweep(high_arr, low_arr, close_arr, vol_arr,
-                                                   lookback=int(getattr(config, "V6_SWEEP_LOOKBACK", 20)),
-                                                   threshold_pct=float(getattr(config, "V6_SWEEP_THRESHOLD_PCT", 0.10)),
-                                                   vol_roc_thr=float(getattr(config, "V6_SWEEP_VOLUME_ROC", 3.0)))
-                    if sweep != 0:
-                        w = float(getattr(config, "V6_SWEEP_WEIGHT", 1.5))
-                        if sweep > 0:
-                            # Bearish sweep high taken -> SELL reversal
-                            votes.append((-1.0, w))
-                            notes.append(f"v6.0 SWEEP BEARISH high taken then reversal -> SELL w{w} (stop hunt)")
-                        else:
-                            votes.append((+1.0, w))
-                            notes.append(f"v6.0 SWEEP BULLISH low taken then reversal -> BUY w{w} (stop hunt)")
-                except Exception as se:
-                    notes.append(f"sweep calc error: {se}")
-        except Exception as e:
-            notes.append(f"v6.0 sweep error: {e}")
-
         # ---- 7) Volume profile ENHANCED v5.8.2 (VWAP, POC, VAH/VAL, HTF POC, volume) ----
         # v5.2 regime adaptive: vwap_mult and mean_rev_mult
         if volume_profile.vwap:
@@ -2469,50 +2390,6 @@ class SignalEngine:
             fade_w = (0.8 if float(volatility.volatility_rank or 0.0) < 0.5 else 0.4) * mean_rev_mult
             votes.append((-np.sign(z) * min(abs(z) / 2.0, 1.0), fade_w))
             notes.append("VWAP z-score %.1f -> mean reversion fade (adaptive %.2f)" % (z, fade_w))
-
-        # v6.0 VWAP Bands ±1σ/±2σ mean reversion (bank-grade M5)
-        try:
-            if getattr(config, "V6_VWAP_BANDS_ENABLED", False) and volume_profile.vwap:
-                vwap = float(volume_profile.vwap)
-                # Estimate VWAP std from volatility or ATR
-                vwap_std = float(getattr(volume_profile, "vwap_std", 0) or 0)
-                if vwap_std <= 0:
-                    vwap_std = float(volatility.atr or price*0.002) * 0.8  # approx
-                if vwap_std > 0 and price>0:
-                    # Bands
-                    band_1u = vwap + vwap_std
-                    band_2u = vwap + 2*vwap_std
-                    band_25u = vwap + 2.5*vwap_std
-                    band_1l = vwap - vwap_std
-                    band_2l = vwap - 2*vwap_std
-                    band_25l = vwap - 2.5*vwap_std
-                    # Price near bands
-                    if price >= band_25u:
-                        w = float(getattr(config, "V6_VWAP_BAND_25SIG_WEIGHT", 1.8)) * vwap_mult
-                        votes.append((-1.0, w))
-                        notes.append(f"v6.0 VWAP +2.5σ {band_25u:.1f} price {price:.1f} stretched -> SELL mean reversion w{w:.1f}")
-                    elif price >= band_2u:
-                        w = float(getattr(config, "V6_VWAP_BAND_2SIG_WEIGHT", 1.3)) * vwap_mult
-                        votes.append((-1.0, w))
-                        notes.append(f"v6.0 VWAP +2σ {band_2u:.1f} price {price:.1f} high -> SELL w{w:.1f}")
-                    elif price >= band_1u and regime=="RANGE":
-                        w = float(getattr(config, "V6_VWAP_BAND_1SIG_WEIGHT", 0.8)) * vwap_mult
-                        votes.append((-1.0, w*0.6))
-                        notes.append(f"v6.0 VWAP +1σ {band_1u:.1f} price {price:.1f} -> SELL w{w*0.6:.1f}")
-                    if price <= band_25l:
-                        w = float(getattr(config, "V6_VWAP_BAND_25SIG_WEIGHT", 1.8)) * vwap_mult
-                        votes.append((+1.0, w))
-                        notes.append(f"v6.0 VWAP -2.5σ {band_25l:.1f} price {price:.1f} stretched -> BUY mean reversion w{w:.1f}")
-                    elif price <= band_2l:
-                        w = float(getattr(config, "V6_VWAP_BAND_2SIG_WEIGHT", 1.3)) * vwap_mult
-                        votes.append((+1.0, w))
-                        notes.append(f"v6.0 VWAP -2σ {band_2l:.1f} price {price:.1f} low -> BUY w{w:.1f}")
-                    elif price <= band_1l and regime=="RANGE":
-                        w = float(getattr(config, "V6_VWAP_BAND_1SIG_WEIGHT", 0.8)) * vwap_mult
-                        votes.append((+1.0, w*0.6))
-                        notes.append(f"v6.0 VWAP -1σ {band_1l:.1f} price {price:.1f} -> BUY w{w*0.6:.1f}")
-        except Exception as ve:
-            notes.append(f"v6.0 VWAP bands error: {ve}")
         # Volume confirmation: high volume + price up = bullish
         try:
             vol_roc = float(getattr(volume_profile, "volume_rate_of_change", 0.0) or 0.0)
@@ -2719,185 +2596,9 @@ class SignalEngine:
         except Exception as e:
             notes.append(f"DXY veto error: {e}")
 
-        # ---- v6.0 4 Teams + Filter hierarchical ensemble (bank-grade) ----
-        # If enabled, group votes into 4 teams then ensemble, else flat
-        team_scores = {}
-        team_weights = {}
-        confluence_ok = True
-        try:
-            if getattr(config, "V6_4TEAMS_ENABLED", False):
-                # Define team membership by note keywords
-                flow_votes = []
-                whale_votes = []
-                structure_votes = []
-                trend_votes = []
-                world_votes = []
-                for s,w in votes:
-                    # This is approximate grouping by weight and source
-                    # Better: group by notes, but we use vote magnitudes as proxy
-                    # For now, we regroup by scanning notes for keywords is complex, so we use existing votes list partitioned by type
-                    # We'll rebuild teams from individual vote categories tracked via notes
-                    pass
-                # Instead, we will compute team scores from dedicated accumulators built during voting
-                # For simplicity, we compute team scores by averaging relevant vote subsets
-                # Flow: pressure, CVD, bidask, OFI, depth, absorb, footprint, microprice
-                # Whale: L3 imbalance, L3 OFI, L3 aggr, whale, netflow, iceberg, spoof, queue, sweep
-                # Structure: VWAP, POC, VAH/VAL, order blocks, VWAP bands
-                # Trend: trend, MACD, SMA20, MTF
-                # World: macro, news, DXY veto
-
-                # Recompute team scores from votes + notes
-                # We will parse notes to assign team, but fallback to weighted average if parsing fails
-
-                # Flow team
-                flow_team_votes = []
-                whale_team_votes = []
-                structure_team_votes = []
-                trend_team_votes = []
-                world_team_votes = []
-
-                # Use notes to assign: if note contains keyword, assign vote
-                # This is heuristic, but works because we have notes list parallel to votes? Not parallel, but we can approximate
-                # For v6.0, we will use all votes but with team weights applied via config and then check confluence
-
-                # Calculate team scores by filtering votes based on their origin weight thresholds
-                # Flow team: OFI, depth, pressure, CVD, footprint, microprice, absorption
-                # We will approximate by taking votes with weight 0.6-0.9 that are flow-related (first 10 votes)
-                # For robustness, we will just compute overall but with team weighting
-
-                # Team weights from config
-                team_flow_w = float(getattr(config, "V6_TEAM_FLOW_WEIGHT", 1.5))
-                team_whale_w = float(getattr(config, "V6_TEAM_WHALE_WEIGHT", 1.4))
-                team_struct_w = float(getattr(config, "V6_TEAM_STRUCTURE_WEIGHT", 1.2))
-                team_trend_w = float(getattr(config, "V6_TEAM_TREND_WEIGHT", 0.8))
-                team_world_w = float(getattr(config, "V6_TEAM_WORLD_VETO", 0.3))
-
-                # For v6.0, we will compute team scores by grouping votes that were added in each section
-                # Since we don't have explicit grouping, we will use note keywords to group
-
-                # Initialize team accumulators
-                flow_score = 0.0
-                flow_weight = 0.0
-                whale_score = 0.0
-                whale_weight = 0.0
-                struct_score = 0.0
-                struct_weight = 0.0
-                trend_score = 0.0
-                trend_weight = 0.0
-                world_score = 0.0
-                world_weight = 0.0
-
-                # Parse notes to assign team scores (each note corresponds roughly to a vote)
-                for note in notes:
-                    nl = note.lower()
-                    # Flow team keywords
-                    if any(k in nl for k in ["cvd", "footprint", "ofi", "depth", "pressure", "bid/ask", "absorption", "microprice", "delta", "buy%", "sell%"]):
-                        # Find corresponding vote? Approximate by using last votes - we will use note count as proxy
-                        # For simplicity, we will use vote averages: we will sum all flow-related votes from votes list that have relevant weight
-                        pass
-
-                # Fallback: compute team scores from vote subsets by index ranges (approximate)
-                # This is simplified but functional for M5: first 15 votes = trend+flow, next 20 = L3 whale, next 10 = structure, last = macro
-                # Better: use actual vote counts
-
-                # For v6.0 final, we will compute 4 team scores as weighted averages of relevant vote categories
-                # We will re-derive from votes list by using config weights as proxy
-
-                # Trend team: votes with w around 0.5-1.0 that are trend-related (first 5 votes)
-                trend_votes = votes[:5] if len(votes)>=5 else votes
-                flow_votes = votes[5:15] if len(votes)>=15 else votes[5:] if len(votes)>5 else []
-                whale_votes = votes[15:35] if len(votes)>=35 else votes[15:] if len(votes)>15 else []
-                struct_votes = votes[35:45] if len(votes)>=45 else votes[35:] if len(votes)>35 else []
-                world_votes = votes[45:] if len(votes)>=45 else []
-
-                def team_avg(vlist):
-                    if not vlist:
-                        return 0.0, 0.0
-                    tw = sum(w for _,w in vlist) or 1.0
-                    ts = sum(s*w for s,w in vlist) / tw
-                    return ts, tw
-
-                t_trend, _ = team_avg(trend_votes)
-                t_flow, _ = team_avg(flow_votes)
-                t_whale, _ = team_avg(whale_votes)
-                t_struct, _ = team_avg(struct_votes)
-                t_world, _ = team_avg(world_votes)
-
-                # Team scores with team weights
-                team_scores = {
-                    "flow": t_flow,
-                    "whale": t_whale,
-                    "structure": t_struct,
-                    "trend": t_trend,
-                    "world": t_world
-                }
-
-                # Confluence: need at least 3 teams agree + whale must agree
-                min_teams = int(getattr(config, "V6_CONFLUENCE_MIN_TEAMS", 3))
-                # Count agreeing teams (excluding world)
-                buy_teams = sum(1 for k in ["flow","whale","structure","trend"] if team_scores.get(k,0) > 0.15)
-                sell_teams = sum(1 for k in ["flow","whale","structure","trend"] if team_scores.get(k,0) < -0.15)
-
-                # Whale must agree for any trade
-                whale_agrees_buy = team_scores.get("whale",0) > 0.10
-                whale_agrees_sell = team_scores.get("whale",0) < -0.10
-
-                # World veto: if world strongly opposite, veto
-                world_veto = False
-                if team_scores.get("world",0) < -0.5 and buy_teams>=3:
-                    world_veto = True
-                    notes.append(f"v6.0 World veto: world {team_scores['world']:.2f} SELL vs {buy_teams} BUY teams -> veto BUY")
-                if team_scores.get("world",0) > 0.5 and sell_teams>=3:
-                    world_veto = True
-                    notes.append(f"v6.0 World veto: world {team_scores['world']:.2f} BUY vs {sell_teams} SELL teams -> veto SELL")
-
-                if not world_veto:
-                    if buy_teams >= min_teams and whale_agrees_buy:
-                        confluence_ok = True
-                        notes.append(f"v6.0 Confluence BUY: {buy_teams} teams agree (flow {t_flow:+.2f}, whale {t_whale:+.2f}, struct {t_struct:+.2f}, trend {t_trend:+.2f}) whale agrees -> OK")
-                    elif sell_teams >= min_teams and whale_agrees_sell:
-                        confluence_ok = True
-                        notes.append(f"v6.0 Confluence SELL: {sell_teams} teams agree (flow {t_flow:+.2f}, whale {t_whale:+.2f}, struct {t_struct:+.2f}, trend {t_trend:+.2f}) whale agrees -> OK")
-                    else:
-                        confluence_ok = False
-                        notes.append(f"v6.0 Confluence FAIL: BUY teams {buy_teams} SELL teams {sell_teams} whale {t_whale:+.2f} need {min_teams} + whale -> NEUTRAL")
-                else:
-                    confluence_ok = False
-
-                # Final score as weighted team ensemble
-                total_team_w = team_flow_w + team_whale_w + team_struct_w + team_trend_w
-                ensemble_score = (t_flow*team_flow_w + t_whale*team_whale_w + t_struct*team_struct_w + t_trend*team_trend_w) / total_team_w
-
-                # If confluence fails, cap score to NEUTRAL range
-                if not confluence_ok:
-                    ensemble_score *= 0.3  # reduce to near zero
-
-                score = ensemble_score
-                notes.append(f"v6.0 4 Teams ensemble: flow {t_flow:+.2f}*{team_flow_w} whale {t_whale:+.2f}*{team_whale_w} struct {t_struct:+.2f}*{team_struct_w} trend {t_trend:+.2f}*{team_trend_w} -> {ensemble_score:+.3f} confluence {'OK' if confluence_ok else 'FAIL'}")
-
-        except Exception as te:
-            notes.append(f"v6.0 teams error: {te} -> fallback flat")
-            # Fallback to flat
-            total_weight = sum(w for _, w in votes) or 1.0
-            score = sum(s * w for s, w in votes) / total_weight
-
-        # ---- weighted composite (fallback or v6.0) ----------------------------------------------
-        try:
-            total_weight = sum(w for _, w in votes) or 1.0
-            flat_score = sum(s * w for s, w in votes) / total_weight
-        except:
-            flat_score = 0.0
-
-        # If v6.0 teams enabled, use ensemble_score, else flat
-        if getattr(config, "V6_4TEAMS_ENABLED", False):
-            try:
-                # score already set to ensemble_score if teams succeeded
-                pass
-            except:
-                score = flat_score
-        else:
-            score = flat_score
-
+        # ---- weighted composite ----------------------------------------------
+        total_weight = sum(w for _, w in votes) or 1.0
+        score = sum(s * w for s, w in votes) / total_weight
         score_scaled = float(np.clip(score, -1.0, 1.0) * 100.0)
 
         buy_thr, sell_thr = self._thresholds()
@@ -3369,52 +3070,6 @@ def _detect_divergence(close: np.ndarray, cvd: float, lookback: int = 15,
         return +1.0
     return 0.0
 
-
-def _detect_liquidity_sweep(high, low, close, volume, lookback=20, threshold_pct=0.10, vol_roc_thr=3.0):
-    try:
-        import numpy as np
-        high = np.asarray(high, dtype=float)
-        low = np.asarray(low, dtype=float)
-        close = np.asarray(close, dtype=float)
-        volume = np.asarray(volume, dtype=float)
-        if len(high) < lookback+3:
-            return 0
-        recent_high = float(np.max(high[-lookback-3:-3]))
-        recent_low = float(np.min(low[-lookback-3:-3]))
-        curr_high = float(high[-1])
-        curr_low = float(low[-1])
-        curr_close = float(close[-1])
-        avg_vol = float(np.mean(volume[-lookback:])) if len(volume)>=lookback else 1.0
-        curr_vol = float(volume[-1]) if len(volume)>=1 else avg_vol
-        vol_roc = curr_vol / max(avg_vol, 1.0)
-        if curr_high > recent_high * (1 + threshold_pct/100.0):
-            if curr_close < recent_high and vol_roc >= vol_roc_thr:
-                return 1
-            if len(close)>=2:
-                upper_wick = curr_high - max(curr_close, float(close[-2]))
-                if upper_wick > (curr_high - recent_high) * 0.6 and vol_roc >= 2.0:
-                    return 1
-        if curr_low < recent_low * (1 - threshold_pct/100.0):
-            if curr_close > recent_low and vol_roc >= vol_roc_thr:
-                return -1
-            if len(close)>=2:
-                lower_wick = min(curr_close, float(close[-2])) - curr_low
-                if lower_wick > (recent_low - curr_low) * 0.6 and vol_roc >= 2.0:
-                    return -1
-    except:
-        pass
-    return 0
-
-def _get_killzone(budapest_hour, budapest_min):
-    try:
-        hm = budapest_hour*60 + budapest_min
-        if 9*60 <= hm < 11*60:
-            return "LONDON"
-        if (14*60+30) <= hm < (16*60+30):
-            return "NY"
-        return "OFF"
-    except:
-        return "OFF"
 
 def analyze_market(market_data: Dict[str, Any],
                    now: Optional[datetime] = None) -> MarketSnapshot:

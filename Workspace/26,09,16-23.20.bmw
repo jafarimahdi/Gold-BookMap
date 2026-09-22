@@ -2710,6 +2710,10 @@
             [],
             [],
             [],
+            [],
+            [],
+            [],
+            [],
             []
           ]
         },
@@ -2720,15 +2724,15 @@
           },
           "velox.indicator.CVD": {
             "version": 3,
-            "text": "{\n  \"indicatorsMap\": {\n    \"CVD\": {\n      \"orderSizeLower\": 1,\n      \"orderSizeUpper\": 100,\n      \"isOrderSizeLowerUsed\": false,\n      \"isOrderSizeUpperUsed\": false,\n      \"isChartRange\": false,\n      \"isSplitBuySell\": false,\n      \"resetPoints-v2\": [],\n      \"sessionStart-v2\": {\n        \"startTimeMs\": 0,\n        \"timeItem-v1\": {\n          \"name\": \"Session start\",\n          \"timeParamSeconds\": 86400,\n          \"isNormalInterval\": false,\n          \"isNanobarsInterval\": false\n        },\n        \"sessionStart\": true\n      },\n      \"sessionStartTimeEnabled\": true\n    }\n  },\n  \"isUseSameScale\": true,\n  \"isHighlightZeroLine\": true,\n  \"lastSelectedIndicator\": null,\n  \"isEnabled\": true,\n  \"priceRangeMode\": \"COMPACT\",\n  \"colors\": {\n    \"CVD. negative values\": {\n      \"value\": -1618884,\n      \"frgbvalue\": null,\n      \"fvalue\": null,\n      \"falpha\": 0.0,\n      \"cs\": null\n    },\n    \"CVD. positive values\": {\n      \"value\": -13710223,\n      \"frgbvalue\": null,\n      \"fvalue\": null,\n      \"falpha\": 0.0,\n      \"cs\": null\n    }\n  },\n  \"sessionStartTimeNanos\": 0\n}"
+            "text": "{\n  \"indicatorsMap\": {\n    \"CVD\": {\n      \"orderSizeLower\": 1,\n      \"orderSizeUpper\": 100,\n      \"isOrderSizeLowerUsed\": false,\n      \"isOrderSizeUpperUsed\": false,\n      \"isChartRange\": false,\n      \"isSplitBuySell\": false,\n      \"resetPoints-v2\": [],\n      \"sessionStart-v2\": {\n        \"startTimeMs\": 0,\n        \"timeItem-v1\": {\n          \"name\": \"Session start\",\n          \"timeParamSeconds\": 86400,\n          \"isNormalInterval\": false,\n          \"isNanobarsInterval\": false\n        },\n        \"sessionStart\": true\n      },\n      \"sessionStartTimeEnabled\": true\n    }\n  },\n  \"isUseSameScale\": true,\n  \"isHighlightZeroLine\": true,\n  \"lastSelectedIndicator\": \"CVD\",\n  \"isEnabled\": true,\n  \"priceRangeMode\": \"COMPACT\",\n  \"colors\": {\n    \"CVD. negative values\": {\n      \"value\": -1618884,\n      \"frgbvalue\": null,\n      \"fvalue\": null,\n      \"falpha\": 0.0,\n      \"cs\": null\n    },\n    \"CVD. positive values\": {\n      \"value\": -13710223,\n      \"frgbvalue\": null,\n      \"fvalue\": null,\n      \"falpha\": 0.0,\n      \"cs\": null\n    },\n    \" zero line\": {\n      \"value\": -16777216,\n      \"frgbvalue\": null,\n      \"fvalue\": null,\n      \"falpha\": 0.0,\n      \"cs\": null\n    }\n  },\n  \"sessionStartTimeNanos\": 0\n}"
           },
           "Strength level": {
             "version": 2,
-            "text": "{\n  \"isGlobalVisible\": false,\n  \"mode\": \"POST_TRADE_INCREASE\",\n  \"minSize\": 1,\n  \"maxPostTradeIncreaseDelay\": 500000,\n  \"minPostTradeIncreaseSize\": 1,\n  \"isVoiceEnabled\": false,\n  \"voiceMessageTemplate\": \"$INSTRUMENT $SIDE strength $SIZE\",\n  \"platformProgrammaticName\": \"RITHMIC\",\n  \"colors\": null\n}"
+            "text": "{\n  \"isGlobalVisible\": true,\n  \"mode\": \"POST_TRADE_INCREASE\",\n  \"minSize\": 1,\n  \"maxPostTradeIncreaseDelay\": 500000,\n  \"minPostTradeIncreaseSize\": 1,\n  \"isVoiceEnabled\": false,\n  \"voiceMessageTemplate\": \"$INSTRUMENT $SIDE strength $SIZE\",\n  \"platformProgrammaticName\": \"RITHMIC\",\n  \"colors\": {\n    \"bid\": {\n      \"value\": -6710785,\n      \"frgbvalue\": null,\n      \"fvalue\": null,\n      \"falpha\": 0.0,\n      \"cs\": null\n    },\n    \"ask\": {\n      \"value\": -154,\n      \"frgbvalue\": null,\n      \"fvalue\": null,\n      \"falpha\": 0.0,\n      \"cs\": null\n    }\n  }\n}"
           },
           "Theoretical Average": {
             "version": 1,
-            "text": "{\n  \"isEnabled\": true,\n  \"colors\": null\n}"
+            "text": "{\n  \"isEnabled\": false,\n  \"colors\": {\n    \"Theoretical avg color\": {\n      \"value\": -256,\n      \"frgbvalue\": null,\n      \"fvalue\": null,\n      \"falpha\": 0.0,\n      \"cs\": null\n    }\n  }\n}"
           },
           "Large trades alert": {
             "version": 2,
@@ -2756,12 +2760,12 @@
         },
         "isInMainWindow": true,
         "timeLine": {
-          "staticTimeLine": true,
-          "staticPosition": 0.8930530164533821
+          "staticTimeLine": false,
+          "staticPosition": 0.8128103277060575
         },
         "studies": {
           "icebergDetector": {
-            "isActive": false
+            "isActive": true
           },
           "largeLotTracker": {
             "isActive": true,
@@ -2794,18 +2798,18 @@
                 "circleAlpha": 41,
                 "clusteringSmartParamSliderValue": 52
               },
-              "SECTORS": {
-                "circleSize": 40,
-                "circleAlpha": 41,
-                "clusteringSmartParamSliderValue": 52
-              },
               "TWO_COLOR": {
                 "circleSize": 40,
                 "circleAlpha": 41,
                 "clusteringSmartParamSliderValue": 52
               },
-              "SPHERES": {
+              "SECTORS": {
                 "circleSize": 40,
+                "circleAlpha": 41,
+                "clusteringSmartParamSliderValue": 52
+              },
+              "SPHERES": {
+                "circleSize": 45,
                 "circleAlpha": 41,
                 "clusteringSmartParamSliderValue": 52
               }
@@ -2839,7 +2843,7 @@
             "height": 80,
             "width": 15,
             "drawingType": "TWO_COLOR",
-            "clusteringType": "NONE",
+            "clusteringType": "BY_VOLUME",
             "differential": true,
             "clusteringSmartParamSliderValue": 0,
             "clusteringSmartParam": 0.0,
@@ -2861,7 +2865,7 @@
               null,
               null
             ],
-            "applySmartClusteringOnTop": true
+            "applySmartClusteringOnTop": false
           },
           "candleSticksSettings": {
             "isActive": false,
@@ -2873,7 +2877,7 @@
             "isShowBidAskVwap": false
           },
           "vwapSettings": {
-            "isActive": false,
+            "isActive": true,
             "resetPoints-v2": [],
             "sessionStart-v2": {
               "startTimeMs": 0,
@@ -2908,7 +2912,7 @@
             "heatmap": true,
             "strategyEnabledMap": {}
           },
-          "lastSelectedStudyItem": "Volume Dots"
+          "lastSelectedStudyItem": "Candlesticks"
         },
         "timeSlices": {
           "value-v1": 0
@@ -2929,7 +2933,7 @@
               "percentWhiteCutOff": 96,
               "isExecBlackCutOff": false,
               "blackCutOff": 0.0,
-              "percentBlackCutOff": 80
+              "percentBlackCutOff": 72
             }
           }
         },
@@ -2952,8 +2956,8 @@
           "aggregateLastTrade": true,
           "separateVolumes": true,
           "showPriceOnTimeline": false,
-          "showVerticalGridLines": true,
-          "showHorizontalGridLines": true,
+          "showVerticalGridLines": false,
+          "showHorizontalGridLines": false,
           "showIntermediateColumnLevels": true,
           "enableSound": false
         },
@@ -3008,64 +3012,93 @@
               "tag": "Cross instrument trading panel",
               "isVisible": true,
               "weight": 1.0,
-              "valueY": 70
+              "valueY": 71
             },
             {
               "tag": "Info panel",
               "isVisible": true,
               "weight": 1.0,
-              "valueY": 187
+              "valueY": 189
             },
             {
               "tag": "Order type panel",
               "isVisible": true,
               "weight": 1.0,
-              "valueY": 316
+              "valueY": 319
             },
             {
               "tag": "Order size panel",
               "isVisible": true,
               "weight": 1.0,
-              "valueY": 438
+              "valueY": 442
             },
             {
               "tag": "Order cancel panel",
               "isVisible": true,
               "weight": 1.0,
-              "valueY": 626
+              "valueY": 631
             },
             {
               "tag": "Flatten panel",
               "isVisible": true,
               "weight": 1.0,
-              "valueY": 749
+              "valueY": 755
             },
             {
               "tag": "Quick trade panel",
               "isVisible": true,
               "weight": 1.0,
-              "valueY": 810
+              "valueY": 817
             },
             {
               "tag": "Conditional orders panel",
               "isVisible": true,
               "weight": 1.0,
-              "valueY": 964
+              "valueY": 972
             },
             {
               "tag": "Brackets panel",
               "isVisible": true,
               "weight": 1.0,
-              "valueY": 1020
+              "valueY": 1029
             },
             {
               "tag": "Trailing stop panel",
               "isVisible": true,
               "weight": 1.0,
-              "valueY": 1140
+              "valueY": 1150
             }
           ],
-          "infoBlockStateList": [],
+          "infoBlockStateList": [
+            {
+              "isVisible": true,
+              "name": "position"
+            },
+            {
+              "isVisible": true,
+              "name": "average price"
+            },
+            {
+              "isVisible": true,
+              "name": "unrealised P\u0026L"
+            },
+            {
+              "isVisible": true,
+              "name": "total P\u0026L"
+            },
+            {
+              "isVisible": false,
+              "name": "realised P\u0026L"
+            },
+            {
+              "isVisible": true,
+              "name": "volume"
+            },
+            {
+              "isVisible": false,
+              "name": "account balance"
+            }
+          ],
           "hiddenPanels": false,
           "pnlType": "CURRENCY"
         },
@@ -3236,9 +3269,9 @@
           ]
         },
         "glTableAndChartHolderSettings": {
-          "weightA": 1084.0,
-          "weightB": 119.0,
-          "isPnlAndPositionChartShown": false
+          "weightA": 1109.0,
+          "weightB": 103.0,
+          "isPnlAndPositionChartShown": true
         },
         "bookmapBottomPanelSettings": {
           "indicatorSettingsList": [
@@ -3319,7 +3352,7 @@
               "graphIsVisible": true,
               "widgetIsVisible": true,
               "priceAxisIsVisible": true,
-              "priceAxisPosition": -1,
+              "priceAxisPosition": 1077,
               "priceAxisIsLocked": false
             },
             {
@@ -3351,11 +3384,11 @@
             "toleranceMode": "ABSOLUTE",
             "currentAbsoluteToleranceValue": 7,
             "currentPercentageToleranceValue": 10,
-            "timeWidth": 819299044150,
-            "autoBoundDisatanceBase": 66,
+            "timeWidth": 91051976131882,
+            "autoBoundDisatanceBase": 422,
             "autoPercentageToleranceValue": 20,
-            "noneRefPrice": 44142,
-            "noneHeight": 165
+            "noneRefPrice": 44541,
+            "noneHeight": 845
           }
         },
         "depthSettings": {
@@ -3363,10 +3396,10 @@
           "depth": 10
         },
         "drawingSettings": {
-          "lineColorRgb": null,
-          "fillColorRgb": null,
-          "lineWidth": null,
-          "lineStyle": null
+          "lineColorRgb": -14336,
+          "fillColorRgb": 845440255,
+          "lineWidth": 1,
+          "lineStyle": "SOLID"
         },
         "sessionStartSettings": {
           "sessionStartTimeNanos": 0
@@ -3377,7 +3410,7 @@
         "columns": [
           {
             "type": "HEATMAP",
-            "width": 1305,
+            "width": 2079,
             "columnResetSettings": {
               "isTurnedOn": false,
               "resetOnDoubleClick": false,
@@ -3476,7 +3509,7 @@
           },
           {
             "type": "COB",
-            "width": 134,
+            "width": 169,
             "columnResetSettings": {
               "isTurnedOn": false,
               "resetOnDoubleClick": false,
@@ -3500,7 +3533,7 @@
             "data": "bars_and_numbers",
             "split": false,
             "inverse": false,
-            "alignment": "left",
+            "alignment": "center",
             "depthLimit": 2147483647,
             "sizeAsPercentageOfVisible": false,
             "cloudNotesSettings": {
@@ -3530,41 +3563,7 @@
                 "asksAlignment": "left",
                 "coloredBackground": true,
                 "widthPart": 1.0,
-                "actions": [
-                  [
-                    {
-                      "mouseButton": 1,
-                      "shiftPressed": false,
-                      "controlPressed": false,
-                      "altPressed": false,
-                      "onRelease": false,
-                      "byIcon": false
-                    },
-                    "MODIFY_PRICE_SINGLE"
-                  ],
-                  [
-                    {
-                      "mouseButton": 1,
-                      "shiftPressed": false,
-                      "controlPressed": false,
-                      "altPressed": false,
-                      "onRelease": false,
-                      "byIcon": false
-                    },
-                    "MODIFY_SIZE_SINGLE"
-                  ],
-                  [
-                    {
-                      "mouseButton": 1,
-                      "shiftPressed": false,
-                      "controlPressed": false,
-                      "altPressed": false,
-                      "onRelease": false,
-                      "byIcon": true
-                    },
-                    "CANCEL_SINGLE"
-                  ]
-                ],
+                "actions": {},
                 "cancelIconVisible": true,
                 "isLastTradeHighlighted": false,
                 "backgroundColor": null,
@@ -3572,6 +3571,71 @@
               }
             },
             "title": null
+          },
+          {
+            "type": "CVP",
+            "width": 184,
+            "columnResetSettings": {
+              "isTurnedOn": false,
+              "resetOnDoubleClick": false,
+              "resetPeriodNs": 60000000000,
+              "resetType": "EVERY",
+              "sessionId": "",
+              "isResetConditionalEnabled": false,
+              "resetConditionalTime": 2500,
+              "isResetConditionalBasedOnAggressor": true,
+              "isPendingResetNowBid": false,
+              "isPendingResetNowAsk": false,
+              "sessionStartTimeNanos": 0
+            },
+            "showBid": true,
+            "showAsk": true,
+            "showVwap": true,
+            "delta": false,
+            "showPoc": false,
+            "aggregate": false,
+            "extended": false,
+            "data": "bars_and_numbers",
+            "split": false,
+            "inverse": false,
+            "alignment": "center",
+            "depthLimit": 2147483647,
+            "sizeAsPercentageOfVisible": false,
+            "cloudNotesSettings": {
+              "downloadUrl": null,
+              "updateIntervalMinutes": 5
+            },
+            "helper": null,
+            "pocColor": {
+              "value": -256,
+              "frgbvalue": null,
+              "fvalue": null,
+              "falpha": 0.0,
+              "cs": null
+            },
+            "backgroundColor": null,
+            "domSettings": {
+              "domSubcolumnSettings-v3": {
+                "showBidOrders": true,
+                "showAskOrders": true,
+                "showLimits": true,
+                "showStops": true,
+                "showCobBidBars": false,
+                "showCobAskBars": false,
+                "showCobBidNumbers": false,
+                "showCobAskNumbers": false,
+                "bidsAlignment": "left",
+                "asksAlignment": "left",
+                "coloredBackground": true,
+                "widthPart": 1.0,
+                "actions": {},
+                "cancelIconVisible": true,
+                "isLastTradeHighlighted": false,
+                "backgroundColor": null,
+                "isExtended": false
+              }
+            },
+            "title": "CVP"
           },
           {
             "type": "SVP",
@@ -3591,15 +3655,15 @@
             },
             "showBid": true,
             "showAsk": true,
-            "showVwap": false,
+            "showVwap": true,
             "delta": false,
-            "showPoc": false,
+            "showPoc": true,
             "aggregate": false,
             "extended": false,
             "data": "bars_and_numbers",
             "split": false,
             "inverse": false,
-            "alignment": "left",
+            "alignment": "center",
             "depthLimit": 2147483647,
             "sizeAsPercentageOfVisible": false,
             "cloudNotesSettings": {
@@ -3608,7 +3672,7 @@
             },
             "helper": null,
             "pocColor": {
-              "value": -256,
+              "value": -16737895,
               "frgbvalue": null,
               "fvalue": null,
               "falpha": 0.0,
@@ -3629,41 +3693,7 @@
                 "asksAlignment": "left",
                 "coloredBackground": true,
                 "widthPart": 1.0,
-                "actions": [
-                  [
-                    {
-                      "mouseButton": 1,
-                      "shiftPressed": false,
-                      "controlPressed": false,
-                      "altPressed": false,
-                      "onRelease": false,
-                      "byIcon": false
-                    },
-                    "MODIFY_PRICE_SINGLE"
-                  ],
-                  [
-                    {
-                      "mouseButton": 1,
-                      "shiftPressed": false,
-                      "controlPressed": false,
-                      "altPressed": false,
-                      "onRelease": false,
-                      "byIcon": false
-                    },
-                    "MODIFY_SIZE_SINGLE"
-                  ],
-                  [
-                    {
-                      "mouseButton": 1,
-                      "shiftPressed": false,
-                      "controlPressed": false,
-                      "altPressed": false,
-                      "onRelease": false,
-                      "byIcon": true
-                    },
-                    "CANCEL_SINGLE"
-                  ]
-                ],
+                "actions": {},
                 "cancelIconVisible": true,
                 "isLastTradeHighlighted": false,
                 "backgroundColor": null,
@@ -3678,14 +3708,14 @@
     ],
     "mainWindowPosition": {
       "location": {
-        "valueX": -6151,
-        "valueY": -597
+        "valueX": -1826,
+        "valueY": -73
       },
       "size": {
-        "width": 1583,
-        "height": 1399
+        "width": 698,
+        "height": 823
       },
-      "maximized": false
+      "maximized": true
     },
     "strategiesSettings": {
       "strategies": {
@@ -3855,8 +3885,6 @@
           "forcedTimeNanoseconds": null
         },
         {
-          "a": 500,
-          "b": 1,
           "symbol": "GCZ6",
           "exchange": "COMEX",
           "type": "AUTO@RITHMIC",

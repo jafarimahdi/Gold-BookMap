@@ -77,6 +77,13 @@ def is_market_open(now: Optional[datetime] = None,
         return False
     if _in_daily_break(now):
         return False
+    # Budapest trading hours filter: 08:00-23:00 Budapest = 06:00-21:00 UTC
+    try:
+        if getattr(config, "BUDAPEST_TRADING_ONLY", False):
+            if not is_budapest_trading_hours(now):
+                return False
+    except:
+        pass
     return True
 
 
@@ -90,7 +97,7 @@ def hour_of_day(now: Optional[datetime] = None) -> int:
 
 
 def time_of_day(now: Optional[datetime] = None) -> str:
-    """Broad time bucket: ASIA / LONDON / NEW_YORK / OFF_HOURS."""
+    """Broad time bucket: ASIA / LONDON / NEW_YORK / OFF_HOURS + BUDAPEST."""
     h = hour_of_day(now)
     if 0 <= h < 7:
         return "ASIA"
@@ -99,6 +106,34 @@ def time_of_day(now: Optional[datetime] = None) -> str:
     if 12 <= h < 21:
         return "NEW_YORK"
     return "OFF_HOURS"
+
+def budapest_hour(now: Optional[datetime] = None) -> int:
+    """Budapest is UTC+2 (CEST). Convert UTC hour to Budapest hour."""
+    utc_h = hour_of_day(now)
+    # Budapest CEST = UTC+2 (summer), CET = UTC+1 (winter) — use +2 for now (Sep)
+    return (utc_h + 2) % 24
+
+def is_budapest_trading_hours(now: Optional[datetime] = None) -> bool:
+    """User requested: trade 08:00-23:00 Budapest = 06:00-21:00 UTC."""
+    try:
+        # Configurable: BUDAPEST_START=08:00, BUDAPEST_END=23:00 local
+        start_str = str(getattr(config, "BUDAPEST_START", "08:00") or "08:00")
+        end_str = str(getattr(config, "BUDAPEST_END", "23:00") or "23:00")
+        # Parse Budapest local times, convert to UTC
+        # Budapest is UTC+2 in Sep (CEST)
+        offset = int(getattr(config, "BUDAPEST_UTC_OFFSET", 2))
+        b_h = budapest_hour(now)
+        # Parse start/end hour
+        s_h = int(start_str.split(":")[0])
+        e_h = int(end_str.split(":")[0])
+        if s_h <= e_h:
+            return s_h <= b_h < e_h
+        else:
+            return b_h >= s_h or b_h < e_h
+    except:
+        # Fallback: 06-21 UTC = 08-23 Budapest
+        h = hour_of_day(now)
+        return 6 <= h < 21
 
 
 def trading_session(now: Optional[datetime] = None) -> Tuple[str, str]:
@@ -138,11 +173,15 @@ def session_context(now: Optional[datetime] = None) -> Dict[str, str]:
     """Everything the AI needs to know about 'when' we are (for the prompt)."""
     now = _now(now)
     session, overlap = trading_session(now)
+    b_h = budapest_hour(now)
+    is_bud = is_budapest_trading_hours(now)
     return {
         "day_of_week": day_of_week(now),
         "time_of_day_utc": now.strftime("%H:%M"),
+        "time_of_day_budapest": f"{b_h:02d}:{now.strftime('%M')} (Budapest, UTC+2)",
         "session": session,
         "session_overlap": overlap or "none",
+        "budapest_trading": "yes" if is_bud else "no (outside 08:00-23:00 Budapest)",
         "market_open": "yes" if is_market_open(now) else "no",
     }
 

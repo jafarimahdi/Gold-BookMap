@@ -131,7 +131,7 @@ def _refresh() -> None:
     g["MT5_TERMINAL_PATH"] = _fget("MT5_TERMINAL_PATH", "")
     g["SYMBOL"] = _fget("TRADING_SYMBOL", "XAUUSD")
     g["MT5_SYMBOL"] = _fget("MT5_SYMBOL", g["SYMBOL"])
-    g["TIMEFRAME"] = _fget("TIMEFRAME", "M1")
+    g["TIMEFRAME"] = _fget("TIMEFRAME", "M5")
     g["DATA_SOURCE"] = _fget("DATA_SOURCE", "demo").lower()
     # Normalize legacy name: ninjabridge -> bookmapbridge (still supported)
     if g["DATA_SOURCE"] == "ninjabridge":
@@ -158,20 +158,20 @@ def _refresh() -> None:
 
     g["ORDER_BLOCKS_ENABLED"] = _fget("ORDER_BLOCKS_ENABLED", "1") == "1"
 
-    g["COOLDOWN_MINUTES"] = _fint("COOLDOWN_MINUTES", 15)
+    g["COOLDOWN_MINUTES"] = _fint("COOLDOWN_MINUTES", 30)
     g["MAX_TRADES_PER_DAY"] = _fint("MAX_TRADES_PER_DAY", 20)
 
     # ---- STEP 3 / STEP 4 thresholds -----------------------------------------
     g["AI_CONFIDENCE_THRESHOLD"] = _ffloat("CONFIDENCE_THRESHOLD", 70.0)
     g["AI_MIN_SIGNAL_STRENGTH"] = _ffloat("AI_MIN_SIGNAL_STRENGTH", 10.0)
-    g["AI_MIN_INTERVAL_MINUTES"] = _fint("AI_MIN_INTERVAL_MINUTES", 1)
+    g["AI_MIN_INTERVAL_MINUTES"] = _fint("AI_MIN_INTERVAL_MINUTES", 5)
     g["AI_MAX_CALLS_PER_DAY"] = _fint("AI_MAX_CALLS_PER_DAY", 2000)
     g["AI_KEY_COOLDOWN_MINUTES"] = _fint("AI_KEY_COOLDOWN_MINUTES", 20)
     g["GEMINI_REQUEST_TIMEOUT_MS"] = _fint("GEMINI_REQUEST_TIMEOUT_MS", 20000)
     g["EXECUTION_VERIFY_SECONDS"] = _fint("EXECUTION_VERIFY_SECONDS", 5)
     g["RISK_PER_TRADE_PCT"] = _ffloat("RISK_PER_TRADE_PCT", 1.0)
-    g["STOP_LOSS_ATR_MULT"] = _ffloat("STOP_LOSS_ATR_MULT", 1.5)
-    g["TAKE_PROFIT_ATR_MULT"] = _ffloat("TAKE_PROFIT_ATR_MULT", 3.0)
+    g["STOP_LOSS_ATR_MULT"] = _ffloat("STOP_LOSS_ATR_MULT", 2.0)
+    g["TAKE_PROFIT_ATR_MULT"] = _ffloat("TAKE_PROFIT_ATR_MULT", 3.5)
     g["LOT_SIZE"] = _ffloat("LOT_SIZE", 0.1)
 
     g["CONTRACT_SIZE"] = _ffloat("CONTRACT_SIZE", 100.0)
@@ -194,7 +194,7 @@ def _refresh() -> None:
     g["PM_FLIP_REQUIRE_FLOW"] = _fget("PM_FLIP_REQUIRE_FLOW", "1") == "1"
     g["PM_DIVERGENCE_EXIT"] = _fget("PM_DIVERGENCE_EXIT", "1") == "1"
     g["PM_DIVERGENCE_MIN_R"] = _ffloat("PM_DIVERGENCE_MIN_R", 0.3)
-    g["PM_TIME_STOP_MINUTES"] = _fint("PM_TIME_STOP_MINUTES", 90)
+    g["PM_TIME_STOP_MINUTES"] = _fint("PM_TIME_STOP_MINUTES", 180)
     g["PM_TIME_STOP_MIN_PROGRESS"] = _ffloat("PM_TIME_STOP_MIN_PROGRESS", 0.2)
     g["PM_MIN_SL_ATR"] = _ffloat("PM_MIN_SL_ATR", 1.2)
     g["PM_MAX_SL_ATR"] = _ffloat("PM_MAX_SL_ATR", 3.0)
@@ -256,7 +256,7 @@ def _refresh() -> None:
     g["SIGNAL_W_H1"] = _ffloat("SIGNAL_W_H1", 1.0)
     g["SIGNAL_W_M15"] = _ffloat("SIGNAL_W_M15", 0.8)
     g["SIGNAL_W_M5"] = _ffloat("SIGNAL_W_M5", 0.6)
-    g["SIGNAL_W_TREND"] = _ffloat("SIGNAL_W_TREND", 0.5)
+    g["SIGNAL_W_TREND"] = _ffloat("SIGNAL_W_TREND", 1.0)
     g["SIGNAL_W_MACD"] = _ffloat("SIGNAL_W_MACD", 0.6)
     g["SIGNAL_W_EMA_CROSS"] = _ffloat("SIGNAL_W_EMA_CROSS", 0.5)
     g["SIGNAL_W_SMA50"] = _ffloat("SIGNAL_W_SMA50", 0.7)
@@ -264,7 +264,7 @@ def _refresh() -> None:
     g["SIGNAL_W_PRESSURE"] = _ffloat("SIGNAL_W_PRESSURE", 0.8)
     g["SIGNAL_W_CVD"] = _ffloat("SIGNAL_W_CVD", 0.6)
     g["SIGNAL_W_BIDASK"] = _ffloat("SIGNAL_W_BIDASK", 0.6)
-    g["SIGNAL_W_OFI"] = _ffloat("SIGNAL_W_OFI", 0.9)
+    g["SIGNAL_W_OFI"] = _ffloat("SIGNAL_W_OFI", 0.6)
     g["SIGNAL_W_DEPTH"] = _ffloat("SIGNAL_W_DEPTH", 0.7)
     g["SIGNAL_W_MICRO"] = _ffloat("SIGNAL_W_MICRO", 0.5)
     g["SIGNAL_W_ABSORB"] = _ffloat("SIGNAL_W_ABSORB", 0.5)
@@ -273,7 +273,7 @@ def _refresh() -> None:
     g["SIGNAL_W_L3_OFI"] = _ffloat("SIGNAL_W_L3_OFI", 0.8)
     g["SIGNAL_W_L3_AGGR"] = _ffloat("SIGNAL_W_L3_AGGR", 0.8)
     g["SIGNAL_W_DIVERGENCE"] = _ffloat("SIGNAL_W_DIVERGENCE", 1.2)
-    g["SIGNAL_W_VWAP"] = _ffloat("SIGNAL_W_VWAP", 0.6)
+    g["SIGNAL_W_VWAP"] = _ffloat("SIGNAL_W_VWAP", 1.0)
 
     g["NEWS_ENABLED"] = _fget("NEWS_ENABLED", "1") == "1"
     g["NEWS_CACHE_MINUTES"] = _fint("NEWS_CACHE_MINUTES", 15)
@@ -292,6 +292,22 @@ def _refresh() -> None:
     g["DAILY_BREAK_END"] = _fget("DAILY_BREAK_END", "")
     g["STALE_DATA_SECONDS"] = _fint("STALE_DATA_SECONDS", 300)
 
+    g["BUDAPEST_START"] = _fget("BUDAPEST_START", "08:00")
+    g["BUDAPEST_END"] = _fget("BUDAPEST_END", "23:00")
+    g["BUDAPEST_UTC_OFFSET"] = _fint("BUDAPEST_UTC_OFFSET", 2)
+    g["BUDAPEST_TRADING_ONLY"] = _fget("BUDAPEST_TRADING_ONLY", "1") == "1"
+    # v5.9 bank-grade microstructure
+    g["BOUNCE_FILTER_ENABLED"] = _fget("BOUNCE_FILTER_ENABLED", "1") == "1"
+    g["BOUNCE_SMALL_LOTS"] = _fint("BOUNCE_SMALL_LOTS", 2)
+    g["BOUNCE_MEDIUM_LOTS"] = _fint("BOUNCE_MEDIUM_LOTS", 5)
+    g["BOUNCE_LARGE_LOTS"] = _fint("BOUNCE_LARGE_LOTS", 20)
+    g["BOUNCE_SMALL_WEIGHT"] = _ffloat("BOUNCE_SMALL_WEIGHT", 0.3)
+    g["BOUNCE_MEDIUM_WEIGHT"] = _ffloat("BOUNCE_MEDIUM_WEIGHT", 0.7)
+    g["BOUNCE_LARGE_WEIGHT"] = _ffloat("BOUNCE_LARGE_WEIGHT", 1.5)
+    g["DIVERGENCE_TIME_WEIGHTED"] = _fget("DIVERGENCE_TIME_WEIGHTED", "1") == "1"
+    g["HEATMAP_PERSISTENCE_ENABLED"] = _fget("HEATMAP_PERSISTENCE_ENABLED", "1") == "1"
+    g["HEATMAP_INSTITUTIONAL_SCORE"] = _fint("HEATMAP_INSTITUTIONAL_SCORE", 50000)
+    g["HEATMAP_WEAK_SCORE"] = _fint("HEATMAP_WEAK_SCORE", 5000)
     g["DAILY_LOSS_LIMIT_PCT"] = _ffloat("DAILY_LOSS_LIMIT_PCT", 3.0)
     g["MAX_DRAWDOWN_PCT"] = _ffloat("MAX_DRAWDOWN_PCT", 10.0)
 
@@ -335,7 +351,7 @@ def _refresh() -> None:
     # New keys — with NT_* fallbacks for backward compatibility
     g["BOOKMAP_BRIDGE_FILE"] = _fget_first(["BOOKMAP_BRIDGE_FILE", "NT_BRIDGE_FILE", "BM_BRIDGE_FILE"], "")
     g["NT_BRIDGE_FILE"] = g["BOOKMAP_BRIDGE_FILE"]  # alias for old code
-    g["BOOKMAP_WINDOW_SECONDS"] = _fint_first(["BOOKMAP_WINDOW_SECONDS", "NT_WINDOW_SECONDS"], 28800)
+    g["BOOKMAP_WINDOW_SECONDS"] = _fint_first(["BOOKMAP_WINDOW_SECONDS", "NT_WINDOW_SECONDS"], 43200)
     g["NT_WINDOW_SECONDS"] = g["BOOKMAP_WINDOW_SECONDS"]
     g["BOOKMAP_CATCHUP_MB"] = _fint_first(["BOOKMAP_CATCHUP_MB", "NT_CATCHUP_MB"], 64)
     g["NT_CATCHUP_MB"] = g["BOOKMAP_CATCHUP_MB"]
@@ -357,20 +373,38 @@ def _refresh() -> None:
     g["L3_WHALE_THRESHOLD"] = _ffloat("L3_WHALE_THRESHOLD", 100.0)  # lots
     g["L3_WHALE_PROXIMITY_PCT"] = _ffloat("L3_WHALE_PROXIMITY_PCT", 0.5)  # % near price
     g["L3_WHALE_WEIGHT"] = _ffloat("L3_WHALE_WEIGHT", 1.5)
-    g["SIGNAL_W_L3_WHALE"] = _ffloat("SIGNAL_W_L3_WHALE", 1.5)
+    g["SIGNAL_W_L3_WHALE"] = _ffloat("SIGNAL_W_L3_WHALE", 1.2)
+    # v5.8 L3 Enhanced: distance-based whale weighting
+    g["L3_WHALE_CLOSE_PCT"] = _ffloat("L3_WHALE_CLOSE_PCT", 0.2)  # <0.2% = close
+    g["L3_WHALE_CLOSE_WEIGHT"] = _ffloat("L3_WHALE_CLOSE_WEIGHT", 2.0)  # close wall weight
+    g["L3_WHALE_MID_WEIGHT"] = _ffloat("L3_WHALE_MID_WEIGHT", 1.2)  # mid 0.2-0.5%
+    g["L3_WHALE_FAR_WEIGHT"] = _ffloat("L3_WHALE_FAR_WEIGHT", 0.5)  # far 0.5-1.0%
+    g["L3_NET_FLOW_THRESHOLD"] = _ffloat("L3_NET_FLOW_THRESHOLD", 100.0)  # aggressive net delta
+    g["SIGNAL_W_L3_NETFLOW"] = _ffloat("SIGNAL_W_L3_NETFLOW", 1.0)
+    g["SIGNAL_W_L3_SPOOF_INVERT"] = _ffloat("SIGNAL_W_L3_SPOOF_INVERT", 1.0)
+    g["SIGNAL_W_L3_QUEUE"] = _ffloat("SIGNAL_W_L3_QUEUE", 0.8)
+    g["L3_RANGE_BOOST"] = _ffloat("L3_RANGE_BOOST", 2.0)  # RANGE: whale+iceberg 2x
+    g["L3_TREND_BOOST"] = _ffloat("L3_TREND_BOOST", 2.0)  # TREND: OFI+aggressive 2x
 
     g["REGIME_ADAPTIVE"] = _fget("REGIME_ADAPTIVE", "1") == "1"
     g["TREND_ADX_THRESHOLD"] = _ffloat("TREND_ADX_THRESHOLD", 25.0)
     g["VOLATILITY_HIGH_MULT"] = _ffloat("VOLATILITY_HIGH_MULT", 1.5)
     g["RANGE_VWAP_WEIGHT"] = _ffloat("RANGE_VWAP_WEIGHT", 2.0)
 
-    g["AI_TIMEOUT_SECONDS"] = _fint("AI_TIMEOUT_SECONDS", 20)
+    g["AI_TIMEOUT_SECONDS"] = _fint("AI_TIMEOUT_SECONDS", 10)
     g["AI_FALLBACK_ENABLED"] = _fget("AI_FALLBACK_ENABLED", "1") == "1"
     g["AI_FALLBACK_STRENGTH"] = _ffloat("AI_FALLBACK_STRENGTH", 35.0)
     g["AI_FALLBACK_CONFIDENCE"] = _ffloat("AI_FALLBACK_CONFIDENCE", 70.0)
-    g["AI_CACHE_MINUTES"] = _fint("AI_CACHE_MINUTES", 5)
-    g["AI_MAX_PROMPT_BARS"] = _fint("AI_MAX_PROMPT_BARS", 15)
-    g["AI_MAX_HEADLINES"] = _fint("AI_MAX_HEADLINES", 5)
+    g["AI_CACHE_MINUTES"] = _fint("AI_CACHE_MINUTES", 10)
+    g["AI_MAX_PROMPT_BARS"] = _fint("AI_MAX_PROMPT_BARS", 20)
+    g["AI_MAX_HEADLINES"] = _fint("AI_MAX_HEADLINES", 3)
+    # v5.8 L3 Enhanced AI
+    g["AI_L3_TOP_LEVELS"] = _fint("AI_L3_TOP_LEVELS", 3)  # top 3 L3 levels in prompt
+    g["AI_FALLBACK_L3_ENABLED"] = _fget("AI_FALLBACK_L3_ENABLED", "1") == "1"
+    g["AI_CONF_CALIBRATION"] = _fget("AI_CONF_CALIBRATION", "1") == "1"
+    g["AI_L3_CONF_BOOST"] = _ffloat("AI_L3_CONF_BOOST", 15.0)  # +15% if L3 confirms
+    g["AI_L3_CONF_PENALTY"] = _ffloat("AI_L3_CONF_PENALTY", 20.0)  # -20% if L3 conflicts
+    g["AI_AS_VOTE"] = _fget("AI_AS_VOTE", "0") == "1"  # if 1, AI is vote not final, weight 1.5
 
     g["BASIS_MAX"] = _ffloat("BASIS_MAX", 50.0)  # max futures-spot basis $
     g["BASIS_BUFFER_MULT"] = _ffloat("BASIS_BUFFER_MULT", 1.5)
@@ -410,6 +444,50 @@ def _refresh() -> None:
     # M5 MBO archival
     g["BOOKMAP_MBO_ROTATE_MB"] = _ffloat_first(["BOOKMAP_MBO_ROTATE_MB", "MBO_ROTATE_MB"], 100.0)
     g["BOOKMAP_MBO_ARCHIVE_KEEP_DAYS"] = _ffloat_first(["BOOKMAP_MBO_ARCHIVE_KEEP_DAYS", "MBO_ARCHIVE_KEEP_DAYS"], 0.0)
+
+    # v6.0 BANK-GRADE M5 SCALPER - 5 upgrades + 4 Teams
+    g["V6_SWEEP_ENABLED"] = _fget("V6_SWEEP_ENABLED", "1") == "1"
+    g["V6_SWEEP_LOOKBACK"] = _fint("V6_SWEEP_LOOKBACK", 20)
+    g["V6_SWEEP_THRESHOLD_PCT"] = _ffloat("V6_SWEEP_THRESHOLD_PCT", 0.10)
+    g["V6_SWEEP_VOLUME_ROC"] = _ffloat("V6_SWEEP_VOLUME_ROC", 3.0)
+    g["V6_SWEEP_WEIGHT"] = _ffloat("V6_SWEEP_WEIGHT", 1.5)
+
+    g["V6_VWAP_BANDS_ENABLED"] = _fget("V6_VWAP_BANDS_ENABLED", "1") == "1"
+    g["V6_VWAP_BAND_1SIG_WEIGHT"] = _ffloat("V6_VWAP_BAND_1SIG_WEIGHT", 0.8)
+    g["V6_VWAP_BAND_2SIG_WEIGHT"] = _ffloat("V6_VWAP_BAND_2SIG_WEIGHT", 1.3)
+    g["V6_VWAP_BAND_25SIG_WEIGHT"] = _ffloat("V6_VWAP_BAND_25SIG_WEIGHT", 1.8)
+
+    g["V6_MICROPRICE_ENABLED"] = _fget("V6_MICROPRICE_ENABLED", "1") == "1"
+    g["V6_MICROPRICE_WEIGHT"] = _ffloat("V6_MICROPRICE_WEIGHT", 0.8)
+    g["V6_QUEUE_ENABLED"] = _fget("V6_QUEUE_ENABLED", "1") == "1"
+    g["V6_QUEUE_MAX_POSITION"] = _ffloat("V6_QUEUE_MAX_POSITION", 0.70)
+    g["V6_QUEUE_WEIGHT"] = _ffloat("V6_QUEUE_WEIGHT", 0.6)
+
+    g["V6_KILLZONES_ENABLED"] = _fget("V6_KILLZONES_ENABLED", "1") == "1"
+    g["V6_KZ_LONDON_START"] = _fget("V6_KZ_LONDON_START", "09:00")
+    g["V6_KZ_LONDON_END"] = _fget("V6_KZ_LONDON_END", "11:00")
+    g["V6_KZ_NY_START"] = _fget("V6_KZ_NY_START", "14:30")
+    g["V6_KZ_NY_END"] = _fget("V6_KZ_NY_END", "16:30")
+    g["V6_KZ_TREND_BOOST"] = _ffloat("V6_KZ_TREND_BOOST", 2.0)
+    g["V6_KZ_RANGE_BOOST"] = _ffloat("V6_KZ_RANGE_BOOST", 2.0)
+
+    g["V6_MTF_M5_WEIGHT"] = _ffloat("V6_MTF_M5_WEIGHT", 1.2)
+    g["V6_MTF_M15_WEIGHT"] = _ffloat("V6_MTF_M15_WEIGHT", 0.8)
+    g["V6_MTF_H1_WEIGHT"] = _ffloat("V6_MTF_H1_WEIGHT", 0.4)
+
+    g["V6_4TEAMS_ENABLED"] = _fget("V6_4TEAMS_ENABLED", "1") == "1"
+    g["V6_TEAM_FLOW_WEIGHT"] = _ffloat("V6_TEAM_FLOW_WEIGHT", 1.5)
+    g["V6_TEAM_WHALE_WEIGHT"] = _ffloat("V6_TEAM_WHALE_WEIGHT", 1.4)
+    g["V6_TEAM_STRUCTURE_WEIGHT"] = _ffloat("V6_TEAM_STRUCTURE_WEIGHT", 1.2)
+    g["V6_TEAM_TREND_WEIGHT"] = _ffloat("V6_TEAM_TREND_WEIGHT", 0.8)
+    g["V6_TEAM_WORLD_VETO"] = _ffloat("V6_TEAM_WORLD_VETO", 0.3)
+    g["V6_CONFLUENCE_MIN_TEAMS"] = _fint("V6_CONFLUENCE_MIN_TEAMS", 3)
+
+    g["V6_BASIS_FAST_WIDEN_PCT"] = _ffloat("V6_BASIS_FAST_WIDEN_PCT", 1.0)
+    g["V6_BASIS_FAST_WINDOW_MIN"] = _fint("V6_BASIS_FAST_WINDOW_MIN", 5)
+    g["V6_CFD_SPREAD_MAX"] = _ffloat("V6_CFD_SPREAD_MAX", 0.60)
+    g["V6_CFD_TICK_SIZE"] = _ffloat("V6_CFD_TICK_SIZE", 0.05)
+
 
     # M6 TCA & Slippage
     g["TCA_ENABLED"] = _fget("TCA_ENABLED", "1") == "1"

@@ -445,13 +445,49 @@ class MT5Executor:
             return ExecutionResult(status="ERROR", reason="symbol info unavailable",
                                    symbol=self.symbol, price=price, timestamp=now)
 
-        # v5.2 C4: Basis risk check (futures vs spot)
+        # v5.2 C4: Basis risk check + v6.0 fast widen + CFD spread
         # Futures 4310 vs Spot 4265 = $45 basis normal, but if >50 or widening fast -> risk
         try:
             futures_price = float(getattr(snapshot, "price", 0.0) or 0.0)
             basis = futures_price - price if futures_price > 0 and price > 0 else 0.0
             basis_max = float(getattr(config, "BASIS_MAX", 50.0))
             basis_buffer_mult = float(getattr(config, "BASIS_BUFFER_MULT", 1.5))
+            # v6.0 fast widen check: if basis jumps >1% in 5 min -> pause
+            try:
+                if getattr(config, "V6_4TEAMS_ENABLED", False):
+                    fast_pct = float(getattr(config, "V6_BASIS_FAST_WIDEN_PCT", 1.0))
+                    # Store last basis in memory
+                    last_basis = float(getattr(self, "_last_basis_stored", basis) or basis)
+                    basis_change_pct = abs(basis - last_basis) / max(abs(last_basis), 1.0) * 100.0
+                    if basis_change_pct > fast_pct:
+                        logger.warning("STEP 4 v6.0: Basis fast widen %.2f%% (%.2f -> %.2f) > %.2f%% — DEFERRED", basis_change_pct, last_basis, basis, fast_pct)
+                        reason = f"Basis fast widen {basis_change_pct:.2f}% > {fast_pct}% — DEFERRED"
+                        return ExecutionResult(status="DEFERRED", reason=reason, symbol=self.symbol, price=price, timestamp=now)
+                    self._last_basis_stored = basis
+            except Exception as be:
+                logger.warning("STEP 4 v6.0 basis fast check error: %s", be)
+
+            # v6.0 CFD spread max check
+            try:
+                if getattr(config, "V6_4TEAMS_ENABLED", False):
+                    spread_max = float(getattr(config, "V6_CFD_SPREAD_MAX", 0.60))
+                    # Estimate spread from tick if available
+                    spread = 0.0
+                    try:
+                        # Try to get spread from market_data or tick
+                        bid = float(getattr(snapshot, "bid", 0) or 0)
+                        ask = float(getattr(snapshot, "ask", 0) or 0)
+                        if bid>0 and ask>0:
+                            spread = ask - bid
+                    except:
+                        spread = 0.0
+                    if spread > spread_max and spread_max>0:
+                        reason = f"CFD spread wide {spread:.2f} > max {spread_max} — DEFERRED"
+                        logger.warning("STEP 4 v6.0: %s", reason)
+                        return ExecutionResult(status="DEFERRED", reason=reason, symbol=self.symbol, price=price, timestamp=now)
+            except Exception as se:
+                logger.warning("STEP 4 v6.0 spread check error: %s", se)
+
             if abs(basis) > basis_max and basis_max > 0:
                 logger.warning("STEP 4: Basis wide: futures %.2f spot %.2f basis %.2f > max %.2f — widening SL buffer %.1fx",
                                futures_price, price, basis, basis_max, basis_buffer_mult)
