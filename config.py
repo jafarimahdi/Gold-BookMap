@@ -404,7 +404,7 @@ def _refresh() -> None:
     g["AI_CONF_CALIBRATION"] = _fget("AI_CONF_CALIBRATION", "1") == "1"
     g["AI_L3_CONF_BOOST"] = _ffloat("AI_L3_CONF_BOOST", 15.0)  # +15% if L3 confirms
     g["AI_L3_CONF_PENALTY"] = _ffloat("AI_L3_CONF_PENALTY", 20.0)  # -20% if L3 conflicts
-    g["AI_AS_VOTE"] = _fget("AI_AS_VOTE", "0") == "1"  # if 1, AI is vote not final, weight 1.5
+    g["AI_AS_VOTE"] = _fget("AI_AS_VOTE", "1") == "1"  # v7.0 P0 #4: AI as Captain vote 1.5x, not gate, default 1
 
     g["BASIS_MAX"] = _ffloat("BASIS_MAX", 50.0)  # max futures-spot basis $
     g["BASIS_BUFFER_MULT"] = _ffloat("BASIS_BUFFER_MULT", 1.5)
@@ -481,7 +481,7 @@ def _refresh() -> None:
     g["V6_TEAM_STRUCTURE_WEIGHT"] = _ffloat("V6_TEAM_STRUCTURE_WEIGHT", 1.2)
     g["V6_TEAM_TREND_WEIGHT"] = _ffloat("V6_TEAM_TREND_WEIGHT", 0.8)
     g["V6_TEAM_WORLD_VETO"] = _ffloat("V6_TEAM_WORLD_VETO", 0.3)
-    g["V6_CONFLUENCE_MIN_TEAMS"] = _fint("V6_CONFLUENCE_MIN_TEAMS", 3)
+    g["V6_CONFLUENCE_MIN_TEAMS"] = _fint("V6_CONFLUENCE_MIN_TEAMS", 2)  # v7.0 P1 #9: 3->2 for M5 more trades
 
     g["V6_BASIS_FAST_WIDEN_PCT"] = _ffloat("V6_BASIS_FAST_WIDEN_PCT", 1.0)
     g["V6_BASIS_FAST_WINDOW_MIN"] = _fint("V6_BASIS_FAST_WINDOW_MIN", 5)
