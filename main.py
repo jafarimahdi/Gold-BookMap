@@ -405,11 +405,47 @@ def run_step1():
 def run_step2(data):
     from step2_market_analysis import (analyze_market, format_snapshot,
                                        snapshot_to_json)
+    import json as _json
+    import re as _re
     snapshot = analyze_market(data)
-    print(format_snapshot(snapshot))
+    formatted = format_snapshot(snapshot)
+    print(formatted)
     out = DATA_DIR / "market_snapshot.json"
     out.write_text(snapshot_to_json(snapshot))
     logger.info("STEP 2: snapshot saved -> %s", out)
+    # v4.2: save history for team/judge audit (hourly, KillZone, regime)
+    try:
+        hist_path = DATA_DIR / "snapshots_history.jsonl"
+        # Extract team scores from notes if present
+        team_scores = {}
+        notes_text = " ".join(getattr(snapshot, "notes", []) or [])
+        m_teams = _re.search(r"4 Teams ensemble:\s*flow\s*([-\d\.]+)\*[\d\.]+\s*whale\s*([-\d\.]+)\*[\d\.]+\s*struct\s*([-\d\.]+)\*[\d\.]+\s*trend\s*([-\d\.]+)\*[\d\.]+", notes_text)
+        if m_teams:
+            team_scores = {"flow": float(m_teams.group(1)), "whale": float(m_teams.group(2)), "struct": float(m_teams.group(3)), "trend": float(m_teams.group(4))}
+        # KillZone
+        killzone = "UNKNOWN"
+        if "KillZone OFF" in notes_text: killzone = "OFF_LUNCH"
+        elif "KillZone NY" in notes_text: killzone = "NY"
+        elif "LONDON+NEW_YORK" in notes_text: killzone = "OVERLAP"
+        elif "LONDON" in notes_text: killzone = "LONDON"
+        record = {
+            "timestamp": getattr(snapshot, "timestamp", None).isoformat() if hasattr(getattr(snapshot, "timestamp", None), "isoformat") else str(getattr(snapshot, "timestamp", "")),
+            "price": float(getattr(snapshot, "price", 0) or 0),
+            "signal_direction": getattr(snapshot, "signal_direction", "NEUTRAL"),
+            "signal_strength": float(getattr(snapshot, "signal_strength", 0) or 0),
+            "confidence": float(getattr(snapshot, "confidence", 0) or 0),
+            "regime": getattr(snapshot, "regime", "UNKNOWN"),
+            "team_scores": team_scores,
+            "killzone": killzone,
+            "notes": getattr(snapshot, "notes", [])[:50],  # first 50 notes
+        }
+        with open(hist_path, "a", encoding="utf-8") as hf:
+            hf.write(_json.dumps(record) + "\n")
+    except Exception as he:
+        try:
+            logger.debug(f"snapshot history save failed: {he}")
+        except:
+            pass
     _record("STEP 2  MARKET ANALYSIS",
             f"OK -> {snapshot.signal_direction} "
             f"(strength {snapshot.signal_strength:.1f}, "
@@ -909,6 +945,26 @@ def run_pipeline() -> None:
         try:
             decision = run_step3(snapshot)
             _record_latency("STEP3 AI", (time.time()-t2)*1000)
+            # v4.3: update snapshots_history.jsonl with AI vote for judge accuracy audit
+            try:
+                import json as _json2
+                hist_path = DATA_DIR / "snapshots_history.jsonl"
+                if hist_path.exists():
+                    # Read last line, update with AI info, rewrite
+                    lines = hist_path.read_text(encoding="utf-8").splitlines()
+                    if lines:
+                        last = _json2.loads(lines[-1])
+                        # Only update if timestamp matches snapshot
+                        last["ai_action"] = getattr(decision, "action", "HOLD")
+                        last["ai_confidence"] = float(getattr(decision, "confidence", 0) or 0)
+                        last["ai_rationale"] = getattr(decision, "rationale", "")[:200]
+                        lines[-1] = _json2.dumps(last)
+                        hist_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            except Exception as _ae:
+                try:
+                    logger.debug(f"AI history update failed: {_ae}")
+                except:
+                    pass
         except Exception as exc:
             logger.exception("STEP 3 failed")
             _record("STEP 3  AI DECISION", f"ERROR — {exc}")

@@ -1,0 +1,6 @@
+==============================================================================================================
+========================= GOLD-BOOKMAP ULTIMATE DAILY REPORT v4.1 FIXED - 2026-09-22 =========================
+==============================================================================================================
+Log: A:\gitHub\Gold-BookMap\logs\trading_20260922.log (2066959 chars) | Snapshots: 0 | Ticks: 9964
+[FAIL] Still 0 snapshots - trying fallback: checking log contains MARKET SNAPSHOT?
+Contains MARKET SNAPSHOT: False

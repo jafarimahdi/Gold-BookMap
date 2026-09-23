@@ -2714,6 +2714,14 @@
             [],
             [],
             [],
+            [],
+            [],
+            [],
+            [],
+            [],
+            [],
+            [],
+            [],
             []
           ]
         },
@@ -2749,12 +2757,12 @@
         },
         "windowPosition": {
           "location": {
-            "valueX": -5161,
-            "valueY": -501
+            "valueX": 168,
+            "valueY": 8
           },
           "size": {
-            "width": 1576,
-            "height": 1275
+            "width": 1200,
+            "height": 800
           },
           "maximized": false
         },
@@ -2793,23 +2801,23 @@
             "minPixelVolume": 1,
             "showCircleSizeOnToolbar": true,
             "renderingDependentSettings-v2": {
-              "GRADIENT": {
-                "circleSize": 40,
-                "circleAlpha": 41,
-                "clusteringSmartParamSliderValue": 52
-              },
               "TWO_COLOR": {
                 "circleSize": 40,
                 "circleAlpha": 41,
                 "clusteringSmartParamSliderValue": 52
               },
-              "SECTORS": {
+              "GRADIENT": {
                 "circleSize": 40,
                 "circleAlpha": 41,
                 "clusteringSmartParamSliderValue": 52
               },
               "SPHERES": {
                 "circleSize": 45,
+                "circleAlpha": 41,
+                "clusteringSmartParamSliderValue": 52
+              },
+              "SECTORS": {
+                "circleSize": 40,
                 "circleAlpha": 41,
                 "clusteringSmartParamSliderValue": 52
               }
@@ -2840,7 +2848,7 @@
           },
           "volumeBars": {
             "isActive": true,
-            "height": 80,
+            "height": 121,
             "width": 15,
             "drawingType": "TWO_COLOR",
             "clusteringType": "BY_VOLUME",
@@ -2870,7 +2878,7 @@
           "candleSticksSettings": {
             "isActive": false,
             "barWidth": 30,
-            "intervalDefault": 60000000000,
+            "intervalDefault": 180000000000,
             "intervalNanobars": 60000000000,
             "mode": "TRADES",
             "isShowTotalVwap": false,
@@ -3384,11 +3392,11 @@
             "toleranceMode": "ABSOLUTE",
             "currentAbsoluteToleranceValue": 7,
             "currentPercentageToleranceValue": 10,
-            "timeWidth": 91051976131882,
-            "autoBoundDisatanceBase": 422,
+            "timeWidth": 5140979999985,
+            "autoBoundDisatanceBase": 89,
             "autoPercentageToleranceValue": 20,
-            "noneRefPrice": 44541,
-            "noneHeight": 845
+            "noneRefPrice": 43364,
+            "noneHeight": 251
           }
         },
         "depthSettings": {
@@ -3410,7 +3418,7 @@
         "columns": [
           {
             "type": "HEATMAP",
-            "width": 2079,
+            "width": 1055,
             "columnResetSettings": {
               "isTurnedOn": false,
               "resetOnDoubleClick": false,
@@ -3708,12 +3716,12 @@
     ],
     "mainWindowPosition": {
       "location": {
-        "valueX": -1826,
-        "valueY": -73
+        "valueX": 168,
+        "valueY": 8
       },
       "size": {
-        "width": 698,
-        "height": 823
+        "width": 1200,
+        "height": 800
       },
       "maximized": true
     },

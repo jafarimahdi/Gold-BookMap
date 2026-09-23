@@ -1,0 +1,95 @@
+==========================================================================================
+==================== GOLD-BOOKMAP FULL DAILY REPORT v2.0 - 2026-09-22 ====================
+========================= Bank Manager + Senior Engineer Edition =========================
+==========================================================================================
+Base: A:\gitHub\Gold-BookMap
+Ticks: A:\gitHub\Gold-BookMap\ticks.csv (78.7 MB)
+MBO: A:\gitHub\Gold-BookMap\mbo.csv (100.0 MB)
+
+[1] DATA HEALTH
+  Log file: A:\gitHub\Gold-BookMap\logs\trading_20260922.log (2066959 chars)
+  Decisions today: 767 rows
+  Ticks loaded for audit: 6307 Last events
+  Ticks.csv total: 989034 lines
+
+[2] PERFORMANCE & LATENCY (M5 target: total <500ms)
+  Feed age: avg 0.78s max 5.10s last5 [1.5, 1.9, 0.9, 0.9, 3.2] [WARN] OK
+  STEP1 acquire: avg 544ms last5 [927, 856, 715, 726, 780] [FAIL] >300ms heavy
+  STEP2 analyze: avg 646ms last5 [584, 568, 544, 764, 682] [FAIL] >500ms heavy
+  TOTAL pipeline: avg 8181ms last5 [9747, 1533, 1352, 1596, 1557] [FAIL] >1000ms
+
+[3] SIGNALS TODAY
+  NEUTRAL: 580 (75.6%)
+  BUY: 110 (14.3%)
+  SELL: 77 (10.0%)
+  Strength: avg 9.0 min 0.0 max 49.7 (M5 ideal 5-15)
+  Confidence: avg 21.3% min 0.0% max 64.2% (threshold 63%)
+
+[4] AI DECISION
+  AI fails: 572 (504/503) | AI success: 48
+
+[5] DECISIONS_LOG.CSV TODAY: 767 rows
+  Direction: {'NEUTRAL': 580, 'SELL': 77, 'BUY': 110}
+  Last 10:
+    2026-09-22T22:21:55 NEUTRAL str=11.05 conf=17.08 exec=SKIPPED  reason=confidence 35.0% below threshold 63%
+    2026-09-22T22:22:57 NEUTRAL str=2.78  conf=15.23 exec=SKIPPED  reason=confidence 0.0% below threshold 63%
+    2026-09-22T22:23:58 NEUTRAL str=11.48 conf=16.52 exec=SKIPPED  reason=confidence 0.0% below threshold 63%
+    2026-09-22T22:25:00 BUY     str=21.55 conf=38.26 exec=SKIPPED  reason=confidence 0.0% below threshold 63%
+    2026-09-22T22:26:01 NEUTRAL str=13.56 conf=17.47 exec=SKIPPED  reason=confidence 0.0% below threshold 63%
+    2026-09-22T22:27:11 NEUTRAL str=12.43 conf=20.24 exec=SKIPPED  reason=confidence 0.0% below threshold 63%
+    2026-09-22T22:28:13 NEUTRAL str=14.1  conf=17.71 exec=SKIPPED  reason=confidence 0.0% below threshold 63%
+    2026-09-22T22:29:14 BUY     str=21.91 conf=42.2  exec=SKIPPED  reason=confidence 0.0% below threshold 63%
+    2026-09-22T22:30:16 BUY     str=21.83 conf=34.11 exec=SKIPPED  reason=confidence 0.0% below threshold 63%
+    2026-09-22T22:31:17 BUY     str=17.1  conf=31.53 exec=SKIPPED  reason=confidence 0.0% below threshold 63%
+
+[6] AUDIT SKIPPED TRADES - WOULD THEY HAVE BEEN PROFITABLE?
+  Simulating SL 2.0xATR=6.4pts TP 3.5xATR=11.1pts max hold 180min
+  Total BUY/SELL skipped checked: 187
+  WIN (TP first): 60 | LOSS (SL first): 70 | TIMEOUT: 9 | NO_DATA: 48
+  Win Rate (closed): 46.2% | Profit Factor: 1.50 | Total PnL: 218.7 pts
+
+  Top 10 PROFITABLE skipped (would have won):
+    2026-09-22T17:27:19 BUY 4373.1->4384.2 +11.1pts str=17.81 conf=30.63 | confidence 0.0% below threshold 63%
+    2026-09-22T19:23:24 BUY 4375.6->4386.8 +11.1pts str=22.42 conf=33.16 | confidence 0.0% below threshold 63%
+    2026-09-22T19:24:25 BUY 4374.8->4385.9 +11.1pts str=23.51 conf=35.63 | confidence 0.0% below threshold 63%
+    2026-09-22T19:25:27 BUY 4374.2->4385.4 +11.1pts str=19.42 conf=32.34 | confidence 0.0% below threshold 63%
+    2026-09-22T19:26:29 BUY 4374.4->4385.5 +11.1pts str=15.16 conf=23.03 | confidence 0.0% below threshold 63%
+    2026-09-22T19:31:13 BUY 4375.0->4386.1 +11.1pts str=21.64 conf=31.63 | confidence 0.0% below threshold 63%
+    2026-09-22T19:32:28 BUY 4375.4->4386.5 +11.1pts str=18.16 conf=28.36 | confidence 0.0% below threshold 63%
+    2026-09-22T19:33:30 BUY 4374.9->4386.0 +11.1pts str=18.42 conf=29.61 | confidence 0.0% below threshold 63%
+    2026-09-22T19:34:32 BUY 4372.9->4384.0 +11.1pts str=25.15 conf=31.29 | confidence 0.0% below threshold 63%
+    2026-09-22T19:35:33 BUY 4374.0->4385.1 +11.1pts str=23.48 conf=30.87 | confidence 0.0% below threshold 63%
+
+  Top 10 LOSING skipped (correctly skipped):
+    2026-09-22T16:29:21 SELL 4363.9->4370.2 -6.4pts | confidence 62.0% below threshold 63%
+    2026-09-22T16:30:22 SELL 4365.5->4371.8 -6.4pts | confidence 0.0% below threshold 63%
+    2026-09-22T16:31:23 SELL 4367.2->4373.6 -6.4pts | confidence 0.0% below threshold 63%
+    2026-09-22T16:32:24 SELL 4366.1->4372.5 -6.4pts | confidence 0.0% below threshold 63%
+    2026-09-22T16:34:47 SELL 4364.6->4371.0 -6.4pts | order_check retcode=10015
+    2026-09-22T16:35:48 SELL 4359.9->4366.3 -6.4pts | confidence 0.0% below threshold 63%
+    2026-09-22T16:36:57 SELL 4361.5->4367.8 -6.4pts | confidence 0.0% below threshold 63%
+    2026-09-22T16:37:58 SELL 4366.1->4372.5 -6.4pts | confidence 0.0% below threshold 63%
+    2026-09-22T16:40:38 SELL 4363.6->4370.0 -6.4pts | 
+    2026-09-22T16:41:39 SELL 4357.8->4364.1 -6.4pts | confidence 0.0% below threshold 63%
+
+[7] WEAK PARTS DETECTED (Bank + Engineer)
+  1. Feed age spike 5.1s - delayed data risk, robot skipped trades correctly
+  2. STEP1 avg 544ms >300ms - ticks.csv too big (12h window), reduce BOOKMAP_WINDOW_SECONDS 43200->10800
+  3. STEP2 avg 646ms >500ms - MBO 3000 too high or depth 40 too high, reduce to 2000 MBO and 20 depth
+  4. Confidence avg 21.3% very low all day - market choppy/divergence, 0 trades correct but check if threshold 63% too high
+  5. AI failed 572 times (Gemini overloaded) - reduce GEMINI_REQUEST_TIMEOUT_MS 20000->10000 and use flash-lite primary
+
+[8] M5 FITNESS CHECKLIST
+  [FAIL] STEP1 <150ms
+  [FAIL] STEP2 <300ms
+  [FAIL] Feed <0.5s
+  [OK] NEUTRAL 70-80% (you 75.6%)
+
+[9] FINAL VERDICT FOR M5
+  Today's price: 4397.299999999999 | Ticks file: 78.7 MB
+  System fits M5 if: STEP1<150ms STEP2<300ms feed<0.5s icebergs<80 NEUTRAL 70%+
+  Weak parts today: 5 - see section 7
+  Recommendation: Apply P3 latency fix (window 12h->3h, depth 40->20, MBO 3000->2000)
+
+[INFO] Audit saved to A:\gitHub\Gold-BookMap\audit_skipped_2026-09-22.csv
+==========================================================================================

@@ -830,8 +830,8 @@ class BookmapBridgeProvider(BaseProvider):
                 except Exception:
                     pass
                 # Keep last 5000
-                if len(combined) > 5000:
-                    combined = combined[-5000:]
+                if len(combined) > 2000:  # P3 M5 FAIR
+                    combined = combined[-2000:]  # P3
                 self.order_events = combined
                 if st.last_dt is not None:
                     self._touch(st.last_dt)
