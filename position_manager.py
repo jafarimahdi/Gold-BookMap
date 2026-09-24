@@ -643,14 +643,41 @@ class PositionManager:
 
     def _session_flatten_due(self, now: Optional[datetime] = None) -> str:
         """Reason string when the daily flatten time (UTC) has passed."""
+        # 24m/B5. This used to be a frozen UTC wall time (default 21:30). Today that is
+        # 23:30 Budapest - after the 23:00 close, harmless. From 25 Oct 2026, when the
+        # clocks go back, 21:30 UTC becomes 22:30 Budapest: INSIDE the trading day, so
+        # positions would be flattened 30 minutes early and the reason would read like a
+        # strategy decision. The flatten time is a Budapest-business-hours idea, so it is
+        # now expressed in Budapest local time and converted for the date in question.
+        # PM_DAILY_FLATTEN_UTC still wins if it is set explicitly, for backward compat.
+        local_time = str(getattr(config, "PM_DAILY_FLATTEN_LOCAL", "") or "").strip()
         cfg_time = str(getattr(config, "PM_DAILY_FLATTEN_UTC", "") or "").strip()
+        now = now or datetime.now(timezone.utc)
+        if local_time:
+            try:
+                hh, mm = (int(x) for x in local_time.split(":")[:2])
+            except ValueError:
+                return ""
+            try:
+                from zoneinfo import ZoneInfo
+                tz = ZoneInfo(str(getattr(config, "LOCAL_TZ", "Europe/Budapest")))
+            except Exception:
+                tz = None
+            if tz is not None:
+                local_now = now.astimezone(tz)
+                flatten_at = local_now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+                if local_now >= flatten_at:
+                    return (f"daily flatten {local_time} "
+                            f"{getattr(config, 'LOCAL_TZ', 'Europe/Budapest')} "
+                            f"({flatten_at.astimezone(timezone.utc):%H:%M} UTC today) — "
+                            f"closing before the CFD break (a gap can jump over a stop)")
+                return ""
         if not cfg_time:
             return ""
         try:
             hh, mm = (int(x) for x in cfg_time.split(":")[:2])
         except ValueError:
             return ""
-        now = now or datetime.now(timezone.utc)
         flatten_at = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
         if now >= flatten_at:
             return (f"daily flatten {cfg_time} UTC — closing before the "

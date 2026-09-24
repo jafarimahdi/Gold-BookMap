@@ -67,9 +67,24 @@ class TradeGuard:
     def _now(now: Optional[datetime] = None) -> datetime:
         return now or datetime.now(timezone.utc)
 
+    @staticmethod
+    def _day_key(now: datetime) -> str:
+        """24m/C3: 'today' for MAX_TRADES_PER_DAY must be the SAME day the report uses.
+        This used to be the UTC date, which rolls over at 02:00 Budapest - so a trade at
+        01:30 counted against the previous day's budget while the report filed it under
+        the new one. The trading window is 08:00-23:00 local, entirely inside one local
+        day, so the local date is the only reading that matches the operator's day."""
+        try:
+            from zoneinfo import ZoneInfo
+            import config as _cfg
+            tz = ZoneInfo(str(getattr(_cfg, "LOCAL_TZ", "Europe/Budapest")))
+            return now.astimezone(tz).date().isoformat()
+        except Exception:
+            return now.date().isoformat()
+
     def _today_state(self, now: datetime) -> dict:
         """Return the state normalised to today (resets daily counters)."""
-        today = now.date().isoformat()
+        today = self._day_key(now)
         state = self.load_state()
         if state.get("date") != today:
             state = {"date": today, "trades_today": 0, "last_trade_ts": None}

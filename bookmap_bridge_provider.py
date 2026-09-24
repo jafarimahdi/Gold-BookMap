@@ -64,10 +64,20 @@ def _parse_ts(raw: str) -> Optional[datetime]:
     except (ValueError, AttributeError):
         return None
     if dt.tzinfo is None:
+        # 24m/C5. `dt.astimezone()` on a naive value applies the offset in force RIGHT
+        # NOW, not the one in force on the row's own date. Replaying a 24 Oct row on
+        # 26 Oct therefore stamped it an hour wrong, while audit_day.py resolved the same
+        # row with the date-aware zone - the two disagreed for exactly one day a year.
+        # Attaching the zone to the row's OWN date makes both sides agree always.
         try:
-            dt = dt.astimezone()
-        except (OSError, ValueError):
-            dt = dt.replace(tzinfo=timezone.utc)
+            from zoneinfo import ZoneInfo
+            import os as _os
+            dt = dt.replace(tzinfo=ZoneInfo(_os.getenv("LOCAL_TZ", "Europe/Budapest")))
+        except Exception:
+            try:
+                dt = dt.astimezone()
+            except (OSError, ValueError):
+                dt = dt.replace(tzinfo=timezone.utc)
     return dt
 
 

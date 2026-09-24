@@ -220,7 +220,16 @@ def _refresh() -> None:
     g["PM_NEWS_PROTECT_ENABLE"] = _fget("PM_NEWS_PROTECT_ENABLE", "1") == "1"
     g["PM_NEWS_PROTECT_MINUTES"] = _ffloat("PM_NEWS_PROTECT_MINUTES", 10.0)
     g["PM_NEWS_PROTECT_MODE"] = _fget("PM_NEWS_PROTECT_MODE", "tighten")
-    g["PM_DAILY_FLATTEN_UTC"] = _fget("PM_DAILY_FLATTEN_UTC", "21:30")
+    # 24m: one place names the operator's timezone. Everything the robot WRITES is UTC;
+    # this zone is used only where local time is the meaning (trading window, daily
+    # flatten, the per-day trade budget), and it is resolved per date, so DST is handled
+    # by the calendar instead of by a hard-coded offset.
+    g["LOCAL_TZ"] = _fget("LOCAL_TZ", "Europe/Budapest")
+    # 24m/B5: the flatten time is a local-business-hours idea, so it is configured in
+    # local time and converted per date (DST-safe). Setting PM_DAILY_FLATTEN_UTC in .env
+    # still overrides it, for anyone who genuinely wants a fixed UTC time year-round.
+    g["PM_DAILY_FLATTEN_LOCAL"] = _fget("PM_DAILY_FLATTEN_LOCAL", "23:30")
+    g["PM_DAILY_FLATTEN_UTC"] = _fget("PM_DAILY_FLATTEN_UTC", "")
     g["PM_ACTION_MAX_SPREAD_PCT"] = _ffloat("PM_ACTION_MAX_SPREAD_PCT", 0.05)
 
     g["PM_PROFIT_LOCK_ENABLE"] = _fget("PM_PROFIT_LOCK_ENABLE", "1") == "1"

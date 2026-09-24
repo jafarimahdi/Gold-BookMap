@@ -515,6 +515,18 @@ def _ai_state_path():
     return _AI_STATE_FILE
 
 
+def _local_day_key() -> str:
+    """24m/C3 sibling: AI_MAX_CALLS_PER_DAY must reset on the same day boundary the
+    report and the trade budget use - the operator's local date, not a naive machine
+    date and not UTC (which rolls over at 02:00 Budapest, mid-night-session)."""
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.now(timezone.utc).astimezone(
+            ZoneInfo(str(getattr(config, "LOCAL_TZ", "Europe/Budapest")))).date().isoformat()
+    except Exception:
+        return datetime.now().date().isoformat()
+
+
 def _ai_calls_today() -> int:
     """How many Gemini calls we have already made today (persisted)."""
     import json
@@ -522,7 +534,7 @@ def _ai_calls_today() -> int:
     try:
         if path.exists():
             state = json.loads(path.read_text(encoding="utf-8"))
-            if state.get("date") == datetime.now().date().isoformat():
+            if state.get("date") == _local_day_key():
                 return int(state.get("calls", 0) or 0)
     except (json.JSONDecodeError, OSError):
         pass
@@ -534,7 +546,7 @@ def _record_ai_call() -> None:
     import json
     try:
         _ai_state_path().write_text(
-            json.dumps({"date": datetime.now().date().isoformat(),
+            json.dumps({"date": _local_day_key(),
                         "calls": _ai_calls_today() + 1}),
             encoding="utf-8")
     except OSError:
@@ -1035,8 +1047,11 @@ def run_pipeline() -> None:
     gate_ok, gate_reason = _safety_gates(data)
     if not gate_ok:
         from step3_ai_decision import Decision
+        # 24m/A1d: the AI is never called when a safety gate blocks the cycle, so the
+        # record must not imply it was. The gate's own reason is in the reason column.
         decision = Decision(action="HOLD", confidence=0.0,
-                            rationale=f"safety gate: {gate_reason}")
+                            rationale=f"safety gate: {gate_reason}",
+                            model="none-safety-gate")
         if snapshot is not None:
             snapshot.notes.append(gate_reason)
 
@@ -1054,7 +1069,8 @@ def run_pipeline() -> None:
                     logger.warning(f"L5 RL PAUSE: {reason}")
                     _record("SAFETY: RL_PAUSE", reason)
                     from step3_ai_decision import Decision as _Dec
-                    decision = _Dec(action="HOLD", confidence=0.0, rationale=f"RL pause: {reason}")
+                    decision = _Dec(action="HOLD", confidence=0.0, rationale=f"RL pause: {reason}",
+                                    model="none-rl-pause")
                     # Skip execution but still manage
         except Exception as e:
             logger.warning(f"L5 RL snapshot check failed: {e}")

@@ -59,7 +59,7 @@ def LOGS_DIR():
 # BUILD MARKER - the shell scripts check for THIS string instead of a byte count,
 # so an intentional edit can never make morning_check.sh yell "re-copy it from the
 # kit" at a perfectly good file. Bump the date whenever you ship a new auditor.
-BUILD = "audit-2026-09-24l3"
+BUILD = "audit-2026-09-24m"
 BASE_DIR_FOR_ENV = Path(__file__).resolve().parent
 
 
@@ -146,7 +146,9 @@ MAX_HOLD_CANDLES = int(_envf("AUDIT_MAX_HOLD_MIN", 180) / 5.0) or 36
 WINDOW_START_H = int(_env("BUDAPEST_START", "08:00").split(":")[0])
 WINDOW_END_H = int(_env("BUDAPEST_END", "23:00").split(":")[0])
 AI_MIN = _envf("AI_MIN_SIGNAL_STRENGTH", 6.0)
-CONF_MIN = _envf("CONFIDENCE_THRESHOLD", 50.0)
+# 24m/C2: ONE default for the gate, defined once and used everywhere.
+CONF_MIN_DEFAULT = 50.0
+CONF_MIN = _envf("CONFIDENCE_THRESHOLD", CONF_MIN_DEFAULT)
 AI_MAX_CALLS = int(_envf("AI_MAX_CALLS_PER_DAY", 2000))
 LATENCY_TARGET_MS = 500.0
 def TICKS_CANDIDATES():
@@ -1143,10 +1145,29 @@ def write_index_page():
 
 
 # ------------------------------------------------------------------ tests ---
-def test_1_alive(day, log_path, text, decisions):
+def _parse_log_stamp(s, ms):
+    """A log line's wall clock is the machine's local time (Budapest). Resolve it with
+    the real zone so the offset matches the date, DST changeover included."""
+    try:
+        naive = datetime.strptime(f"{s}.{ms}", "%Y-%m-%d %H:%M:%S.%f")
+    except ValueError:
+        return None
+    try:
+        return naive.replace(tzinfo=BUDA)
+    except Exception:
+        return naive.replace(tzinfo=timezone.utc)
+
+
+def test_1_alive(day, log_path, text, decisions, tape_last=None, tape_first=None):
     r = Report(1)
     stamps = re.findall(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}),(\d{3})", text, re.M)
-    dts = [parse_ts(f"{s}.{ms}+02:00") for s, ms in stamps]
+    # 24m FIX: this used to append a hard-coded "+02:00". Budapest is +02:00 only from
+    # late March to late October; from 25 Oct 2026 it is +01:00, and every log line
+    # would have been read one hour off - shifting "first"/"last"/hour buckets and the
+    # session story with them. BUDA is a real zone, so the offset is looked up for the
+    # date each line actually carries.
+    dts = [_parse_log_stamp(s, ms) for s, ms in stamps]
+    dts = [d for d in dts if d is not None]
     dts = [d for d in dts if on_day(d, day)]
     if not dts:
         r.add("FAIL", "ALIVE CHECK",
@@ -1169,9 +1190,34 @@ def test_1_alive(day, log_path, text, decisions):
            f"  (log start only - if BookMap was already writing before this, the gap is the robot, not you)",
            f"longest silence between two log lines: {gap_max/60:.1f} min, gaps >15 min: {gaps_over_15min}"]
     why += _sess_story(text)
-    if span_h >= 12 and gaps_over_15min == 0:
+    # 24m/B3: being awake is not the same as being able to see. main.py DOES stop
+    # trading ~5 min after the tape freezes (the protection works), but this test only
+    # ever read the robot's own "I am alive" lines, so a day where BookMap died at
+    # lunchtime could still print "ran the whole day -> good". The headline now has to
+    # survive the tape as well.
+    blind_h = 0.0
+    if tape_last is not None:
+        blind_s = (last - tape_last).total_seconds()
+        blind_h = max(0.0, blind_s / 3600.0)
+        why.append(f"tape cross-check: last log line {last.astimezone(BUDA):%H:%M}, "
+                   f"last price print {tape_last.astimezone(BUDA):%H:%M} "
+                   f"-> {blind_h:.1f} h awake with no feed")
+        if blind_h >= 0.5:
+            why.append(f"THE ROBOT WAS ALIVE AND BLIND for {blind_h:.1f} h: it kept logging, "
+                       f"but BookMap stopped handing it prices. It correctly refuses to trade "
+                       f"on a stale tape, so this is not a money bug - but the hours after "
+                       f"{tape_last.astimezone(BUDA):%H:%M} are NOT trading time, and no "
+                       f"statistic below should be read as if they were")
+    else:
+        why.append("tape cross-check: no price data for this day, so 'awake' below means "
+                   "'the process was running', not 'the robot could see the market'")
+    if span_h >= 12 and gaps_over_15min == 0 and blind_h < 0.5:
         grade = "PASS"
-        why.append("ran the whole day with no long sleep -> good")
+        why.append("ran the whole day with no long sleep, and the feed was alive with it -> good")
+    elif span_h >= 12 and gaps_over_15min == 0:
+        grade = "WARN"
+        why.append(f"awake all day, but blind for {blind_h:.1f} h of it -> a full-day run on a "
+                   f"part-day feed. Calling this a good day would be flattering the robot")
     elif span_h >= 4:
         grade = "WARN"
         why.append("only part of the day -> the rest is missing, so any stat below is on partial data")
@@ -1467,6 +1513,11 @@ def test_5_guards(text, decisions, feed):
             if _fb.get("none") and _fb.get("none_why"):
                 why.append("   why the AI was not reached: " + ", ".join(
                     f"{_k} x{_v}" for _k, _v in _fb["none_why"]))
+                why.append("      none-safety-gate = a safety gate blocked the whole cycle "
+                           "(weekend/holiday, stale feed, spread cap, loss limit...) and the AI "
+                           "was never called. The gate's own words are in the reason column - "
+                           "if this number is large, read those reasons before tuning anything, "
+                           "because the strategy barely ran that day")
                 why.append("      none-weak-signal = the strategy never asked (signal below "
                            "AI_MIN_SIGNAL_STRENGTH) - by design. none-throttled / none-daily-cap "
                            "= AI_MIN_INTERVAL_MINUTES or AI_MAX_CALLS_PER_DAY silenced it - your "
@@ -2496,7 +2547,9 @@ def _isolate_env(env_path):
         WINDOW_END_H=int(_env("BUDAPEST_END", "23:00").split(":")[0]),
         AI_MAX_CALLS=int(_envf("AI_MAX_CALLS_PER_DAY", 2000)),
         LATENCY_TARGET_MS=_envf("LATENCY_TARGET_MS", 500.0),
-        CONF_MIN=_envf("CONFIDENCE_THRESHOLD", 63.0),
+        CONF_MIN=_envf("CONFIDENCE_THRESHOLD", CONF_MIN_DEFAULT),   # 24m/C2: was a
+        # second, different default (63.0). If CONFIDENCE_THRESHOLD ever went missing
+        # from .env, one report graded the same day against two different doors.
         AI_MIN=_envf("AI_MIN_SIGNAL_STRENGTH", 8.0))
 
 # ------------------------------------------------------------------ main ---
@@ -3349,10 +3402,23 @@ def main(argv=None):
     DAY_COUNTS.update({"decisions": len(decisions), "diary": len(diary),
                        "prints": len(ticks), "dups_dropped": TAPE_DUPLICATES})
     reports = {}
-    reports["alive"], alive = _safe_test(1, "ALIVE CHECK", test_1_alive, day, log_path, text, decisions)
+    # load_ticks returns (dt, price, size) tuples, sorted by dt
+    _tape_first = ticks[0][0] if ticks else None
+    _tape_last = ticks[-1][0] if ticks else None
+    reports["alive"], alive = _safe_test(1, "ALIVE CHECK", test_1_alive, day, log_path, text,
+                                         decisions, _tape_last, _tape_first)
     payloads = {}
     reports["feed"], feed = _safe_test(2, "FEED CHECK", test_2_feed, day, ticks, ticks_path,
                                        scanned, mbo_n, alive, mbo_win)
+    if log_path is None:
+        _age = (datetime.now(BUDA).date() - day).days
+        _keep = _envf("LOG_RETENTION_DAYS", 7.0)
+        if _age > _keep:
+            say(f"[note] {day:%Y-%m-%d} is {_age} days old and LOG_RETENTION_DAYS={_keep:.0f}, "
+                f"so maintenance.py already deleted its log file. The pipeline and speed "
+                f"sections below have nothing to read - that is HOUSEKEEPING, not a robot "
+                f"that did nothing. Raise LOG_RETENTION_DAYS to 10 in .env if you want the "
+                f"8-day view to be complete.")
     reports["pipe"], _pipe = _safe_test(3, "PIPELINE CHECK", test_3_pipeline, text, decisions)
     reports["dq"], _ = _safe_test(4, "DATA QUALITY CHECK", test_4_data_quality, day, ticks, text)
     reports["guards"], guards = _safe_test(5, "GUARD CHECK", test_5_guards, text, decisions, feed)
