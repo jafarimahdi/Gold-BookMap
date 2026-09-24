@@ -33,7 +33,7 @@ echo
 echo "== 1. the files you installed tonight =================================="
 # audit_day.py is verified by its BUILD marker, not by size: sizes change every
 # time we fix something, and a stale constant here once called a good install bad.
-if [ -f audit_day.py ] && grep -q "BUILD = \"audit-2026-09-24d\"" audit_day.py; then
+if [ -f audit_day.py ] && grep -q "BUILD = \"audit-2026-09-24j\"" audit_day.py; then
   ok "audit_day.py is the build the kit shipped ($(stat -c %s audit_day.py) bytes, marker present)"
 elif [ -f audit_day.py ]; then
   no "audit_day.py has no kit build marker ($(stat -c %s audit_day.py) bytes) - re-copy it from the kit"
@@ -95,6 +95,11 @@ if $PY -m py_compile main.py judge_panel.py audit_day.py dashboard.py tools/dash
   ok "main.py + judge_panel.py + audit kit all compile"
 else
   no "python cannot compile the tree - paste me: $PY -m py_compile main.py"
+fi
+if [ -f tools/insight.py ] && $PY -m py_compile tools/insight.py >/dev/null 2>&1; then
+  ok "tools/insight.py is here ($(stat -c %s tools/insight.py) bytes) - the four learning modes are live"
+else
+  no "tools/insight.py missing or broken - re-copy it from the kit (the 15-test day audit still runs; --explain, --weight-ab, --walk-forward and the two HTML pages stay quiet)"
 fi
 $PY -c "import config, session, datetime as d; n=d.datetime.now(d.timezone.utc); raise SystemExit(0 if not session.is_market_open(n) else 1)" 2>/dev/null \
   && ok "session guard is live: is_market_open() says closed before 08:00 (no accidental trades)" \

@@ -61,8 +61,8 @@ if [ "$MODE" = "check" ]; then
   echo "== verifier: does the testing system itself work? =="
   [ -f audit_day.py ] || { echo "[FAIL] audit_day.py missing"; exit 1; }
   "$PY" -W error::SyntaxWarning -m py_compile audit_day.py && echo "[OK] audit_day.py compiles"
-  grep -q 'BUILD = "audit-2026-09-24d"' audit_day.py && echo "[OK] audit_day.py carries build marker audit-2026-09-24d (sizes no longer matter)" || echo "[warn] no kit build marker in audit_day.py - you are on a file from an older kit, day numbers may be off"
-  for f in tools/dashboard.py dashboard.py; do
+  grep -q 'BUILD = "audit-2026-09-24j"' audit_day.py && echo "[OK] audit_day.py carries build marker audit-2026-09-24j (sizes no longer matter)" || echo "[warn] no kit build marker in audit_day.py - you are on a file from an older kit, day numbers may be off"
+  for f in tools/dashboard.py tools/insight.py dashboard.py; do
     [ -f "$f" ] || { echo "[FAIL] $f missing - re-copy it from the kit"; exit 1; }
   done
   "$PY" -c "import sys;sys.path.insert(0,'tools');import dashboard;print('[OK] visual layer loads, '+str(len(dashboard._STYLE))+' bytes of style, '+str(len(dashboard._JS))+' bytes of script, from '+dashboard.__file__)" || { echo "[FAIL] tools/dashboard.py will not import"; exit 1; }
@@ -72,15 +72,21 @@ import dashboard as d
 for n in ('day_dashboard','write_index','history_block'):
     assert callable(getattr(d,n)), n
 print('[OK] dashboard API complete (day report + index + trend table)')" || { echo "[FAIL] dashboard API incomplete"; exit 1; }
+  "$PY" -c "
+import sys; sys.path.insert(0,'tools')
+import insight as i
+for n in ('decisions_page','trades_page','judges_page','explain','weight_ab','walk_forward'):
+    assert callable(getattr(i,n)), n
+print('[OK] learning layer complete (decision drill-down, trades page, weight A/B, walk-forward)')" || { echo "[FAIL] tools/insight.py API incomplete - re-copy it from the kit"; exit 1; }
   DEMO=$(GBM_NO_BROWSER=1 "$PY" audit_day.py --demo 2>&1); rc1=$?
   echo "$DEMO" | tail -4
   SELF=""; rc2=0
   [ -f tools/selftest_audit_day.py ] && { SELF=$(GBM_NO_BROWSER=1 "$PY" tools/selftest_audit_day.py 2>&1); rc2=$?; echo "$SELF" | tail -1; }
   if [ $rc1 -ne 0 ] || [ $rc2 -ne 0 ]; then
     echo "[FAIL] the tester itself is not clean - do NOT trust day numbers yet."
-    echo "       Most likely the auditor or tools/dashboard.py was half-copied:"
-    echo "       ls -la audit_day.py dashboard.py tools/dashboard.py"
-    echo "       want audit_day.py to contain BUILD = \"audit-2026-09-24d\" any size is fine if the marker matches — do NOT chase byte counts"
+    echo "       Most likely the auditor, tools/dashboard.py or tools/insight.py was half-copied:"
+    echo "       ls -la audit_day.py dashboard.py tools/dashboard.py tools/insight.py"
+    echo "       want audit_day.py to contain BUILD = \"audit-2026-09-24j\" any size is fine if the marker matches — do NOT chase byte counts"
     echo "       and clear stale bytecode:  find . -name __pycache__ -type d -exec rm -rf {} +"
     exit 1
   fi

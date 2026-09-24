@@ -20,6 +20,7 @@ import argparse
 import csv
 import json
 import logging
+import os
 import sys
 import time
 from pathlib import Path
@@ -455,8 +456,7 @@ def run_step2(data):
                             or _judge_panel_from_notes(getattr(snapshot, "notes", []) or [])),
             "notes": getattr(snapshot, "notes", [])[:200],
         }
-        with open(hist_path, "a", encoding="utf-8") as hf:
-            hf.write(_json.dumps(record) + "\n")
+        _append_diary(record, hist_path)
         # v5.0: rotate snapshots_history if >50MB to prevent big file crash
         try:
             if hist_path.stat().st_size > 50*1024*1024:
@@ -1143,6 +1143,124 @@ def print_summary() -> None:
     print("=" * 70)
 
 
+def _env_snapshot() -> dict:
+    """The values that decide behaviour, under their .env names (what audit_day.py reads)."""
+    g = lambda k, d=None: getattr(config, k, d)
+    gm = g("GEMINI_MODELS")
+    return {
+        "CONFIDENCE_THRESHOLD": g("AI_CONFIDENCE_THRESHOLD"),
+        "AI_MIN_SIGNAL_STRENGTH": g("AI_MIN_SIGNAL_STRENGTH"),
+        "V6_CFD_SPREAD_MAX": g("V6_CFD_SPREAD_MAX"),
+        "BOOKMAP_WINDOW_SECONDS": g("BOOKMAP_WINDOW_SECONDS"),
+        "BOOKMAP_MAX_DEPTH_LEVELS": g("BOOKMAP_MAX_DEPTH_LEVELS"),
+        "GEMINI_MODEL": g("GEMINI_MODEL"),
+        "GEMINI_MODELS": ",".join(gm) if isinstance(gm, (list, tuple)) else gm,
+        "EXECUTION_MODE": g("EXECUTION_MODE"),
+        "TRADING_ENABLED": g("TRADING_ENABLED"),
+        "MT5_SYMBOL": g("MT5_SYMBOL"),
+        "DATA_SOURCE": g("DATA_SOURCE"),
+    }
+
+
+def _write_run_config() -> None:
+    """Record the config THIS day really ran with - once per day, first start wins.
+
+    audit_day.py grades a day against this file, so editing .env tomorrow can never
+    rewrite yesterday's grade; the auditor prints the difference when there is one.
+    """
+    now = datetime.now()
+    path = DATA_DIR / f"run_config_{now:%Y%m%d}.json"
+    if path.exists():
+        return                      # the first start of the day defines the day
+    try:
+        payload = {"date": f"{now:%Y-%m-%d}", "written_at": now.isoformat(timespec="seconds"),
+                   "pid": os.getpid(), "mode": "loop" if "--loop" in sys.argv else "once"}
+        payload.update(_env_snapshot())
+        path.write_text(json.dumps(payload, indent=1, default=str), encoding="utf-8")
+        logger.info("RUN CONFIG recorded -> %s (gate=%s ai_gate=%s spread=%s window=%ss depth=%s)",
+                    path, payload.get("CONFIDENCE_THRESHOLD"), payload.get("AI_MIN_SIGNAL_STRENGTH"),
+                    payload.get("V6_CFD_SPREAD_MAX"), payload.get("BOOKMAP_WINDOW_SECONDS"),
+                    payload.get("BOOKMAP_MAX_DEPTH_LEVELS"))
+    except OSError as exc:
+        logger.warning("Could not write run_config: %s", exc)
+
+
+def _append_diary(record: dict, hist_path) -> None:
+    """Append one diary record: master file AND a per-day mirror.
+
+    The master rotates at 50 MB keeping the last 20k lines, which silently dropped the
+    oldest days and made their judge panel ungradeable. The per-day mirror
+    (data/diary_<yyyymmdd>.jsonl) is what lets audit_day.py grade any day you still have.
+    """
+    line = json.dumps(record)
+    with open(hist_path, "a", encoding="utf-8") as hf:
+        hf.write(line + "\n")
+    when = None
+    try:
+        when = datetime.fromisoformat(str(record.get("timestamp", "")).replace("Z", "+00:00"))
+    except Exception:
+        when = None
+    when = (when or datetime.now().astimezone()).astimezone()
+    mirror = DATA_DIR / f"diary_{when:%Y%m%d}.jsonl"
+    try:
+        with open(mirror, "a", encoding="utf-8") as mf:
+            mf.write(line + "\n")
+    except OSError as exc:
+        logger.warning("Could not write per-day diary mirror: %s", exc)
+
+
+def _today_counts() -> dict:
+    """The day's counters, read back from the files the robot itself wrote."""
+    out = {"decisions": 0, "executed": 0, "ai_calls": 0, "iterations": 0}
+    today = f"{datetime.now():%Y-%m-%d}"
+    try:
+        p = DATA_DIR / "decisions_log.csv"
+        if p.exists():
+            with open(p, encoding="utf-8", errors="ignore", newline="") as f:
+                for r in csv.DictReader(f):
+                    if str(r.get("timestamp", ""))[:10] == today:
+                        out["decisions"] += 1
+                        if (r.get("exec_status") or "").upper() == "EXECUTED":
+                            out["executed"] += 1
+    except Exception:
+        pass
+    try:
+        out["ai_calls"] = _ai_calls_today()
+    except Exception:
+        pass
+    try:
+        lp = LOGS_DIR / f"trading_{datetime.now():%Y%m%d}.log"
+        if lp.exists():
+            with open(lp, encoding="utf-8", errors="ignore") as f:
+                out["iterations"] = sum(1 for line in f if "loop iteration" in line)
+    except Exception:
+        pass
+    return out
+
+
+def _session_end_summary() -> None:
+    """The robot's own closing line: what the day holds, and how to grade it."""
+    c = _today_counts()
+    ymd, iso = f"{datetime.now():%Y%m%d}", f"{datetime.now():%Y-%m-%d}"
+    logger.info("SESSION END | cycles=%d decisions=%d sent_to_mt5=%d ai_calls=%d | "
+                "records written: decisions_log.csv, snapshots_history.jsonl (+ diary_%s.jsonl), "
+                "run_config_%s.json | grade the day with: bash daily_check.sh %s",
+                c["iterations"], c["decisions"], c["executed"], c["ai_calls"], ymd, ymd, iso)
+
+
+def _log_session_start(mode: str) -> None:
+    """The day's opening line: what this run is, with which rules, on which data."""
+    logger.info("SESSION START | mode=%s pid=%d | gate=%s ai_gate=%s spread=%s window=%ss "
+                "depth=%s | %s -> %s",
+                mode, os.getpid(),
+                getattr(config, "AI_CONFIDENCE_THRESHOLD", "?"),
+                getattr(config, "AI_MIN_SIGNAL_STRENGTH", "?"),
+                getattr(config, "V6_CFD_SPREAD_MAX", "?"),
+                getattr(config, "BOOKMAP_WINDOW_SECONDS", "?"),
+                getattr(config, "BOOKMAP_MAX_DEPTH_LEVELS", "?"),
+                getattr(config, "DATA_SOURCE", "?"), getattr(config, "MT5_SYMBOL", "?"))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Gold trading system pipeline")
     parser.add_argument("--loop", action="store_true",
@@ -1178,13 +1296,22 @@ def main() -> int:
         _time.sleep(5)
         return 1
 
+    _write_run_config()
+    _log_session_start("loop" if args.loop else "once")
+
     try:
         if args.loop:
             from step5_monitoring import TradeMonitor
             TradeMonitor().run_loop(run_pipeline)
         else:
             run_pipeline()
+    except KeyboardInterrupt:
+        logger.info("SESSION interrupted from the console (Ctrl-C) - closing the day cleanly")
     finally:
+        try:
+            _session_end_summary()
+        except Exception as _se:
+            logger.warning("Could not write the session summary: %s", _se)
         _release_lock()
     return 0
 

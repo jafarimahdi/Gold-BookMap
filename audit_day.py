@@ -59,7 +59,7 @@ def LOGS_DIR():
 # BUILD MARKER - the shell scripts check for THIS string instead of a byte count,
 # so an intentional edit can never make morning_check.sh yell "re-copy it from the
 # kit" at a perfectly good file. Bump the date whenever you ship a new auditor.
-BUILD = "audit-2026-09-24e"
+BUILD = "audit-2026-09-24j"
 BASE_DIR_FOR_ENV = Path(__file__).resolve().parent
 
 
@@ -226,6 +226,48 @@ def parse_ts(s):
         return None
 
 
+def on_day(dt, day):
+    """Is this stamp on `day` in BUDAPEST?  One day = one calendar day in YOUR timezone.
+
+    Stamps arrive in three shapes: naive local (main.py's decisions_log.csv), aware UTC
+    (the diary), and epoch.  Converting every one to Budapest before comparing is the
+    only way the tape, the decisions and the diary agree on which day a row belongs to -
+    they used to compare UTC dates, which silently moved every row between 00:00 and
+    02:00 local into yesterday, and dropped tape prints in the same window entirely.
+    """
+    try:
+        return bool(dt) and dt.astimezone(BUDA).date() == day
+    except Exception:
+        return False
+
+
+def _sess_story(text):
+    """The robot's own morning-to-night story (build 24f writes SESSION START/END)."""
+    s = re.search(r"^.*?SESSION START\b[^\n]*", text or "", re.M)
+    e = re.search(r"^.*?SESSION END\b[^\n]*", text or "", re.M)
+
+    def _clean(line):
+        m = re.search(r"(\d{2}:\d{2}:\d{2})", line or "")
+        tail = line.split("|", 1)[1].strip() if "|" in (line or "") else ""
+        return (m.group(1) if m else "?"), tail
+
+    out = []
+    if s and e:
+        t0, d0 = _clean(s.group(0))
+        t1, d1 = _clean(e.group(0))
+        out.append(f"the robot recorded its own session: START {t0}  |  {d0}")
+        out.append(f"                                    END   {t1}  |  {d1}")
+        out.append("clean start and stop -> the day has a beginning and an end, not just a gap")
+    elif s:
+        t0, d0 = _clean(s.group(0))
+        out.append(f"the robot recorded START ({t0} | {d0}) but NO SESSION END line -> the process "
+                   f"was killed, the machine slept, or it is still running")
+    else:
+        out.append("no SESSION START/END lines in this log -> build older than 24f; the log's own "
+                   "first/last lines above are all there is")
+    return out
+
+
 def hhmm(dt):
     return dt.astimezone(BUDA).strftime("%H:%M") if dt else "??"
 
@@ -262,6 +304,10 @@ class Report:
 
 
 # ------------------------------------------------------------- data loaders --
+TAPE_DUPLICATES = 0          # rows seen twice across sources and dropped; test 4 prints it
+DAY_COUNTS = {}              # rows loaded for the graded day, so tests can state "for THIS day"
+
+
 def find_ticks_file():
     for p in TICKS_CANDIDATES():
         if p and Path(p).exists():
@@ -463,9 +509,16 @@ def load_ticks(day, max_lines=0):
     files = all_ticks_files(day)
     p = find_ticks_file() or (files[0] if files else None)
     out = []
+    global TAPE_DUPLICATES
+    TAPE_DUPLICATES = 0
     if not files:
         return out, None, 0
     scanned = 0
+    # The same print can be visible through two sources (the live tape the .env points
+    # at, plus a rotated chunk): summing them double-counts the day. Dedupe on the row
+    # itself when more than one file is in play, with a hard cap so a 10M-row day can
+    # never blow up the RAM of the audit.
+    _seen = set() if len(files) > 1 else None
     tag = f"{day:%Y-%m-%d}"
     import gzip
     for path in files:
@@ -490,7 +543,7 @@ def load_ticks(day, max_lines=0):
                 if parts[1] not in ("Last", "Trade", "trade"):
                     continue
                 dt = parse_ts(parts[0])
-                if dt is None or dt.date() != day:
+                if dt is None or not on_day(dt, day):
                     continue
                 try:
                     price = float(parts[2])
@@ -499,6 +552,13 @@ def load_ticks(day, max_lines=0):
                 if not (1000 < price < 10000):
                     continue
                 size = float(parts[3]) if parts[3] else 0.0
+                if _seen is not None:
+                    key = (dt, price, size)
+                    if key in _seen:
+                        TAPE_DUPLICATES += 1
+                        continue
+                    if len(_seen) < 2000000:
+                        _seen.add(key)
                 out.append((dt, price, size))
       except Exception as e:
         print(f"[warn] ticks read failed on {path.name}: {e}")
@@ -580,7 +640,7 @@ def load_decisions(day):
     with open(p, encoding="utf-8", errors="ignore", newline="") as f:
         for r in csv.DictReader(f):
             dt = parse_ts(r.get("timestamp", ""))
-            if dt and dt.date() == day:
+            if on_day(dt, day):
                 r["_dt"] = dt
                 for k in ("price", "signal_strength", "signal_confidence",
                           "divergence", "ai_confidence"):
@@ -594,27 +654,43 @@ def load_decisions(day):
 
 
 def load_diary(day):
-    """data/snapshots_history.jsonl entries for that day (v4.3+ diary)."""
+    """data/snapshots_history.jsonl entries for that day (v4.3+ diary).
+
+    The master file rotates at 50 MB keeping the last 20k lines, so a day older than
+    that loses its judge panel. main.py (build 24f+) also writes a per-day mirror,
+    data/diary_<yyyymmdd>.jsonl - when the master no longer holds the day, the mirror
+    is read instead, and the report says so.
+    """
+    def _read(path):
+        rows = []
+        try:
+            with open(path, encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        o = json.loads(line)
+                    except Exception:
+                        continue
+                    dt = parse_ts(str(o.get("ts") or o.get("time") or o.get("timestamp") or ""))
+                    if on_day(dt, day):
+                        o["_dt"] = dt
+                        rows.append(o)
+        except Exception as e:
+            print(f"[warn] diary read failed on {path.name}: {e}")
+        return rows
+
     p = DATA_DIR() / "snapshots_history.jsonl"
-    out = []
-    if not p.exists():
-        return out, p
-    try:
-        with open(p, encoding="utf-8", errors="ignore") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    o = json.loads(line)
-                except Exception:
-                    continue
-                dt = parse_ts(str(o.get("ts") or o.get("time") or o.get("timestamp") or ""))
-                if dt and dt.date() == day:
-                    o["_dt"] = dt
-                    out.append(o)
-    except Exception as e:
-        print(f"[warn] diary read failed: {e}")
+    out = _read(p) if p.exists() else []
+    if not out:
+        mirror = DATA_DIR() / f"diary_{day:%Y%m%d}.jsonl"
+        if mirror.exists():
+            out = _read(mirror)
+            if out:
+                print(f"[warn] the master diary holds no rows for {day:%Y-%m-%d} (it keeps only the "
+                      f"last 20k lines once it passes 50 MB) -> read {mirror.name} instead")
+                return out, mirror
     return out, p
 
 
@@ -984,10 +1060,10 @@ def test_1_alive(day, log_path, text, decisions):
     r = Report(1)
     stamps = re.findall(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}),(\d{3})", text, re.M)
     dts = [parse_ts(f"{s}.{ms}+02:00") for s, ms in stamps]
-    dts = [d for d in dts if d and d.astimezone(timezone.utc).date() == day]
+    dts = [d for d in dts if on_day(d, day)]
     if not dts:
         r.add("FAIL", "ALIVE CHECK",
-              "was it awake during 08:00-23:00 Budapest?",
+              "was it awake all day?",
               [f"no log lines dated {day:%Y-%m-%d} found ({log_path or 'no log file'})",
                "the run you want to grade is not in this folder -> check you are in the right project dir"])
         return r, None
@@ -1005,6 +1081,7 @@ def test_1_alive(day, log_path, text, decisions):
            f"first {first.astimezone(BUDA):%H:%M:%S}  last {last.astimezone(BUDA):%H:%M:%S}  = {span_h:.1f} h awake"
            f"  (log start only - if BookMap was already writing before this, the gap is the robot, not you)",
            f"longest silence between two log lines: {gap_max/60:.1f} min, gaps >15 min: {gaps_over_15min}"]
+    why += _sess_story(text)
     if span_h >= 12 and gaps_over_15min == 0:
         grade = "PASS"
         why.append("ran the whole day with no long sleep -> good")
@@ -1014,7 +1091,7 @@ def test_1_alive(day, log_path, text, decisions):
     else:
         grade = "FAIL"
         why.append("it was awake for much less than a working day -> it did NOT 'work a whole day'")
-    r.add(grade, "ALIVE CHECK", "was it awake, without long silences, 08:00-23:00 Budapest?", why)
+    r.add(grade, "ALIVE CHECK", "was it awake all day, without long silences?", why)
     return r, {"first": first, "last": last, "span_h": span_h,
                "lines": len(dts), "gap_max": gap_max, "gaps15": gaps_over_15min,
                "hours": sorted({d.astimezone(BUDA).hour for d in dts})}
@@ -1070,8 +1147,10 @@ def test_2_feed(day, ticks, ticks_path, ticks_scanned, mbo_n, alive, mbo_win=0):
                        f"{n - len(inwin):,} prints the bridge wrote outside that span are "
                        f"counted, not graded")
     why.append(f"{n:,} trade prints, {per_min:.0f}/min average, biggest hole {gap:.0f}s")
+    _win_h = (23 - 8) if (WINDOW_START_H == 0 and WINDOW_END_H >= 24) else (WINDOW_END_H - WINDOW_START_H)
     why.append(f"tape runs {t_first:%H:%M} -> {t_last:%H:%M} local "
-               f"({awake_min / 60.0:.1f} h = {day_cover:.0f}% of the 24h day)")
+               f"({awake_min / 60.0:.1f} h = {day_cover:.0f}% of the 24h day, "
+               f"{pct(min(awake_min, _win_h * 60), _win_h * 60):.0f}% of your {_win_h}h trading window)")
     why.append(f"coverage: price present in {cov_min:,} distinct minutes = {cov:.0f}% of "
                + (f"the {awake_min / 60.0:.1f}h the tape spans (recording continuity)"
                   if whole else f"the {WINDOW_END_H - WINDOW_START_H}h window"))
@@ -1385,7 +1464,12 @@ def test_7_what_if(day, ticks, decisions, log_path):
     lo_conf = [p for d, p in res if d["signal_confidence"] < CONF_MIN]
     if hi_conf and lo_conf:
         why.append(f"gate test: >= {fmt(CONF_MIN,0)}% conf -> {sum(hi_conf):+.1f} pts ({len(hi_conf)} trades); below gate -> {sum(lo_conf):+.1f} pts ({len(lo_conf)})")
-        why.append("if the below-gate pile is bigger, the 50% threshold is throwing away money; if it's negative, the guard earns its keep")
+        if len(hi_conf) < 20 or len(lo_conf) < 20:
+            why.append(f"too few trades to compare gates ({len(hi_conf)} above / {len(lo_conf)} below) - "
+                       f"that is weather, not climate. 20+ a side before this line can advise anything; "
+                       f"the numbers above are shown, the advice is withheld on purpose")
+        else:
+            why.append("if the below-gate pile is bigger, the 50% threshold is throwing away money; if it's negative, the guard earns its keep")
     grade = "PASS" if total > 0 else "WARN"
     r.add(grade, "WHAT-IF CHECK", "if it had taken every signal, would we have made money?", why)
     METRICS["whatif"] = {"n": len(res), "total_pts": round(total, 1),
@@ -1473,7 +1557,9 @@ def test_8_teams(diary):
         why.append("teams (votes that pointed up vs down): " + ", ".join(f"{k} {pct(v['c'], v['c']+v['w']):.0f}% n={v['c']+v['w']}" for k, v in ranked))
     if judge:
         jr = sorted(judge.items(), key=lambda kv: kv[1]["c"] / max(1, kv[1]["c"] + kv[1]["w"]), reverse=True)
-        why.append("judges: " + ", ".join(f"{k} {pct(v['c'], v['c']+v['w']):.0f}%" for k, v in jr[:8]))
+        why.append("quick sign check (raw vote agreement, every clock merged - the per-judge "
+                   "table below is the number to use): "
+                   + ", ".join(f"{k} {pct(v['c'], v['c']+v['w']):.0f}%" for k, v in jr[:8]))
         why.append("judges near the bottom are the weights to cut tomorrow; footprint_delta near the top means the footprint file is doing its job")
     else:
         why.append("no judge breakdown in the diary -> check the diary writer includes per-judge scores")
@@ -1566,9 +1652,13 @@ def test_9_judges(day, diary, ticks, candles):
                "nothing was graded, and grading nothing is not the same as grading 'bad'"])
         return r, None
 
-    rows = []
+    rows, thin = [], []
     for j, st in stats.items():
         if st["q_tot"] < 3:
+            # A judge with 1-2 scored calls cannot be graded, but it must not VANISH either:
+            # the operator asked "where are the rest of my judges?" - the honest answer is a
+            # line that names them and says why they have no row, never silent absence.
+            thin.append((j, st))
             continue
         acc = pct(st["q_hit"], st["q_tot"])
         pts = sum(st["pts"]) if st["pts"] else 0.0
@@ -1593,6 +1683,10 @@ def test_9_judges(day, diary, ticks, candles):
         say(f"        {j:<20}{st['votes']:>6}{part:>6.0f}%{split:>12}"
             f"{acc:>7.1f}%{st['q_tot']:>6}{pts:>+9.1f}{avg:>+7.2f}{agree:>7.0f}%   {cur_w:.1f} -> {sugg:.2f}")
 
+    if thin:
+        say("        too few calls to grade (needs 3 scored calls), listed so nobody goes missing:")
+        say("          " + ", ".join(f"{j} ({st['votes']} vote(s), {st['q_tot']} scored)"
+                                      for j, st in sorted(thin, key=lambda kv: -kv[1]["votes"])))
     quiet = [j for j, st in stats.items() if pct(st["votes"], used) < 5.0]
     if quiet:
         say("        barely spoke (<5% of snapshots): " + ", ".join(quiet[:10]))
@@ -1603,8 +1697,14 @@ def test_9_judges(day, diary, ticks, candles):
             f" over its 3-bar window -> it is still a real judge in the vote, not a decoration")
     top = rows[0][0] if rows else None
     bot = rows[-1][0] if len(rows) > 2 else None
-    if top:
-        say(f"        best judge today: {top}   worst: {bot}  -> cut the worst first, it drags the ensemble")
+    if rows:
+        by_money = sorted(rows, key=lambda x: (x[4], x[2]), reverse=True)
+        say(f"        best by accuracy: {rows[0][0]} {rows[0][2]:.0f}% | "
+            f"best by money per call: {by_money[0][0]} {by_money[0][4]:+.2f} pts/call")
+        if len(rows) > 2:
+            say(f"        worst by money per call: {by_money[-1][0]} {by_money[-1][4]:+.2f} pts/call "
+                f"({by_money[-1][2]:.0f}% right) -> a judge can be right often and still lose money; "
+                f"weight by money, not by pride")
     say("        hourly heat (right% of that judge's calls, top 6 active judges):")
     act = sorted(stats.items(), key=lambda kv: kv[1]["votes"], reverse=True)[:6]
     say("           " + " " * 20 + "".join(f"{h:>5}" for h in (8, 10, 12, 14, 16, 18, 20, 22)))
@@ -1663,7 +1763,9 @@ def test_9_judges(day, diary, ticks, candles):
                                         "pts": round(pt, 1)}
                                        for j, st, a, pt, _av in rows[:12]]}
     grade = "PASS" if best_acc >= 55 else "WARN"
-    why = [f"{len(rows)} judges scored on >=3 calls each"]
+    why = [f"{len(stats)} judge(s) voted on this day | {len(rows)} graded (>=3 scored calls)"
+           + (f" | {len(thin)} too few calls to grade (named below, never silently dropped)"
+              if thin else "")]
     if rows and best_acc < 55:
         why.append("no judge is above 55% on its own clock -> the panel is not adding information today; do not add weight, subtract first")
     else:
@@ -1710,10 +1812,24 @@ def test_10_judge_coverage(day, diary):
 def test_11_version_config(text, day):
     r = Report(11)
     env = dict(ENV)              # last-wins .env, exactly what config.py saw
+    rc = _load_run_config(day)   # what the ROBOT recorded while that day was running
+    ran = ({k: rc.get(k) for k in ("CONFIDENCE_THRESHOLD", "AI_MIN_SIGNAL_STRENGTH",
+                                   "V6_CFD_SPREAD_MAX", "BOOKMAP_WINDOW_SECONDS",
+                                   "BOOKMAP_MAX_DEPTH_LEVELS")} if rc else {})
     want = {"BOOKMAP_WINDOW_SECONDS": "10800", "BOOKMAP_MAX_DEPTH_LEVELS": "20",
             "AI_MIN_SIGNAL_STRENGTH": "6", "CONFIDENCE_THRESHOLD": "50",
             "V6_CFD_SPREAD_MAX": "0.50", "TRADING_ENABLED": "1"}
-    diff = [f"{k}: .env={env.get(k, 'MISSING')} expected={v}" for k, v in want.items() if env.get(k) != v]
+    basis = {k: (ran.get(k) if ran.get(k) not in (None, "") else env.get(k)) for k in want}
+    src_name = "recorded by the robot for that day" if ran else "today's .env (no run_config file)"
+    def _same(a, b):
+        if a is None:
+            return False
+        try:
+            return abs(float(a) - float(b)) < 1e-9     # 0.5 == 0.50 == "0.50"
+        except Exception:
+            return str(a).strip() == str(b).strip()
+    diff = [f"{k}: ran={basis.get(k, 'MISSING')} expected={v}" for k, v in want.items()
+            if not _same(basis.get(k), v)]
     ver = re.findall(r"v\d\.\d[\.\d]*", text)
     feed_age = len(re.findall(r"STALE/EMPTY", text))
     creds = re.findall(r"Credentials: (\{[^}]*\})", text)
@@ -1724,7 +1840,19 @@ def test_11_version_config(text, day):
         if k.startswith("GEMINI_API_KEY") and v in ("", "REPLACE_ME", "your_key_here"):
             why.append(f"{k} is EMPTY -> STEP 3 AI cannot run at all (AI calls = 0)")
             break
-    why.append(f"config file used: {_root() / '.env'} | window {env.get('BOOKMAP_WINDOW_SECONDS')}s depth {env.get('BOOKMAP_MAX_DEPTH_LEVELS')} conf {env.get('CONFIDENCE_THRESHOLD')}% ai_gate {env.get('AI_MIN_SIGNAL_STRENGTH')} spread_cap {env.get('V6_CFD_SPREAD_MAX')}")
+    why.append(f"config basis  : {src_name} | window {basis.get('BOOKMAP_WINDOW_SECONDS')}s "
+               f"depth {basis.get('BOOKMAP_MAX_DEPTH_LEVELS')} conf {basis.get('CONFIDENCE_THRESHOLD')}% "
+               f"ai_gate {basis.get('AI_MIN_SIGNAL_STRENGTH')} spread_cap {basis.get('V6_CFD_SPREAD_MAX')}")
+    if ran:
+        why.append(f"the robot's own record: {Path(rc['_path']).name} (written {rc.get('written_at', '?')}) "
+                   f"-> this report is graded with the day's rule, so editing .env today cannot rewrite history")
+        for k in ("CONFIDENCE_THRESHOLD", "AI_MIN_SIGNAL_STRENGTH", "V6_CFD_SPREAD_MAX"):
+            if str(ran.get(k)) not in ("None", "") and str(ran.get(k)) != str(env.get(k)):
+                why.append(f"   the day ran with {k}={ran.get(k)}; today's .env says {env.get(k)} "
+                           f"(the grade above uses {ran.get(k)})")
+    else:
+        why.append("no run_config_<date>.json for this day -> graded against today's .env (older "
+                   "build, or the file was deleted); the 24f build pins this per day from now on")
     if creds:
         why.append(f"last credentials line seen by the robot: {creds[-1]}")
     if diff:
@@ -1799,6 +1927,7 @@ def _mt5_truth(day):
             pnl = sum(float(getattr(d, "profit", 0.0) or 0.0) for d in closed)
             last = max((getattr(d, "time", 0) for d in deals), default=0)
             return {
+                "closed_ids": [int(getattr(d, "position_id", 0) or 0) for d in closed[:8]],
                 "open_now": len(positions),
                 "open_detail": [f"{getattr(p, 'symbol', '?')} {getattr(p, 'volume', '?')} "
                                 f"@ {getattr(p, 'price_open', '?')}"
@@ -1821,10 +1950,74 @@ def _mt5_truth(day):
         return None, f"query failed ({e.__class__.__name__}: {e})"
 
 
-def test_13_money(day):
+def _outcomes_for_day(day):
+    """Closed deals the robot itself logged for that day (data/trade_outcomes.csv)."""
+    p = DATA_DIR() / "trade_outcomes.csv"
+    rows = []
+    if not p.exists():
+        return rows, p
+    try:
+        with open(p, encoding="utf-8", errors="ignore", newline="") as f:
+            for r in csv.DictReader(f):
+                if on_day(parse_ts(r.get("timestamp", "")), day):
+                    rows.append(r)
+    except Exception:
+        return rows, p
+    return rows, p
+
+
+def _day_money_lines(day, decisions):
+    """What the GRADED DAY did - from its own records, never from today's live files."""
+    out = ["THE GRADED DAY (from that day's own records, not from today's files):"]
+    dec = decisions or []
+    if dec:
+        st = Counter((d.get("exec_status") or "?") for d in dec)
+        out.append(f"decisions logged that day: {len(dec)} | "
+                   + ", ".join(f"{k} {v}" for k, v in st.most_common())
+                   + f" | signals that reached MT5: {st.get('EXECUTED', 0)}")
+    else:
+        out.append("no decisions_log.csv rows for this day -> the robot logged nothing that day")
+    rows, p = _outcomes_for_day(day)
+    if rows:
+        try:
+            net = sum(float(r.get("pnl") or 0) for r in rows)
+        except Exception:
+            net = 0.0
+        out.append(f"closed deals the robot logged that day: {len(rows)} (net {net:+.2f}) "
+                   f"- {p.name}, one row per closed deal")
+    else:
+        out.append(f"no rows in {p.name} for this day -> nothing it sent was closed that day "
+                   f"(or it was graded before the outcome was written)")
+    return out
+
+
+def _day_money_verdict(day, decisions):
+    """The day's own money story. No live file can change it, then or later."""
+    out = []
+    dec = decisions or []
+    sent = sum(1 for d in dec if (d.get("exec_status") or "").upper() == "EXECUTED")
+    rows, _p = _outcomes_for_day(day)
+    if sent and not rows:
+        out.append(f"{sent} signal(s) reached MT5 that day but no closed-deal row was written -> "
+                   f"check the MT5 History tab for that day by hand")
+        return "WARN", out
+    if rows:
+        try:
+            net = sum(float(r.get("pnl") or 0) for r in rows)
+        except Exception:
+            net = 0.0
+        out.append(f"{len(rows)} closed deal(s) logged that day, net {net:+.2f} -> the day's money "
+                   f"story is complete on disk (data/trade_outcomes.csv)")
+        return "PASS", out
+    out.append("the robot sent nothing to MT5 that day (or nothing closed) -> this day's decisions "
+               "put no money at risk")
+    return "PASS", out
+
+
+def test_13_money(day, decisions=None):
     r = Report(13)
-    pos = read_json(DATA_DIR() / "tracked_bot_positions.json") or {}
-    snap = read_json(DATA_DIR() / "market_snapshot.json") or {}
+    pos = _as_dict(read_json(DATA_DIR() / "tracked_bot_positions.json"))
+    snap = _as_dict(read_json(DATA_DIR() / "market_snapshot.json"), key="price")
     sig_p = DATA_DIR() / "mt5_signal.txt"
     sig = {}
     if sig_p.exists():
@@ -1833,11 +2026,13 @@ def test_13_money(day):
                 k, v = line.split("=", 1)
                 sig[k.strip()] = v.strip()
     open_ids = pos.get("position_ids") or []
-    why = [f"the bot's own tracking file lists {len(open_ids)} position id(s) "
+    why = _day_money_lines(day, decisions) + [
+           f"RIGHT NOW (as of {datetime.now(BUDA):%Y-%m-%d %H:%M}, NOT the graded day):",
+           f"the bot's own tracking file lists {len(open_ids)} position id(s) "
            f"({open_ids}) last updated {pos.get('updated_at', 'never')}",
            "   that file is APPEND-ONLY bookkeeping (it is written to look trades up in "
            "history later; nothing ever removes an id), so it is NOT a list of open trades",
-           f"last signal file: direction={sig.get('direction')} conf={sig.get('confidence')} lots={sig.get('lots')} sl={sig.get('sl')} tp={sig.get('tp')} at {sig.get('timestamp')}",
+           f"current mt5_signal.txt (live file, not the day's): direction={sig.get('direction')} conf={sig.get('confidence')} lots={sig.get('lots')} sl={sig.get('sl')} tp={sig.get('tp')} at {sig.get('timestamp')}",
            f"snapshot file price={snap.get('price', snap.get('current_price', 'n/a'))} keys={len(snap)}"]
     orphan = pos.get("updated_at") and str(pos.get("updated_at"))[:10] != f"{day:%Y-%m-%d}"
     truth, why_not = _mt5_truth(day)
@@ -1848,23 +2043,62 @@ def test_13_money(day):
                      f"{truth['closed']} closed, net {truth['pnl']:+.2f})"
                      f" | last deal {truth['last_deal']} broker-server time (UTC)")
     else:
+        if globals().get("SKIP_MT5"):
+            why.append("DEMO/fixture run: MT5 is deliberately NOT consulted, so this report says "
+                       "nothing about your account - a synthetic day cannot include your real "
+                       "positions. To check YOUR positions and deals, run the real day:  "
+                       f"python audit_day.py --date {datetime.now(BUDA).date()}")
         why.append(f"MT5 could not be asked from this shell ({why_not}) -> the file above is "
                    f"bookkeeping only, it cannot tell you what is open. Check MT5 by hand.")
+    # The robot's own records are NOT the truth: MT5 is. When they disagree, the report must
+    # say so out loud, because a trade that closed and was never written down is exactly how
+    # a day quietly loses money in the books. (Operator, 2026-09-24: two positions in the
+    # terminal, one in the report.)
+    _rec_rows, _ = _outcomes_for_day(day)
+    _mismatch = False
+    if truth is not None:
+        if truth["closed"] > len(_rec_rows):
+            _mismatch = True
+            why.append(f"MT5 vs OUR OWN RECORDS: MT5 closed {truth['closed']} position(s) that day"
+                       + (f" (ids {truth['closed_ids']})" if truth.get("closed_ids") else "")
+                       + f", but trade_outcomes.csv only records {len(_rec_rows)}"
+                       + f" -> {truth['closed'] - len(_rec_rows)} closed position(s) are MISSING from "
+                         f"the robot's own records. MT5 is the truth; every money line above this "
+                         f"one is incomplete until the gap is explained.")
+        elif len(_rec_rows) > truth["closed"]:
+            why.append(f"note: our records list more closed deals ({len(_rec_rows)}) than MT5 shows "
+                       f"({truth['closed']}) - check the date filter and the broker's server timezone.")
+    _is_today = (day == datetime.now(BUDA).date())
+    if not _is_today:
+        # The live files describe TODAY, not that day. They are printed above so you can
+        # hand-check, and named as advisory so they can never rewrite that day's grade.
+        why.append("(advisory: the live files above describe RIGHT NOW - they are shown for "
+                   "hand-checking and do NOT change this day's grade)")
+        _g, _l = _day_money_verdict(day, decisions)
+        why += _l
+        if _mismatch:
+            _g = "WARN"
+        r.add(_g, "MONEY CHECK", "did anything get left open, forgotten, or half-written?",
+              why + ["grade basis: the day's own records (decisions + closed deals), not today's files"])
+        return r, None
+    def _mgrade(g):
+        return "WARN" if _mismatch else g
+
     if open_ids and truth is not None and truth["open_now"] == 0:
         why.append("the tracking file lists ids but MT5 has nothing open: those ids belong to "
                    "trades that are closed (or were never sent). Nothing to close - the file "
                    "does not prune itself.")
-        r.add("PASS" if truth["deals_total"] == 0 else "WARN", "MONEY CHECK",
+        r.add(_mgrade("PASS" if truth["deals_total"] == 0 else "WARN"), "MONEY CHECK",
               "did anything get left open, forgotten, or half-written?", why)
     elif open_ids:
         why.append("there are tracked ids -> and MT5 was NOT asked, so go look at them by hand before trusting anything")
-        r.add("WARN", "MONEY CHECK", "did anything get left open, forgotten, or half-written?", why)
+        r.add(_mgrade("WARN"), "MONEY CHECK", "did anything get left open, forgotten, or half-written?", why)
     elif orphan:
         why.append("tracking file is from another day -> the loop ended without clearing it (harmless, but check MT5 manually once)")
-        r.add("WARN", "MONEY CHECK", "did anything get left open, forgotten, or half-written?", why)
+        r.add(_mgrade("WARN"), "MONEY CHECK", "did anything get left open, forgotten, or half-written?", why)
     else:
         why.append("nothing left open, no half-made order -> the robot never put real money at risk that day")
-        r.add("PASS", "MONEY CHECK", "did anything get left open, forgotten, or half-written?", why)
+        r.add(_mgrade("PASS"), "MONEY CHECK", "did anything get left open, forgotten, or half-written?", why)
     return r, None
 
 
@@ -1876,7 +2110,8 @@ def test_14_files(day):
     wanted = [("decisions_log.csv",), ("market_snapshot.json",), ("mt5_signal.txt",),
               ("snapshots_history.jsonl",),
               ("judge_weight_suggestions.json", "weight_suggestions.json"),
-              ("tracked_bot_positions.json",)]
+              ("tracked_bot_positions.json",),
+              (f"diary_{day:%Y%m%d}.jsonl",), (f"run_config_{day:%Y%m%d}.json",)]
     for names in wanted:
         found = None
         for n in names:
@@ -1893,10 +2128,24 @@ def test_14_files(day):
     why = []
     for name, size, mt in items:
         if size is None:
-            why.append(f"{name:<28} MISSING")
+            _tag = ("  (per-day file - written by build 24f onwards)"
+                    if name.startswith(("diary_", "run_config_")) else "")
+            why.append(f"{name:<28} MISSING{_tag}")
         else:
             spread = f"{size:,} B" if size < 1024 else f"{size/1024:.0f} KB"
-            why.append(f"{name:<28} {spread:>10}, last written {mt:%Y-%m-%d %H:%M}")
+            why.append(f"{name:<28} {spread:>10}, last written {mt:%Y-%m-%d %H:%M} "
+                       f"(CURRENT file - the day's own rows are counted below)")
+    dc = dict(DAY_COUNTS or {})
+    if dc:
+        why.append(f"rows for THIS day ({day:%Y-%m-%d}), read back from the files above: "
+                   f"decisions {dc.get('decisions', '?')} | diary {dc.get('diary', '?')} | "
+                   f"trade prints {dc.get('prints', '?')}"
+                   + (f" | duplicate prints dropped across sources: {dc['dups_dropped']}"
+                      if dc.get("dups_dropped") else ""))
+        if not dc.get("diary"):
+            why.append(f"0 diary records for this day -> if the master file has rotated past it "
+                       f"(it keeps the last 20k lines at 50 MB), the per-day mirror "
+                       f"diary_{day:%Y%m%d}.jsonl is the only copy - and the judges need one of them")
     hist = [p for p in items if p[0] == "snapshots_history.jsonl"][0]
     if hist[1] and hist[1] > 50 * 1048576:
         why.append("diary over 50 MB -> rotation should have trimmed it; check it isn't growing forever")
@@ -1928,6 +2177,13 @@ def test_15_hourly(day, ticks, decisions):
             e["buy"] += 1
         elif d.get("signal_direction") == "SELL":
             e["sell"] += 1
+    # ONE source of truth for the session split, and it must be CONTIGUOUS and cover the
+    # whole day. The ranges used to be range(2,8)/range(8,12)/range(13,18)/range(18,23):
+    # hour 12 (a trading hour in the 08:00-23:00 window) belonged to NO session, so the
+    # four lines added up to 185 of 200 decisions and the dashboard block under-counted
+    # noon the same way. Three copies of the old list made that easy to miss - now one.
+    HOUR_BUCKETS = (("Asia", range(0, 8)), ("London AM", range(8, 12)),
+                    ("London PM/NY", range(12, 18)), ("NY PM", range(18, 24)))
     why = [f"{'hour':>5} {'n':>5} {'BUY/SELL':>9} {'maxConf':>8}  bar"]
     for h in range(0, 24):
         e = by_h.get(h)
@@ -1935,14 +2191,18 @@ def test_15_hourly(day, ticks, decisions):
             continue
         bar = "#" * int(min(40, e["n"] / 2))
         why.append(f"{h:>5} {e['n']:>5} {str(e['buy'])+'/'+str(e['sell']):>9} {e['maxc']:>7.1f}  {bar}")
-    for label, hours in (("Asia", range(2, 8)), ("London AM", range(8, 12)),
-                         ("London PM/NY", range(13, 18)), ("NY PM", range(18, 23))):
+    for label, hours in HOUR_BUCKETS:
         n = sum(by_h[h]["n"] for h in hours if h in by_h)
         mx = max([by_h[h]["maxc"] for h in hours if h in by_h] or [0])
-        why.append(f"{label:<14} decisions {n:>4}  best confidence {mx:5.1f}%")
+        span = f"{min(hours):02d}-{max(hours) + 1:02d}"      # half-open, like the buckets
+        why.append(f"{label + ' (' + span + ')':<22} decisions {n:>4}  best confidence {mx:5.1f}%")
+    tot_sess = sum(by_h[h]["n"] for _lab, rng in HOUR_BUCKETS for h in rng if h in by_h)
+    tot_rows = sum(e["n"] for e in by_h.values())
+    why.append(f"the four sessions cover {tot_sess} of the {tot_rows} decision(s) in the hourly table"
+               + ("" if tot_sess == tot_rows else
+                  "  <-- BUG: the session buckets miss an hour - tell the auditor's author"))
     why.append("a session with lots of snapshots but 0% max confidence = the machine saw nothing there, or data was missing then")
-    best_sess = max((("Asia", range(2, 8)), ("London AM", range(8, 12)),
-                     ("London PM/NY", range(13, 18)), ("NY PM", range(18, 23))),
+    best_sess = max(HOUR_BUCKETS,
                     key=lambda t: max([by_h[h]["maxc"] for h in t[1] if h in by_h] or [0]))
     why.append(f"loudest hour belongs to {best_sess[0]} -> keep the robot where the noise is")
     r.add("PASS", "HOUR CHECK", "was it better in London morning or New York afternoon?", why)
@@ -1950,8 +2210,7 @@ def test_15_hourly(day, ticks, decisions):
              for h, e in sorted(by_h.items())}
     sess = [{"label": lab, "n": sum(by_h[h]["n"] for h in rng if h in by_h),
              "max": round(max([by_h[h]["maxc"] for h in rng if h in by_h] or [0.0]), 1)}
-            for lab, rng in (("Asia", range(2, 8)), ("London AM", range(8, 12)),
-                             ("London PM/NY", range(13, 18)), ("NY PM", range(18, 23)))]
+            for lab, rng in HOUR_BUCKETS]
     return r, {"hours": hours, "sessions": sess, "best": best_sess[0]}
 
 
@@ -1990,6 +2249,53 @@ def _rollup_src(day):
     return {"log": log.exists(), "archive": arch, "metrics": mp.exists(), "path": mp}
 
 
+def _parse_saved_report(day):
+    """Fallback source: the saved TEXT report. Used when a day was graded by an older
+    build (no day_metrics json) or when the raw files were moved away. Without this the
+    roll-up showed a perfectly graded day as "-", and claimed the app never ran."""
+    p = DATA_DIR() / f"day_audit_{day:%Y-%m-%d}.txt"
+    if not p.exists():
+        return None
+    try:
+        txt = p.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return None
+    m = re.search(r"VERDICT\s+(\d{4}-\d\d-\d\d):\s+pass\s+(\d+)\s+warn\s+(\d+)\s+fail\s+(\d+)"
+                  r"\s+nodata\s+(\d+)\s+\|\s+feed\s+([\d,]+)\s+prints\s+\|\s+(\d+)\s+decisions"
+                  r"\s+\|\s+(\d+)\s+to MT5", txt)
+    if m:
+        g = ("p%s w%s f%s n%s" % (m.group(2), m.group(3), m.group(4), m.group(5)))
+        prints = m.group(6).replace(",", "")
+        decis, mt5 = m.group(7), m.group(8)
+        wi = re.search(r"whatif\s+(-?[\d.]+|n/a)\s+pts\s+\(WR\s+(-?[\d.]+|n/a)%\)", txt)
+        bj = re.search(r"best judge\s+(.*?)\s+\|\s+worst\s+(.*)", txt)
+        counts = {"PASS": int(m.group(2)), "WARN": int(m.group(3)),
+                  "FAIL": int(m.group(4)), "NA": int(m.group(5))}
+    else:                                   # very old report: count the grade tags
+        counts = {k: len(re.findall(r"\[%s\]" % t, txt)) for k, t in
+                  (("PASS", "PASS"), ("WARN", "WARN"), ("FAIL", "FAIL"), ("NA", " -- "))}
+        g = "p%d w%d f%d n%d" % (counts["PASS"], counts["WARN"], counts["FAIL"], counts["NA"])
+        prints = decis = mt5 = "-"
+        wi = bj = None
+    span = ("whole-day 00:00-24:00" if re.search(r"grading WHOLE DAY", txt)
+            else (re.search(r"TIME FILTER: only (\d\d:\d\d-\d\d:\d\d)", txt).group(1)
+                  if re.search(r"TIME FILTER: only (\d\d:\d\d-\d\d:\d\d)", txt) else "saved report"))
+    try:
+        mt = datetime.fromtimestamp(p.stat().st_mtime, tz=timezone.utc).astimezone(BUDA)
+        prov = f"from text report written {mt:%m-%d %H:%M}"
+    except Exception:
+        prov = "from saved text report"
+    return {"date": f"{day:%Y-%m-%d}", "src": "saved-report", "grades": g,
+            "prints": f"{int(prints):,}" if prints.isdigit() else "-", "mbo": "-",
+            "decis": decis, "mt5": mt5,
+            "whatif": (f"{float(wi.group(1)):+.1f}" if wi and wi.group(1) != "n/a" else "-"),
+            "wr": (f"{float(wi.group(2)):.0f}%" if wi and wi.group(2) != "n/a" else "-"),
+            "best": (bj.group(1) if bj else "-"), "worst": (bj.group(2) if bj else "-"),
+            "cov": "-", "span": span, "note": "raw files are gone for this day - the row was read "
+            "from the saved report so the totals keep it", "prov": prov + " (not re-graded)",
+            "partial": False, "_m": None, "_day": day, "_counts": counts}
+
+
 def _rollup_row(day, today):
     """One row of the roll-up. Never invents numbers: a day without metrics shows "-"."""
     src = _rollup_src(day)
@@ -1998,9 +2304,13 @@ def _rollup_row(day, today):
              "cov": "-", "span": "-", "note": "", "prov": "-", "partial": False,
              "_m": None, "_day": day}
     if not src["metrics"]:
-        blank["note"] = ("no files for this day at all - the app was not running"
+        saved = _parse_saved_report(day)          # a graded day whose raw files moved away
+        if saved:
+            return saved
+        blank["note"] = ("no raw files and no saved report for this day - nothing was recorded"
                          if not (src["log"] or src["archive"])
-                         else "files exist but the day was never graded")
+                         else f"raw files exist but the day was never graded - run: "
+                              f"python audit_day.py --date {day:%Y-%m-%d}")
         return blank
     try:
         m = json.loads(src["path"].read_text(encoding="utf-8"))
@@ -2254,6 +2564,237 @@ def days_report(n_days, end=None, refresh=True, force=False):
     return 0 if graded else 1
 
 
+def _insight():
+    """The learning layer (tools/insight.py). Absent = the day still grades, minus pages.
+
+    Looked for next to THIS file first (the auditor audits other folders: --dir, --demo),
+    then inside the audited project. Same rule the dashboard loader uses, so the two
+    layers can never disagree about whether the install is complete.
+    """
+    import importlib
+    here = Path(__file__).resolve().parent
+    for cand in (here / "tools", here, _root() / "tools", _root()):
+        if not (cand / "insight.py").exists():
+            continue
+        try:
+            if str(cand) not in sys.path:
+                sys.path.insert(0, str(cand))
+            return importlib.import_module("insight")
+        except Exception as e:
+            print(f"[warn] insight layer found at {cand} but will not load ({e}) - "
+                  f"decisions/trades pages skipped")
+            return None
+    print("[warn] insight layer not loaded (tools/insight.py is neither next to "
+          "audit_day.py nor in the audited folder) - decisions/trades pages skipped")
+    return None
+
+
+def _minute_prices(day):
+    """Minute prices for a day, cached in data/prices_<yyyymmdd>.json.
+
+    The tape is ~1 GB a day; the multi-day modes would otherwise re-read all of it on
+    every run. The cache is the price series only (a few hundred KB), so it is cheap to
+    keep and cheap to rebuild when the tape changes.
+
+    A cache that is merely *present* is not a cache you can trust: during a live day the
+    tape keeps growing, and serving the 09:00 snapshot at 15:00 would quietly strip the
+    "what happened next" columns from every later decision. So the cache records the
+    newest tape mtime it was built from, and is only reused when the tape has not been
+    written since. On a live day that means one extra pass over today's tape - the price
+    of never showing a number the tape no longer supports.
+    """
+    cache = DATA_DIR() / f"prices_{day:%Y%m%d}.json"
+    try:
+        newest = max((os.path.getmtime(f) for f in all_ticks_files(day)), default=0.0)
+    except Exception:
+        newest = 0.0
+    if cache.exists():
+        try:
+            raw = json.loads(cache.read_text(encoding="utf-8"))
+            built = float(raw.get("tape_mtime", -1))
+            pts = raw.get("points")
+            if pts and built >= newest:
+                return [(datetime.fromtimestamp(e, tz=timezone.utc), float(p)) for e, p in pts]
+        except Exception:
+            pass
+    ticks, _p, _s = load_ticks(day)
+    if not ticks:
+        return []
+    per = {}
+    for t in ticks:
+        per[t[0].replace(second=0, microsecond=0)] = float(t[1])
+    series = sorted(per.items())
+    try:
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_text(json.dumps({
+            "day": f"{day:%Y-%m-%d}", "built": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "tape_mtime": newest, "points": [[int(dt.timestamp()), p] for dt, p in series]}),
+            encoding="utf-8")
+    except Exception:
+        pass
+    return series
+
+
+def _diary_days(limit=21):
+    """[(day, diary rows)] for the days the master diary (and the per-day mirrors) hold."""
+    today = datetime.now(BUDA).date()
+    grouped = {}
+    p = DATA_DIR() / "snapshots_history.jsonl"
+    if p.exists():
+        try:
+            with open(p, encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        o = json.loads(line)
+                    except Exception:
+                        continue
+                    dt = parse_ts(str(o.get("ts") or o.get("time") or o.get("timestamp") or ""))
+                    if not dt:
+                        continue
+                    o["_dt"] = dt
+                    grouped.setdefault(dt.astimezone(BUDA).date(), []).append(o)
+        except Exception as e:
+            print(f"[warn] diary read failed: {e}")
+    for f in sorted(DATA_DIR().glob("diary_*.jsonl")):
+        m = re.search(r"(\d{8})", f.name)
+        if not m:
+            continue
+        try:
+            d = datetime.strptime(m.group(1), "%Y%m%d").date()
+        except Exception:
+            continue
+        if grouped.get(d):
+            continue                      # the master already carries this day
+        rows = []
+        try:
+            with open(f, encoding="utf-8", errors="ignore") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        o = json.loads(line)
+                    except Exception:
+                        continue
+                    dt = parse_ts(str(o.get("ts") or o.get("time") or o.get("timestamp") or ""))
+                    if dt and dt.astimezone(BUDA).date() == d:
+                        o["_dt"] = dt
+                        rows.append(o)
+        except Exception:
+            continue
+        if rows:
+            grouped[d] = rows
+    days = sorted(grouped)
+    if limit:
+        days = [d for d in days if d >= today - timedelta(days=limit)]
+    return [(d, grouped[d]) for d in days]
+
+
+def _multi_day_data(fold=3):
+    """The rows the A/B and the walk-forward work on, plus a note about missing tape."""
+    ins = _insight()
+    if ins is None:
+        return None, "insight layer not available"
+    out, skipped = [], []
+    for day, rows in _diary_days(max(7, fold + 2)):
+        series = _minute_prices(day)
+        if not series:
+            skipped.append(str(day))
+            continue
+        rr = ins.panel_rows(day, rows, series)
+        if rr:
+            out.append((str(day), rr))
+    return out, skipped
+
+
+def _as_dict(x, key="position_ids"):
+    """Readers meet dict / list / None / garbage. None of them may kill the report."""
+    if isinstance(x, dict):
+        return x
+    if isinstance(x, (list, tuple)):
+        return {key: list(x)}
+    return {}
+
+
+def _safe_test(no, name, fn, *a, **kw):
+    """Run one of the 15 tests; if it explodes, grade it WARN and keep the rest alive.
+
+    An auditor that dies on one odd file prints NOTHING about the other 14 - which is
+    exactly the day you needed the report most.  Nothing is skipped silently: the
+    failed test stays in the scoreboard with the real exception text in it.
+    """
+    try:
+        res = fn(*a, **kw)
+        if isinstance(res, tuple) and len(res) == 2:
+            r, payload = res
+        else:
+            r, payload = res, {}
+        return r, (payload if payload is not None else {})
+    except Exception as e:
+        r = Report(no)
+        r.add("WARN", name, "could not be graded - the auditor survived the error",
+              [f"internal error: {type(e).__name__}: {e}",
+               "the other 14 tests still graded; nothing was skipped silently",
+               "usual cause: a data file in an unexpected shape - check "
+               "data/tracked_bot_positions.json, data/mt5_signal.txt, the tape header",
+               "to chase it: python audit_day.py --date <day> and read the traceback"])
+        return r, {}
+
+
+def _load_run_config(day):
+    """The config the ROBOT recorded for that day (data/run_config_<yyyymmdd>.json).
+
+    This is what makes a grade mean the same thing forever: if you change .env later,
+    the old day is still graded with the rule it really ran under."""
+    for nm in (f"run_config_{day:%Y%m%d}.json", f"run_config_{day:%Y-%m-%d}.json"):
+        p = DATA_DIR() / nm
+        if p.exists():
+            j = read_json(p)
+            if isinstance(j, dict):
+                j["_path"] = str(p)
+                return j
+    return None
+
+
+def _apply_run_config(day, args):
+    """Grade the day with the day's own gate, and say when today's .env differs."""
+    rc = _load_run_config(day)
+    if not rc:
+        return None
+    used, diff = [], []
+    for env_key, gname, label in (("CONFIDENCE_THRESHOLD", "CONF_MIN", "gate"),
+                                  ("AI_MIN_SIGNAL_STRENGTH", "AI_MIN", "AI gate"),
+                                  ("V6_CFD_SPREAD_MAX", "SPREAD", "spread cap")):
+        rec = rc.get(env_key)
+        if rec in (None, ""):
+            continue
+        def _differs(a, b):
+            try:
+                return abs(float(a) - float(b)) > 1e-9      # 0.5 == 0.50: same rule
+            except Exception:
+                return str(a).strip() != str(b).strip()
+        if _differs(rec, ENV.get(env_key)):
+            diff.append(f"{label} {rec} (day) vs {ENV.get(env_key)} (today's .env)")
+        if getattr(args, "gate", None) and env_key == "CONFIDENCE_THRESHOLD":
+            continue                      # an explicit --gate is a deliberate A/B run
+        try:
+            globals()[gname] = float(rec)
+            used.append(f"{label} {rec}")
+        except Exception:
+            pass
+    METRICS["run_config"] = rc
+    METRICS["gate_source"] = f"recorded by the robot for {day:%Y-%m-%d}"
+    METRICS["gate_today_env"] = ENV.get("CONFIDENCE_THRESHOLD")
+    note = (f" config    : graded with the rule the day RAN with ({', '.join(used) or 'nothing recorded'})"
+            f" - from {Path(rc['_path']).name}")
+    if diff:
+        note += " | today's .env differs: " + "; ".join(diff) + " (use --gate / --env to A/B it)"
+    return note
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Grade one day of the Gold-BookMap robot.")
     ap.add_argument("--date", help="YYYY-MM-DD (default: yesterday, Budapest)")
@@ -2278,6 +2819,15 @@ def main(argv=None):
                                    "(e.g. --gate 50 to ask 'what if the gate were lower')")
     ap.add_argument("--keep", action="store_true",
                     help="with --demo: keep the demo folder instead of deleting it")
+    ap.add_argument("--explain", metavar="HH:MM", default=None,
+                        help="one decision in full (nearest HH:MM, Budapest): the panel that "
+                             "stood behind it, and what the tape did next")
+    ap.add_argument("--no-pages", action="store_true",
+                        help="do not write the decisions/trades HTML pages for the day")
+    ap.add_argument("--weight-ab", nargs="?", const=3, type=int, metavar="N", default=None,
+                        help="compare judge-weight sets on the last N days (default 3)")
+    ap.add_argument("--walk-forward", type=int, metavar="N", default=0,
+                        help="learn on N days, test on the next, rolling - no peeking forward")
     ap.add_argument("--open-html", dest="open_html", metavar="PATH",
                     help="open one report file in the browser, run nothing else "
                          "(daily_check.sh uses this so the tab always appears)")
@@ -2389,24 +2939,88 @@ def main(argv=None):
     OUT.clear()                      # one audit = one report, also when called in a loop
     SUMMARY_ONE_LINER = ""           # never let a previous day's verdict survive into this one
     rule()
+    _rc_note = _apply_run_config(day, args)   # BEFORE the header prints the gate
     say(f" GOLD-BOOKMAP DAY AUDIT - {day:%Y-%m-%d} (Budapest) - 15 tests")
-    _span_txt = ("WHOLE DAY, no hour filter (00:00-24:00 local)"
-                 if WINDOW_START_H == 0 and WINDOW_END_H >= 24
-                 else f"hours {WINDOW_START_H:02d}:00-{WINDOW_END_H:02d}:00 local")
+    # the header must state the frame the numbers really use - --from/--to used to
+    # print the old 08:00-23:00 text while grading a different slice of the day
+    if args.t_from or args.t_to:
+        _span_txt = (f"hours {(args.t_from or '00:00')}-{(args.t_to or '24:00')} local"
+                     f" (time filter, not the whole day)")
+    elif WINDOW_START_H == 0 and WINDOW_END_H >= 24:
+        _span_txt = "WHOLE DAY, no hour filter (00:00-24:00 local)"
+    else:
+        _span_txt = f"trading window {WINDOW_START_H:02d}:00-{WINDOW_END_H:02d}:00 local"
     say(f" grading {_span_txt} | conf gate {fmt(CONF_MIN,0)}% | AI gate {fmt(AI_MIN,0)} | spread cap {fmt(SPREAD,2)} pts")
     say(f" project {_root()}")
     say(f" python {sys.version.split()[0]} | {datetime.now(BUDA):%Y-%m-%d %H:%M:%S %Z}")
+    if _rc_note:
+        say(_rc_note)
     rule()
     METRICS["report_header"] = "\n".join(OUT)
 
-    log_path, text = log_text_for(day)
-    decisions, dpath = load_decisions(day)
-    diary, epath = load_diary(day)
-    ticks, ticks_path, scanned = load_ticks(day)
-    tick_files = all_ticks_files(day)
-    _mbo = load_mbo(day)
+    def _load_safe(label, fn, dflt):
+        try:
+            return fn()
+        except Exception as e:
+            print(f"[warn] {label} could not be read: {type(e).__name__}: {e} -> graded as empty")
+            return dflt
+
+    log_path, text = _load_safe("log", lambda: log_text_for(day), (None, ""))
+    decisions, dpath = _load_safe("decisions", lambda: load_decisions(day),
+                                  ([], DATA_DIR() / "decisions_log.csv"))
+    diary, epath = _load_safe("diary", lambda: load_diary(day),
+                              ([], DATA_DIR() / "snapshots_history.jsonl"))
+    ticks, ticks_path, scanned = _load_safe("tape", lambda: load_ticks(day), ([], None, 0))
+    tick_files = _load_safe("tape files", lambda: all_ticks_files(day), [])
+    _mbo = _load_safe("mbo", lambda: load_mbo(day),
+                      {"path": None, "total": 0, "window": 0, "extras": [],
+                       "capped_in": None, "bad": []})
     mbo_path, mbo_n, mbo_extra, mbo_capped = _mbo["path"], _mbo["total"], _mbo["extras"], _mbo["capped_in"]
     mbo_win, mbo_bad = _mbo["window"], _mbo["bad"]
+
+    # ---- the learning modes -------------------------------------------------
+    ins = None if args.no_pages and not (args.explain or args.weight_ab or args.walk_forward) else _insight()
+
+    if args.explain:
+        if ins is None:
+            print("[fail] the insight layer is missing - re-copy tools/insight.py from the kit")
+            return 1
+        series = _minute_prices(day)
+        text = ins.explain(day, args.explain, decisions, diary, series)
+        print(text)
+        out = DATA_DIR() / f"explain_{day:%Y-%m-%d}_{args.explain.replace(':', '')}.txt"
+        try:
+            out.write_text(text, encoding="utf-8")
+            print(f"[saved] {out}")
+        except Exception as e:
+            print(f"[warn] could not save the explain text: {e}")
+        return 0
+
+    if args.weight_ab is not None or args.walk_forward:
+        if ins is None:
+            print("[fail] the insight layer is missing - re-copy tools/insight.py from the kit")
+            return 1
+        n = args.weight_ab if args.weight_ab is not None else args.walk_forward
+        data, skipped = _multi_day_data(fold=n)
+        if data is None:
+            print(f"[fail] {skipped}")
+            return 1
+        stamp = f"{data[0][0]}_to_{data[-1][0]}" if data else "none"
+        if args.weight_ab is not None:
+            text, tbl = ins.weight_ab(data)
+            name = f"weights_ab_{stamp}"
+        else:
+            text, tbl = ins.walk_forward(data, fold=args.walk_forward)
+            name = f"walkforward_{stamp}"
+        print(text)
+        if skipped:
+            print(f" (skipped {len(skipped)} day(s) with no tape left on disk: {', '.join(skipped)})")
+        try:
+            (DATA_DIR() / f"{name}.txt").write_text(text, encoding="utf-8")
+            print(f"[saved] {DATA_DIR() / (name + '.txt')}")
+        except Exception as e:
+            print(f"[warn] could not save: {e}")
+        return 0
 
     # --from/--to: cut every time-based source to one part of the day
     if args.t_from or args.t_to:
@@ -2468,24 +3082,33 @@ def main(argv=None):
     say(f"   decisions  : {dpath}  ({len(decisions)} rows this day)")
     say(f"   diary      : {epath}  ({len(diary)} snapshots this day)")
 
+    DAY_COUNTS.clear()
+    DAY_COUNTS.update({"decisions": len(decisions), "diary": len(diary),
+                       "prints": len(ticks), "dups_dropped": TAPE_DUPLICATES})
     reports = {}
-    reports["alive"], alive = test_1_alive(day, log_path, text, decisions)
+    reports["alive"], alive = _safe_test(1, "ALIVE CHECK", test_1_alive, day, log_path, text, decisions)
     payloads = {}
-    reports["feed"], feed = test_2_feed(day, ticks, ticks_path, scanned, mbo_n, alive, mbo_win)
-    reports["pipe"], _pipe = test_3_pipeline(text, decisions)
-    reports["dq"], _ = test_4_data_quality(day, ticks, text)
-    reports["guards"], guards = test_5_guards(text, decisions, feed)
-    reports["sig"], sig = test_6_signals(decisions, diary)
-    reports["whatif"], _whatif = test_7_what_if(day, ticks, decisions, log_path)
-    reports["teams"], _ = test_8_teams(diary)
-    candles = build_candles(ticks)
-    reports["judges"], _judges = test_9_judges(day, diary, ticks, candles)
-    reports["cov"], _ = test_10_judge_coverage(day, diary)
-    reports["ver"], _ = test_11_version_config(text, day)
-    reports["lat"], _lat = test_12_latency(text)
-    reports["money"], _ = test_13_money(day)
-    reports["files"], _ = test_14_files(day)
-    reports["hour"], _hour = test_15_hourly(day, ticks, decisions)
+    reports["feed"], feed = _safe_test(2, "FEED CHECK", test_2_feed, day, ticks, ticks_path,
+                                       scanned, mbo_n, alive, mbo_win)
+    reports["pipe"], _pipe = _safe_test(3, "PIPELINE CHECK", test_3_pipeline, text, decisions)
+    reports["dq"], _ = _safe_test(4, "DATA QUALITY CHECK", test_4_data_quality, day, ticks, text)
+    reports["guards"], guards = _safe_test(5, "GUARD CHECK", test_5_guards, text, decisions, feed)
+    reports["sig"], sig = _safe_test(6, "SIGNAL CHECK", test_6_signals, decisions, diary)
+    reports["whatif"], _whatif = _safe_test(7, "WHAT-IF CHECK", test_7_what_if, day, ticks,
+                                            decisions, log_path)
+    reports["teams"], _ = _safe_test(8, "TEAM/JUDGE CHECK", test_8_teams, diary)
+    try:
+        candles = build_candles(ticks)
+    except Exception as _ce:
+        print(f"[warn] candle build failed ({type(_ce).__name__}: {_ce}) -> judge clock left empty")
+        candles = []
+    reports["judges"], _judges = _safe_test(9, "JUDGE PANEL", test_9_judges, day, diary, ticks, candles)
+    reports["cov"], _ = _safe_test(10, "DIARY COVERAGE", test_10_judge_coverage, day, diary)
+    reports["ver"], _ = _safe_test(11, "VERSION CHECK", test_11_version_config, text, day)
+    reports["lat"], _lat = _safe_test(12, "SPEED CHECK", test_12_latency, text)
+    reports["money"], _ = _safe_test(13, "MONEY CHECK", test_13_money, day, decisions)
+    reports["files"], _ = _safe_test(14, "EVIDENCE CHECK", test_14_files, day)
+    reports["hour"], _hour = _safe_test(15, "HOUR CHECK", test_15_hourly, day, ticks, decisions)
 
     # ---- machine-readable day record: the trend table reads these, never the text
     METRICS.update({
@@ -2564,6 +3187,22 @@ def main(argv=None):
     else:
         say(f"   A complete day with data, guards and scorecards. Now the strategy")
         say(f"   verdict in test 7 (what-if) and test 8 (teams/judges) is trustworthy.")
+    _w2 = METRICS.get("whatif") or {}
+    say("")
+    say(f"   SYSTEM  : {'healthy' if tot['FAIL'] == 0 else 'NOT healthy'} - "
+        f"{tot['PASS']} PASS / {tot['WARN']} WARN / {tot['FAIL']} FAIL / {tot['NA']} no-data. "
+        f"Did the robot do its own job correctly?")
+    _mt5n = METRICS.get("orders_to_mt5", 0)
+    if _mt5n:
+        _strat = (f"had skin in the game - {_mt5n} signal(s) reached MT5; the result is in "
+                  f"test 13 and the trades page")
+    elif _w2:
+        _strat = (f"unproven - no live trade closed today. The what-if replay over "
+                  f"{_w2.get('n', 0)} signal(s) says {_w2.get('total_pts', 0):+.1f} pts "
+                  f"(WR {_w2.get('win_rate', 0):.0f}%): a simulation, not a result")
+    else:
+        _strat = "unproven - nothing to replay today"
+    say(f"   STRATEGY: {_strat}")
     METRICS["paragraph"] = "\n".join(l.strip() for l in OUT[-8:] if re.match(r"^\s{2,}\S", l))
     say("")
 
@@ -2587,7 +3226,16 @@ def main(argv=None):
     if args.out:
         Path(args.out).write_text("\n".join(OUT) + "\n", encoding="utf-8")
         print(f"\n[saved] {args.out}")
-    default_out = DATA_DIR() / f"day_audit_{day:%Y-%m-%d}.txt"
+    # A filtered grade is an EXPERIMENT, not the day. It gets its own files so it can
+    # never overwrite the whole-day card that the index and the trend table read.
+    _sfx = ""
+    if METRICS.get("time_filter"):
+        _sfx = "_" + re.sub(r"[^0-9]", "", str(METRICS["time_filter"]))
+    elif not (WINDOW_START_H == 0 and WINDOW_END_H >= 24):
+        _sfx = f"_w{WINDOW_START_H:02d}{WINDOW_END_H:02d}"
+    if _sfx:
+        say(f" (filtered grade -> its files carry the suffix {_sfx}; the whole-day card stays as it is)")
+    default_out = DATA_DIR() / f"day_audit_{day:%Y-%m-%d}{_sfx}.txt"
     try:
         default_out.parent.mkdir(parents=True, exist_ok=True)
         default_out.write_text("\n".join(OUT) + "\n", encoding="utf-8")
@@ -2595,7 +3243,7 @@ def main(argv=None):
     except Exception as e:
         print(f"[warn] could not save report: {e}")
     try:                                     # machine-readable twin of the text report
-        mp = DATA_DIR() / f"day_metrics_{day:%Y-%m-%d}.json"
+        mp = DATA_DIR() / f"day_metrics_{day:%Y-%m-%d}{_sfx}.json"
         mp.parent.mkdir(parents=True, exist_ok=True)
         mp.write_text(json.dumps(METRICS, indent=1, default=str), encoding="utf-8")
         print(f"[saved] {mp}")
@@ -2603,7 +3251,7 @@ def main(argv=None):
         print(f"[warn] metrics json: {e}")
     to_open = None
     if not args.no_html:
-        hp = Path(args.html) if args.html else (DATA_DIR() / f"day_report_{day:%Y-%m-%d}.html")
+        hp = Path(args.html) if args.html else (DATA_DIR() / f"day_report_{day:%Y-%m-%d}{_sfx}.html")
         try:
             hp.parent.mkdir(parents=True, exist_ok=True)
             hp.write_text(html_report(day, reports, METRICS), encoding="utf-8")
@@ -2611,7 +3259,33 @@ def main(argv=None):
             to_open = hp
         except Exception as e:
             print(f"[warn] html report: {e}")
-    if not getattr(args, "no_index", False):
+    if not args.no_html and not getattr(args, "no_pages", False) and not _sfx:
+        ins2 = _insight()
+        if ins2 is not None:
+            try:
+                series = _minute_prices(day)
+                if series:
+                    dp = DATA_DIR() / f"decisions_{day:%Y-%m-%d}.html"
+                    dp.write_text(ins2.decisions_page(day, decisions, diary, series), encoding="utf-8")
+                    print(f"[saved] {dp}   <- every decision with the panel behind it and what happened next")
+                    outs, _op = _outcomes_for_day(day)
+                    tracked = _as_dict(read_json(DATA_DIR() / "tracked_bot_positions.json"))
+                    tp = DATA_DIR() / f"trades_{day:%Y-%m-%d}.html"
+                    truth, _why = _mt5_truth(day)
+                    mt5_txt = (f"{truth['open_now']} open position(s) now, {truth['deals_total']} deal(s) "
+                               f"that day, net {truth['pnl']:+.2f}" if truth else None)
+                    tp.write_text(ins2.trades_page(day, decisions, outs, tracked, mt5_txt), encoding="utf-8")
+                    print(f"[saved] {tp}   <- signal -> position -> close, or an honest 'nothing traded'")
+                    if hasattr(ins2, "judges_page"):
+                        gp = DATA_DIR() / f"judges_{day:%Y-%m-%d}.html"
+                        gp.write_text(ins2.judges_page(day, diary, series, decisions), encoding="utf-8")
+                        print(f"[saved] {gp}   <- every judge, every call it made, and what happened next")
+            except Exception as e:
+                print(f"[warn] decisions/trades pages: {type(e).__name__}: {e}")
+
+    if _sfx:
+        print("[index] skipped: this was a filtered grade - the day's whole-day card stays as it is")
+    if not getattr(args, "no_index", False) and not _sfx:
         idx = write_index_page()
         if idx:
             print(f"[saved] {idx}   <- double-click this one any time, it lists every audited day")
@@ -2660,7 +3334,18 @@ def run_demo(keep=False):
     elif ok:
         print("[demo] FAIL: no html report was written at", dash)
         ok = False
-    print("[demo] verdict:", "auditor OK - every test produced a real grade and the dashboard rendered"
+    if ok:
+        pages = [DATA_DIR() / f"decisions_{DEMO_DAY:%Y-%m-%d}.html",
+                 DATA_DIR() / f"trades_{DEMO_DAY:%Y-%m-%d}.html"]
+        gone = [p.name for p in pages if not p.exists()]
+        if gone:
+            print("[demo] FAIL: the learning pages were not written: " + ", ".join(gone))
+            print("[demo] fix: re-copy tools/insight.py from the kit (the day audit still "
+                  "runs without it, but --explain and the two pages go quiet)")
+            ok = False
+        else:
+            print("[demo] learning layer: decisions page + trades page written")
+    print("[demo] verdict:", "auditor OK - every test produced a real grade, the dashboard rendered and the learning pages were written"
           if ok else "auditor ran but the day or the dashboard was not clean - see above")
     if keep:
         print(f"[demo] kept: {demo_dir}")
