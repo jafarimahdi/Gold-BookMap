@@ -21,6 +21,7 @@ import csv
 import json
 import logging
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -479,7 +480,7 @@ def run_step2(data):
             # the panel from the notes). No judge_panel.py -> field becomes [].
             "judge_votes": (list(getattr(snapshot, "judge_votes", []) or [])
                             or _judge_panel_from_notes(getattr(snapshot, "notes", []) or [])),
-            "notes": getattr(snapshot, "notes", [])[:200],
+            "notes": _notes_for_diary(getattr(snapshot, "notes", []) or []),
         }
         _append_diary(record, hist_path)
         # v5.0: rotate snapshots_history if >50MB to prevent big file crash
@@ -1213,6 +1214,26 @@ def _write_run_config() -> None:
                     payload.get("BOOKMAP_MAX_DEPTH_LEVELS"))
     except OSError as exc:
         logger.warning("Could not write run_config: %s", exc)
+
+
+_ERR_NOTE = re.compile(r"\berror\b\s*:", re.I)
+
+
+def _notes_for_diary(notes, cap=200):
+    """24l/C4: the diary keeps at most `cap` notes. A judge that crashed writes
+    'xxx error: ...' into notes, and that is the ONLY record that it crashed - so
+    error notes are never the ones dropped. Errors first (in order), then the rest
+    in order, then the cap."""
+    notes = [str(x) for x in notes]
+    errs = [x for x in notes if _ERR_NOTE.search(x)]
+    if len(notes) <= cap:
+        return notes
+    rest = [x for x in notes if not _ERR_NOTE.search(x)]
+    keep = errs[:cap] + rest[:max(0, cap - len(errs))]
+    # preserve original order for readability
+    order = {id(x): i for i, x in enumerate(notes)}
+    kept = set(map(id, keep))
+    return [x for x in notes if id(x) in kept][:cap]
 
 
 def _same_stamp(a, b) -> bool:

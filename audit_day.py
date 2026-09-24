@@ -59,7 +59,7 @@ def LOGS_DIR():
 # BUILD MARKER - the shell scripts check for THIS string instead of a byte count,
 # so an intentional edit can never make morning_check.sh yell "re-copy it from the
 # kit" at a perfectly good file. Bump the date whenever you ship a new auditor.
-BUILD = "audit-2026-09-24k"
+BUILD = "audit-2026-09-24l"
 BASE_DIR_FOR_ENV = Path(__file__).resolve().parent
 
 
@@ -788,6 +788,58 @@ def simulate(ticks, candles, entry_dt, direction, entry_price,
 
 
 
+JUDGE_ERR_RE = re.compile(r"([A-Za-z0-9_][A-Za-z0-9_. +]{0,40}?)\s*(?:v6(?:\.0)?\s*)?error\s*:\s*(.+)", re.I)
+
+
+def judge_errors(diary):
+    """Every 'xxx error: yyy' note the analyser wrote that day.
+    Returns (Counter by component, {component: first message}, n_records_with_any)."""
+    per = Counter()
+    first = {}
+    hits = 0
+    for rec in diary or []:
+        got = False
+        for note in (rec.get("notes") or []):
+            m = JUDGE_ERR_RE.search(str(note))
+            if not m:
+                continue
+            name = m.group(1).strip().lower().replace(" check", "").replace(" vote", "")
+            per[name] += 1
+            first.setdefault(name, m.group(2).strip()[:160])
+            got = True
+        if got:
+            hits += 1
+    return per, first, hits
+
+
+def _gate_value(d):
+    """The number the EXECUTOR gates on (step4_mt5_execution.py: decision.confidence,
+    logged as ai_confidence). Falls back to the panel's own confidence only when the
+    AI column is absent - older rows - and the caller always says which was used."""
+    try:
+        v = float(d.get("ai_confidence") or 0)
+    except (TypeError, ValueError):
+        v = 0.0
+    if v > 0:
+        return v
+    try:
+        return float(d.get("signal_confidence") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _gate_field(res):
+    """('ai_confidence'|'signal_confidence', n_rows_that_fell_back)"""
+    n = 0
+    for d, _ in res:
+        try:
+            if float(d.get("ai_confidence") or 0) <= 0:
+                n += 1
+        except (TypeError, ValueError):
+            n += 1
+    return ("ai_confidence" if n == 0 else "signal_confidence"), n
+
+
 # ------------------------------------------------------------- judge panel ---
 # Same table step2_market_analysis.parse_judge_panel() uses. Duplicated here on
 # purpose: audit_day.py must run against a diary written by an older build, and
@@ -1388,6 +1440,18 @@ def test_5_guards(text, decisions, feed):
         for _r, _c in _why_dec:
             why.append(f"   refused x{_c}: {_r}")
     if skipped_rows:
+        _perr, _pfirst, _phits = judge_errors(DIARY_FOR_DAY)
+        if _perr:
+            _tot = sum(_perr.values())
+            why.append(f"JUDGES THAT CRASHED: {_tot} error(s) in {_phits} of "
+                       f"{len(DIARY_FOR_DAY)} record(s) - a judge that raises does not vote, "
+                       f"and without this line that looks exactly like a judge that looked at "
+                       f"the market and had no opinion")
+            for _n, _c in _perr.most_common(8):
+                why.append(f"   {_n}: {_c}x - first: {_pfirst.get(_n, '?')}")
+        elif DIARY_FOR_DAY:
+            why.append(f"JUDGES THAT CRASHED: none - no 'error:' note in any of the "
+                       f"{len(DIARY_FOR_DAY)} diary record(s) this day")
         _fb = _fallback_stats(decisions, DIARY_FOR_DAY)
         if _fb["total"]:
             if _fb["fallback"]:
@@ -1507,8 +1571,15 @@ def test_7_what_if(day, ticks, decisions, log_path):
     worst = min(res, key=lambda x: x[1])
     why.append(f"best: {hhmm(best[0]['_dt'])} {best[0]['signal_direction']} {best[1]:+.1f} pts (conf {fmt(best[0]['signal_confidence'])}, {best[0].get('regime')})")
     why.append(f"worst: {hhmm(worst[0]['_dt'])} {worst[0]['signal_direction']} {worst[1]:+.1f} pts (conf {fmt(worst[0]['signal_confidence'])}, {worst[0].get('regime')})")
-    hi_conf = [p for d, p in res if d["signal_confidence"] >= CONF_MIN]
-    lo_conf = [p for d, p in res if d["signal_confidence"] < CONF_MIN]
+    _gk, _gn = _gate_field(res)
+    hi_conf = [p for d, p in res if _gate_value(d) >= CONF_MIN]
+    lo_conf = [p for d, p in res if _gate_value(d) < CONF_MIN]
+    why.append(f"gate study reads '{_gk}' - the same number the executor compares in "
+               f"step4_mt5_execution.py against CONFIDENCE_THRESHOLD={fmt(CONF_MIN,0)}"
+               + ("" if _gk == "ai_confidence" else
+                  f" (ai_confidence was missing or zero on {_gn} row(s), so the team's "
+                  f"signal_confidence was used instead - say so out loud rather than "
+                  f"silently grading a different door)"))
     if hi_conf and lo_conf:
         why.append(f"gate test: >= {fmt(CONF_MIN,0)}% conf -> {sum(hi_conf):+.1f} pts ({len(hi_conf)} trades); below gate -> {sum(lo_conf):+.1f} pts ({len(lo_conf)})")
         if len(hi_conf) < 20 or len(lo_conf) < 20:
@@ -1973,7 +2044,24 @@ def _mt5_truth(day):
             opened = [d for d in deals if getattr(d, "entry", None) == 0]
             pnl = sum(float(getattr(d, "profit", 0.0) or 0.0) for d in closed)
             last = max((getattr(d, "time", 0) for d in deals), default=0)
+            def _deal_row(d):
+                return {
+                    "position_id": int(getattr(d, "position_id", 0) or 0),
+                    "ticket": int(getattr(d, "ticket", 0) or 0),
+                    "time_utc": (datetime.fromtimestamp(int(getattr(d, "time", 0) or 0),
+                                                        tz=timezone.utc).isoformat()
+                                 if getattr(d, "time", 0) else ""),
+                    "symbol": str(getattr(d, "symbol", "") or ""),
+                    "side": ("SELL" if getattr(d, "type", 0) == 1 else "BUY"),
+                    "volume": float(getattr(d, "volume", 0.0) or 0.0),
+                    "price": float(getattr(d, "price", 0.0) or 0.0),
+                    "profit": float(getattr(d, "profit", 0.0) or 0.0),
+                    "commission": float(getattr(d, "commission", 0.0) or 0.0),
+                    "swap": float(getattr(d, "swap", 0.0) or 0.0),
+                    "comment": str(getattr(d, "comment", "") or ""),
+                }
             return {
+                "closed_deals": [_deal_row(d) for d in closed],
                 "closed_ids": [int(getattr(d, "position_id", 0) or 0) for d in closed[:8]],
                 "open_now": len(positions),
                 "open_detail": [f"{getattr(p, 'symbol', '?')} {getattr(p, 'volume', '?')} "
@@ -2031,6 +2119,45 @@ def _fallback_stats(decisions, diary):
     total = sum(models.values())
     return {"ai": models.get("ai", 0), "fallback": models.get("fallback", 0),
             "total": total, "source": src}
+
+
+def write_mt5_reconciliation(day, truth, recorded_rows):
+    """Write MT5's own closed deals for the day next to the robot's record.
+
+    Never edits trade_outcomes.csv: the robot's own record must stay exactly as the
+    robot wrote it, or tomorrow nobody can tell what the robot knew. This file is the
+    complete truth, each row marked whether the loop had it.
+    Returns (path, n_written, n_missing) or (None, 0, 0).
+    """
+    deals = (truth or {}).get("closed_deals") or []
+    if not deals:
+        return None, 0, 0
+    known = set()
+    for row in recorded_rows or []:
+        for k in ("position_id", "order_id", "ticket", "id"):
+            v = str(row.get(k) or "").strip()
+            if v and v not in ("0", "None"):
+                known.add(v)
+    path = DATA_DIR() / f"mt5_deals_{day:%Y%m%d}.csv"
+    cols = ["position_id", "ticket", "time_utc", "symbol", "side", "volume", "price",
+            "profit", "commission", "swap", "comment", "in_robot_records", "source"]
+    n_missing = 0
+    try:
+        with open(path, "w", newline="", encoding="utf-8") as fh:
+            w = csv.DictWriter(fh, fieldnames=cols)
+            w.writeheader()
+            for d in deals:
+                seen = str(d.get("position_id")) in known
+                if not seen:
+                    n_missing += 1
+                row = dict(d)
+                row["in_robot_records"] = "yes" if seen else "no"
+                row["source"] = "mt5-history"
+                w.writerow({k: row.get(k, "") for k in cols})
+    except OSError as e:
+        say(f"[warn] could not write the MT5 reconciliation file: {e}")
+        return None, 0, 0
+    return path, len(deals), n_missing
 
 
 def _outcomes_for_day(day):
@@ -2138,6 +2265,26 @@ def test_13_money(day, decisions=None):
     # a day quietly loses money in the books. (Operator, 2026-09-24: two positions in the
     # terminal, one in the report.)
     _rec_rows, _ = _outcomes_for_day(day)
+    if truth is not None and truth.get("closed_deals"):
+        _rp, _rn, _rmiss = write_mt5_reconciliation(day, truth, _rec_rows)
+        if _rp:
+            why.append(f"MT5 RECONCILIATION written: {_rp.name} - all {_rn} closed deal(s) "
+                       f"MT5 reports for this day, {_rmiss} of them absent from the robot's "
+                       f"own trade_outcomes.csv. trade_outcomes.csv is deliberately NOT "
+                       f"edited: the robot's record stays as the robot wrote it, and this "
+                       f"file stands beside it as the complete one")
+            _net = sum(float(d.get("profit", 0) or 0) + float(d.get("commission", 0) or 0)
+                       + float(d.get("swap", 0) or 0) for d in truth["closed_deals"])
+            why.append(f"THE DAY'S REAL MONEY (MT5, profit+commission+swap): {_net:+.2f} "
+                       f"across {_rn} closed deal(s) - this is the number to trust, the "
+                       f"points figures above are the strategy's own scoreboard")
+            for _d in truth["closed_deals"][:10]:
+                _mark = "" if str(_d.get("position_id")) in {
+                    str(rr.get(k) or "") for rr in (_rec_rows or [])
+                    for k in ("position_id", "order_id", "ticket", "id")} else "  <- MISSING from our records"
+                why.append(f"   {_d.get('time_utc', '')[11:16]}Z {_d.get('symbol')} "
+                           f"{_d.get('side')} {_d.get('volume')} @ {_d.get('price')} "
+                           f"= {float(_d.get('profit', 0) or 0):+.2f}{_mark}")
     _mismatch = False
     if truth is not None:
         if truth["closed"] > len(_rec_rows):

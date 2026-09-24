@@ -252,15 +252,51 @@ def trades_page(day, decisions, outcomes, tracked, mt5=None):
 # --------------------------------------------------------------------------- #
 # 2b) every judge, every call, and the reason it gave
 # --------------------------------------------------------------------------- #
-JUDGE_CLOCK = {          # minutes ahead each judge is graded on (its own horizon)
-    "footprint_delta": 15, "footprint_imbalance": 15, "cvd_slope": 15,
-    "l3_net_flow": 15, "l3_ofi_streak": 15, "l3_imbalance": 15,
-    "iceberg": 30, "whale": 30, "absorption": 30,
-    "vwap_trend": 60, "vwap_bands": 60, "vwap_zscore": 60,
-    "value_area": 60, "poc_day": 60, "structure": 60,
-    "macro_dxy": 120, "macro_yield": 120,
-}
+# 24l/B2 FIX. This table used to be hand-written here and was WRONG: it held four
+# names that are not judges at all (cvd_slope, footprint_imbalance, structure, whale),
+# it was missing 16 real judges, and it gave every unrecognised judge 15 minutes -
+# htf_poc and the macro judges are graded on 120. The console (audit_day.JUDGE_HORIZON)
+# was always right, so there is now exactly ONE table and this page reads it: horizon
+# = quick_candles x 5, because the judges are scored on M5 bars.
+def _load_judge_clock():
+    try:
+        import audit_day as _A                      # same folder, read-only import
+        h = getattr(_A, "JUDGE_HORIZON", None)
+        if isinstance(h, dict) and h:
+            return {k: int(v[0]) * 5 for k, v in h.items()}, "audit_day.JUDGE_HORIZON"
+    except Exception:
+        pass
+    # audit_day not importable (page rendered standalone): mirror of the same table,
+    # kept in candles so the two can be diffed by eye.
+    _mirror = {
+        "footprint_delta": 3, "footprint_levels": 3, "l3_imbalance": 3,
+        "l3_ofi_streak": 3, "l3_net_flow": 3, "l3_large_ofi": 3,
+        "l3_aggr_limit": 3, "microprice": 2, "absorption": 3, "iceberg": 6,
+        "iceberg_legacy": 6, "spoof_invert": 6, "spoof_invert_loose": 6,
+        "queue_pos": 3, "whale_walls": 6, "sweep": 6, "vwap_trend": 12,
+        "vwap_bands": 12, "vwap_zscore": 12, "poc_day": 12, "supply_demand": 12,
+        "value_area": 12, "htf_poc": 24, "cvd_divergence": 12, "cvd_momentum": 6,
+        "delta_pressure": 6, "volume_roc": 6, "macro_yield": 24, "macro_dxy": 24,
+        "macro_vix": 24, "macro_risk": 24, "news_sentiment": 24, "mtf": 12,
+    }
+    return {k: v * 5 for k, v in _mirror.items()}, "built-in mirror (audit_day not importable)"
+
+
+JUDGE_CLOCK, JUDGE_CLOCK_SOURCE = _load_judge_clock()
 JUDGE_CLOCK_DEFAULT = 15
+
+
+def judge_clock(name):
+    """Minutes this judge is graded over. An unknown name is a bug, not a 15-minute
+    judge, so it is reported as such instead of being silently graded."""
+    return JUDGE_CLOCK.get(name, JUDGE_CLOCK_DEFAULT)
+
+
+def judge_clock_note(name):
+    return ("" if name in JUDGE_CLOCK else
+            f" <b>[unknown judge '{html.escape(str(name))}' - graded on the "
+            f"{JUDGE_CLOCK_DEFAULT}-minute default; this name is not in "
+            f"{html.escape(JUDGE_CLOCK_SOURCE)}]</b>")
 
 
 def judges_page(day, diary, series, decisions=None):
@@ -287,7 +323,7 @@ def judges_page(day, diary, series, decisions=None):
                 d = float(v.get("dir", 0) or 0)
             except Exception:
                 d = 0.0
-            mins = JUDGE_CLOCK.get(name, JUDGE_CLOCK_DEFAULT)
+            mins = judge_clock(name)
             fut = price_at(series, when, mins, idx)   # when is UTC - correct by construction
             move = (fut - price) if (fut is not None) else None
             right = None
@@ -347,8 +383,9 @@ def judges_page(day, diary, series, decisions=None):
     <span class="num">{_fmt(ppc, 3, True)} pts/call</span>
   </div>
   <div class="body">
-    <p class="why">Graded on its own clock: <b>{JUDGE_CLOCK.get(name, JUDGE_CLOCK_DEFAULT)} minutes</b>
-       ahead of each vote. "right" means price moved the way this judge pointed.
+    <p class="why">Graded on its own clock: <b>{judge_clock(name)} minutes</b>{judge_clock_note(name)}
+       ahead of each vote (clock source: {html.escape(JUDGE_CLOCK_SOURCE)} - the same
+       table the console grades with, so a judge has one score, not two). "right" means price moved the way this judge pointed.
        {"<b>Fewer than 3 scored calls - the percentages here are noise, shown for completeness only.</b>" if thin else ""}</p>
     <table><tr><th>time</th><th>vote</th><th>w</th><th>price</th><th>clock</th>
       <th>move</th><th>verdict</th><th>the reason it wrote</th></tr>{rows}</table>
