@@ -77,7 +77,7 @@ GIT BASH RULES
   * in .env the LAST line of a duplicated key wins - that is how config.py reads it
 
 EXPECTED FILE SIZES (so you can see nothing is half-copied)
-  audit_day.py    91999 bytes   <- this kit
+  audit_day.py    92995 bytes   <- this kit
   dashboard.py     1226 bytes   <- this kit (root loader; real code is tools/dashboard.py 31843)
   preflight.sh     8266 bytes   <- this kit (checks AI quota + v7.1 state)
   daily_check.sh   5927 | daily_check.bat 720 | dashboard.bat 837
@@ -107,3 +107,8 @@ WHAT THE 15 TESTS MEASURE
  15 HOUR         which Budapest hour / session produced the loudest signals
 
 [ -- ] means NO DATA. It never means "the strategy lost".
+
+
+MORNING SANITY (added): bash morning_check.sh
+  One command, 26 checks, writes nothing. Run before the open, and again with --live
+  15 minutes after main.py starts. Anything it cannot verify says FAIL, not "looks fine".

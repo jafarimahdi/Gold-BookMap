@@ -2722,6 +2722,10 @@
             [],
             [],
             [],
+            [],
+            [],
+            [],
+            [],
             []
           ]
         },
@@ -2801,12 +2805,12 @@
             "minPixelVolume": 1,
             "showCircleSizeOnToolbar": true,
             "renderingDependentSettings-v2": {
-              "TWO_COLOR": {
+              "SECTORS": {
                 "circleSize": 40,
                 "circleAlpha": 41,
                 "clusteringSmartParamSliderValue": 52
               },
-              "GRADIENT": {
+              "TWO_COLOR": {
                 "circleSize": 40,
                 "circleAlpha": 41,
                 "clusteringSmartParamSliderValue": 52
@@ -2816,7 +2820,7 @@
                 "circleAlpha": 41,
                 "clusteringSmartParamSliderValue": 52
               },
-              "SECTORS": {
+              "GRADIENT": {
                 "circleSize": 40,
                 "circleAlpha": 41,
                 "clusteringSmartParamSliderValue": 52
@@ -3392,11 +3396,11 @@
             "toleranceMode": "ABSOLUTE",
             "currentAbsoluteToleranceValue": 7,
             "currentPercentageToleranceValue": 10,
-            "timeWidth": 5140979999985,
-            "autoBoundDisatanceBase": 89,
+            "timeWidth": 1800000000000,
+            "autoBoundDisatanceBase": 25,
             "autoPercentageToleranceValue": 20,
-            "noneRefPrice": 43364,
-            "noneHeight": 251
+            "noneRefPrice": 43226,
+            "noneHeight": 83
           }
         },
         "depthSettings": {

@@ -1,0 +1,217 @@
+============================================================================================================
+ GOLD-BOOKMAP DAY AUDIT - 2026-09-23 (Budapest) - 15 tests
+ window 08:00-23:00 local | conf gate 50% | AI gate 6 | spread cap 0.50 pts
+ project A:\gitHub\Gold-BookMap
+ python 3.12.4 | 2026-09-24 05:24:43 CEST
+============================================================================================================
+
+ FILES IT IS READING
+   log        : A:\gitHub\Gold-BookMap\logs\trading_20260923.log
+   ticks      : A:\gitHub\Gold-BookMap\ticks.csv  (88,391 trade prints for this day, 88,391 rows scanned)
+                + 3 rotated chunk(s) also read: ticks_20260923_180721.csv.gz, ticks_20260923_160024.csv.gz, ticks_20260923_132550.csv.gz
+   mbo        : A:\gitHub\Gold-BookMap\mbo.csv  (3,826,005 order lines this day)
+                + 4 rotated chunk(s) also read (or looked for): mbo_20260923_211101.csv.gz, mbo_20260923_170223.csv.gz, mbo_20260923_151729.csv.gz, mbo_20260923_092149.csv.gz
+                of which 3,825,137 inside your 08:00-23:00 local window - the rest is the night session, same calendar day, not the hours you trade
+   decisions  : A:\gitHub\Gold-BookMap\data\decisions_log.csv  (772 rows this day)
+   diary      : A:\gitHub\Gold-BookMap\data\snapshots_history.jsonl  (772 snapshots this day)
+------------------------------------------------------------------------------------------------------------
+[PASS]  TEST  1  ALIVE CHECK
+        measures : was it awake, without long silences, 08:00-23:00 Budapest?
+        -> log file trading_20260923.log, 18476 lines
+            first 09:21:09  last 23:15:59  = 13.9 h awake  (log start only - if BookMap was already writing before this, the gap is the robot, not you)
+            longest silence between two log lines: 1.0 min, gaps >15 min: 0
+            ran the whole day with no long sleep -> good
+------------------------------------------------------------------------------------------------------------
+[PASS]  TEST  2  FEED CHECK
+        measures : did BookMap actually hand the robot any price?
+        -> 88,391 trade prints, 108/min average, biggest hole 43s
+            coverage: price present in 819 distinct minutes = 91% of the 15h window
+            MBO (order by order): 3,825,137 lines inside your window, 868 more outside it (night session, same date) - judges only ever see the in-window rows
+            print hours present: 14 of 15 (missing: 08) -> tape covers almost the whole window
+            thin but wide: only 88,391 prints yet 91% of minutes carry price -> enough to grade the day, keep in mind print-counting judges (footprint/CVD) work with fewer samples than on a liquid day
+------------------------------------------------------------------------------------------------------------
+[FAIL]  TEST  3  PIPELINE CHECK
+        measures : did all 5 steps run, or did it die halfway?
+        -> pipeline cycles started: 772 | '-> OK' markers: 3088 | decisions logged: 772
+            end-marker per step: STEP 1=772, STEP 2=1544, STEP 3=810, STEP 4=772, STEP 5=772, MT5 SIGNAL BRIDGE=772
+            1 error/critical lines, e.g.: ERROR
+            1502 warnings, most common: [('[step3_ai_decision] STEP 3: call failed (key #6, gem', 70)]
+------------------------------------------------------------------------------------------------------------
+[WARN]  TEST  4  DATA QUALITY CHECK
+        measures : is the data it ate clean and fresh?
+        -> price<=0 prints: 0 (0.0% of 88,391) | exact duplicate prints: 27.8% | busiest single minute: 1,661 prints
+            'feed age' reported by STEP 1: median 0.5s, max 38997.6s
+            something above is off -> counts like 'big buyer vs big seller' can be inflated
+------------------------------------------------------------------------------------------------------------
+[PASS]  TEST  5  GUARD CHECK
+        measures : why did it refuse to trade?
+        -> exec_status: [('SKIPPED', 764), ('DEFERRED', 8)]
+            its own written reasons: confidence 0.0% below threshold 50% x734, confidence 35.0% below threshold 50% x13, confidence 42.0% below threshold 50% x6, confidence 45.0% below threshold 50% x6, CFD spread wide 38.00 > max 0.5 — DEFERRED x1, confidence 15.0% below threshold 50% x1
+            in-log guard firings: confidence too low x1528, news blackout x64, stale/empty feed x1
+            8 decision(s) were actually passed to MT5 -> these are the trades to check one by one
+            mix of guard and trade outcomes -> normal for one day
+------------------------------------------------------------------------------------------------------------
+[WARN]  TEST  6  SIGNAL CHECK
+        measures : how loud did the brain shout, really?
+        -> directions: {'NEUTRAL': 732, 'SELL': 25, 'BUY': 15} | ai_action: {'HOLD': 759, 'SELL': 13}
+            confidence: min 0.0 / avg 14.1 / max 45.2 -> cleared 50.0%: 0 of 772
+            strength:  min 0.0 / avg 3.7 / max 28.4 -> cleared AI gate 6.0: 120 of 772
+            diary (772 snapshots) strength: max 28.4, avg 4.1 -> realistic ceiling on M5 is ~50, so the gate at 6 is reasonable
+            nothing ever cleared the 50% gate on this day -> either a quiet market, or the guard is too high, or data was thin
+------------------------------------------------------------------------------------------------------------
+[PASS]  TEST  7  WHAT-IF CHECK
+        measures : if it had taken every signal, would we have made money?
+        -> 164 M5 candles built, 40 real BUY/SELL decisions with a price to replay
+            SL=2.0xATR TP=3.5xATR max 180min, cost 0.5 pts per round trip
+            if ALL 40 had been taken: total +162.9 pts | win rate 62% | profit factor 2.58 | worst drawdown 0.0 pts
+            best: 10:01 SELL +10.6 pts (conf 20.1, TREND)
+            worst: 13:48 BUY -6.9 pts (conf 36.6, TREND)
+------------------------------------------------------------------------------------------------------------
+[WARN]  TEST  8  TEAM/JUDGE CHECK
+        measures : which team and which judge were right more often?
+        -> 772 diary snapshots used
+            no judge breakdown in the diary -> check the diary writer includes per-judge scores
+        708/772 diary records had a judge panel (none:64, notes:708) | scoring: each judge gets its own clock (footprint 3 M5 bars, L3 3-6, iceberg/whale 6, VWAP/structure 12, macro 24)
+        JUDGE                VOTES  PART%  BUY/SELL/Q  RIGHT%     n      PTS    AVG AGR_ENS  SUGG_WEIGHT
+        value_area             708   100%     0/708/0  100.0%   683  +6174.3  +9.04     62%   0.5 -> 0.75
+        vwap_bands             708   100%     0/708/0  100.0%   683  +6174.3  +9.04     62%   0.8 -> 1.20
+        footprint_delta        708   100%   141/567/0   82.7%   683  +1978.3  +2.90     75%   1.0 -> 1.33
+        l3_net_flow            494    70%   102/392/0   79.3%   492  +1747.9  +3.55     97%   1.0 -> 1.29
+        footprint_levels       109    15%     42/67/0   72.8%    92   +194.1  +2.11    100%   0.4 -> 0.49
+        macro_dxy              708   100%   226/482/0   66.9%   683  +3307.6  +4.84     55%   1.0 -> 1.17
+        cvd_momentum           708   100%   273/435/0   60.0%   683  +1615.8  +2.37    100%   0.5 -> 0.55
+        microprice             464    66%   184/280/0   59.0%   441    +30.7  +0.07     86%   0.6 -> 0.65
+        l3_ofi_streak          280    40%   134/146/0   52.0%   277   +125.4  +0.45     59%   2.0 -> 2.04
+        cvd_divergence          91    13%     43/48/0   51.7%    89   +120.9  +1.36    100%   0.6 -> 0.61
+        macro_yield            693    98%   358/335/0   50.1%   668  +1276.7  +1.91     69%   1.0 -> 1.00
+        l3_imbalance           708   100%    683/25/0    1.0%   683  -2457.8  -3.60     38%   0.8 -> 0.41
+        vwap_trend             335    47%     335/0/0    0.0%   329  -2256.9  -6.86     62%   0.6 -> 0.30
+        poc_day                708   100%     708/0/0    0.0%   683  -4685.4  -6.86     38%   0.5 -> 0.25
+        barely spoke (<5% of snapshots): whale_walls, macro_vix
+        footprint (your BookMap aggressive buyer vs seller) spoke in 100% of snapshots, right 83% of the time over its 3-bar window -> it is still a real judge in the vote, not a decoration
+        best judge today: value_area   worst: poc_day  -> cut the worst first, it drags the ensemble
+        hourly heat (right% of that judge's calls, top 6 active judges):
+                                   8   10   12   14   16   18   20   22
+           footprint_delta         -  100  100   80  100  100  100   43
+           l3_imbalance            -    0    0    0    0    0    0    6
+           poc_day                 -    0    0    0    0    0    0    0
+           value_area              -  100  100  100  100  100  100  100
+           vwap_bands              -  100  100  100  100  100  100  100
+           cvd_momentum            -  100  100   52  100   66    0   43
+           footprint_delta      regime: RANGE 83%(n=378), TREND 85%(n=172), NEUTRAL 79%(n=133)
+        saved: A:\gitHub\Gold-BookMap\data\judge_panel_2026-09-23.csv
+        saved: A:\gitHub\Gold-BookMap\data\judge_weight_suggestions.json
+------------------------------------------------------------------------------------------------------------
+[PASS]  TEST  9  JUDGE PANEL
+        measures : how did each judge behave: footprint, L3, iceberg, whale, VWAP...
+        -> 14 judges scored on >=3 calls each
+            at least one judge is above 55% on its own clock -> it deserves its weight; check the SUGG_WEIGHT column
+            AGR_ENS = how often the judge agreed with the final 4-team verdict. 100% agree + low accuracy = the judge only repeats what everyone already said.
+------------------------------------------------------------------------------------------------------------
+[WARN]  TEST 10  DIARY COVERAGE
+        measures : is the diary good enough to grade the panel tomorrow?
+        -> 772 records | structured judge_votes: 0 | notes parsed ok: 772
+            longest notes list in a record: 29 lines (old builds cut at 50 -> judges after the cut were invisible)
+            records with an empty notes list: 0
+            notes exist but no structured panel -> retro-parsing works, weights are estimates
+------------------------------------------------------------------------------------------------------------
+[PASS]  TEST 11  VERSION CHECK
+        measures : did it run the version you think it ran?
+        -> config file used: A:\gitHub\Gold-BookMap\.env | window 10800s depth 20 conf 50% ai_gate 6 spread_cap 0.50
+            last credentials line seen by the robot: {'databento': False, 'rithmic': False, 'gemini': True, 'mt5': True, 'bookmap': True}
+            matches v7.0-P3 (3h window, 20 levels, 50% gate, 0.50 spread cap) -> the numbers below describe the build you intended
+------------------------------------------------------------------------------------------------------------
+[WARN]  TEST 12  SPEED CHECK
+        measures : was it fast enough to still be on time?
+        -> total pipeline (warm-up excluded): median 603ms, p95 13552ms, max 206493ms
+            STEP1 191ms  STEP2 244ms  STEP3 median 16ms
+            under 500ms target: 247/771 cycles (32%) | AI calls needing network: 135 (quota 2000)
+            a second-scale loop still sees the move, but you are reacting, not anticipating
+------------------------------------------------------------------------------------------------------------
+[WARN]  TEST 13  MONEY CHECK
+        measures : did anything get left open, forgotten, or half-written?
+        -> open positions still tracked: 13 ([90001722, 90006443, 90011568, 90021066, 90198812, 90309639, 90350446, 90353433, 90488618, 90781388, 90788454, 90792218, 90945168])  last updated 2026-09-24T04:15:47
+            last signal file: direction=NEUTRAL conf=0.0 lots=0.0 sl=0.0 tp=0.0 at 2026-09-24T02:15:02.194588+00:00
+            snapshot file price=4319.200000000001 keys=32
+            there are still OPEN positions tracked -> go look at them in MT5 before trusting anything
+------------------------------------------------------------------------------------------------------------
+[PASS]  TEST 14  EVIDENCE CHECK
+        measures : did it keep the notebooks we need to grade it?
+        -> decisions_log.csv            727 KB, last written 2026-09-24 04:15
+            market_snapshot.json         449 KB, last written 2026-09-24 04:15
+            mt5_signal.txt               0 KB, last written 2026-09-24 04:15
+            snapshots_history.jsonl      1251 KB, last written 2026-09-24 04:15
+            weight_suggestions.json      MISSING
+            tracked_bot_positions.json   0 KB, last written 2026-09-24 04:15
+            diary present
+------------------------------------------------------------------------------------------------------------
+[PASS]  TEST 15  HOUR CHECK
+        measures : was it better in London morning or New York afternoon?
+        ->  hour     n  BUY/SELL  maxConf  bar
+                9    37       0/0    23.4  ##################
+               10    56       0/4    24.3  ############################
+               11    60       0/0    20.5  ##############################
+               12    59       0/0    19.9  #############################
+               13    51       2/1    40.9  #########################
+               14    55      0/10    36.6  ###########################
+               15    48       0/6    34.8  ########################
+               16    52       0/3    34.8  ##########################
+               17    56       0/0    19.0  ############################
+               18    56       0/1    35.4  ############################
+               19    53       5/0    42.8  ##########################
+               20    57       3/0    39.7  ############################
+               21    58       5/0    45.2  #############################
+               22    58       0/0    25.5  #############################
+               23    16       0/0    21.9  ########
+            Asia           decisions    0  best confidence   0.0%
+            London AM      decisions  153  best confidence  24.3%
+            London PM/NY   decisions  262  best confidence  40.9%
+            NY PM          decisions  282  best confidence  45.2%
+            a session with lots of snapshots but 0% max confidence = the machine saw nothing there, or data was missing then
+            loudest hour belongs to NY PM -> keep the robot where the noise is
+
+============================================================================================================
+ SCOREBOARD
+============================================================================================================
+ TEST GRADE  WHAT IT ANSWERS
+ 1    PASS   ALIVE CHECK          was it awake, without long silences, 08:00-23:00 Budapest?
+ 2    PASS   FEED CHECK           did BookMap actually hand the robot any price?
+ 3    FAIL   PIPELINE CHECK       did all 5 steps run, or did it die halfway?
+ 4    WARN   DATA QUALITY CHECK   is the data it ate clean and fresh?
+ 5    PASS   GUARD CHECK          why did it refuse to trade?
+ 6    WARN   SIGNAL CHECK         how loud did the brain shout, really?
+ 7    PASS   WHAT-IF CHECK        if it had taken every signal, would we have made money?
+ 8    WARN   TEAM/JUDGE CHECK     which team and which judge were right more often?
+ 9    PASS   JUDGE PANEL          how did each judge behave: footprint, L3, iceberg, whale, VWAP...
+ 10   WARN   DIARY COVERAGE       is the diary good enough to grade the panel tomorrow?
+ 11   PASS   VERSION CHECK        did it run the version you think it ran?
+ 12   WARN   SPEED CHECK          was it fast enough to still be on time?
+ 13   WARN   MONEY CHECK          did anything get left open, forgotten, or half-written?
+ 14   PASS   EVIDENCE CHECK       did it keep the notebooks we need to grade it?
+ 15   PASS   HOUR CHECK           was it better in London morning or New York afternoon?
+
+ PASS 8  |  WARN 6  |  FAIL 1  |  NO-DATA 0
+
+VERDICT 2026-09-23: pass 8 warn 6 fail 1 nodata 0 | feed 88,391 prints | 772 decisions | 8 to MT5 | whatif 162.9 pts (WR 62.5%) | best judge value_area 100% | worst poc_day 0%
+
+ THE ANSWER IN ONE PARAGRAPH
+   The robot was switched on, but the day cannot be called a test of the
+   strategy: 1 core check(s) failed. Fix the feed/evidence first,
+   then re-run one full day and re-audit. Judging signals now would be
+   grading a blindfolded player.
+
+
+============================================================================================================
+ BY HAND, IN THIS ORDER (2 minutes each, the machine cannot see these)
+============================================================================================================
+   1. BookMap still logged in? chart open on GC 12-26 with a moving footprint?
+      If the addon window was closed, nothing below matters.
+   2. Is ticks.csv growing RIGHT NOW?  (dir ticks.csv twice, size must change)
+      Addon writes it; the robot only reads it. Frozen file = dead bridge.
+   3. Open the MT5 terminal: Tools -> Options -> Expert Advisors:
+      'Allow algo trading' ON, and did the EA read the last signal file?
+   4. MT5 -> History tab: any deal yesterday at all? (0 deals + 0 orders = never acted)
+   5. Antivirus / OneDrive / compressed 'A:' drive - did they touch A:\gitHub\Gold-BookMap?
+   6. Laptop sleep, screensaver, RDP disconnect during the day? (a gap in test 1 = yes)
+   7. Gemini quota used today (AI Studio page) vs AI_MAX_CALLS_PER_DAY.
+

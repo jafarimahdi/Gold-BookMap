@@ -3,7 +3,10 @@
 #  daily_check.sh - the ONE daily command.
 #    bash daily_check.sh                # audit the newest log day + open the dashboard
 #    bash daily_check.sh --latest         # same thing, said explicitly
-#    bash daily_check.sh 2026-09-23    # audit a specific day
+#    bash daily_check.sh 2026-09-23    # audit a specific day (whole day, no hour filter)
+#    bash daily_check.sh --days 3      # roll-up: last 3 calendar days, day by day + totals
+#    bash daily_check.sh --days 8      # roll-up: last 8 calendar days (the week view)
+#    bash daily_check.sh --window      # grade ONLY the trading hours (old behaviour)
 #    bash daily_check.sh --check        # prove the tester itself is honest (fake day)
 #    bash daily_check.sh --quiet        # verdict + history rows only (no browser popup)
 #    bash daily_check.sh --open         # re-open the dashboard, run nothing
@@ -13,17 +16,37 @@
 cd "$(dirname "$0")" || { echo "put this file in the project folder"; exit 1; }
 
 PY=$(command -v python || command -v python3)
-MODE=""; DAY=""; QUIET=""; NOB=""
+MODE=""; DAY=""; QUIET=""; NOB=""; WINDOW=""
 for a in "$@"; do
   case "$a" in
     --check) MODE=check ;;
     --open) MODE=open ;;
+    --days) MODE=days ;;
+    --window) WINDOW=--window ;;
     --quiet|--no-browser) NOB=--no-browser; [ "$a" = "--quiet" ] && QUIET=1 ;;
     *) DAY="$a" ;;
   esac
 done
 
 hr(){ [ -n "$QUIET" ] || printf '%s\n' "------------------------------------------------------------------------------"; }
+
+# ---------- roll-up: "how did the last N days go" (whole days, no hour filter) -----
+if [ "$MODE" = "days" ]; then
+  N="${DAY:-3}"
+  case "$N" in *[!0-9]*) echo "[FAIL] --days needs a number:  bash daily_check.sh --days 3   (or 8)"; exit 2 ;; esac
+  [ -n "$QUIET" ] || echo "== roll-up: last $N calendar days - whole days, nothing cut by hour =="
+  GBM_NO_BROWSER=1 "$PY" audit_day.py --days "$N" --no-browser
+  rc=$?
+  hr
+  echo "   report: data\\last${N}days_report.html   (day by day + judge leaderboard)"
+  echo "   text  : data\\last${N}days_report.txt"
+  echo "   one day in full detail:  bash daily_check.sh 2026-09-23"
+  [ -z "$NOB" ] && [ -f "data/last${N}days_report.html" ] && {
+    "$PY" audit_day.py --open-html "data/last${N}days_report.html" >/dev/null 2>&1 || true
+    echo "   (a browser tab should have opened)"
+  }
+  exit $rc
+fi
 
 # ---------- just reopen the last dashboard (nothing is computed) ----------
 if [ "$MODE" = "open" ]; then
@@ -38,6 +61,7 @@ if [ "$MODE" = "check" ]; then
   echo "== verifier: does the testing system itself work? =="
   [ -f audit_day.py ] || { echo "[FAIL] audit_day.py missing"; exit 1; }
   "$PY" -W error::SyntaxWarning -m py_compile audit_day.py && echo "[OK] audit_day.py compiles"
+  grep -q 'BUILD = "audit-2026-09-24d"' audit_day.py && echo "[OK] audit_day.py carries build marker audit-2026-09-24d (sizes no longer matter)" || echo "[warn] no kit build marker in audit_day.py - you are on a file from an older kit, day numbers may be off"
   for f in tools/dashboard.py dashboard.py; do
     [ -f "$f" ] || { echo "[FAIL] $f missing - re-copy it from the kit"; exit 1; }
   done
@@ -56,8 +80,8 @@ print('[OK] dashboard API complete (day report + index + trend table)')" || { ec
     echo "[FAIL] the tester itself is not clean - do NOT trust day numbers yet."
     echo "       Most likely the auditor or tools/dashboard.py was half-copied:"
     echo "       ls -la audit_day.py dashboard.py tools/dashboard.py"
-    echo "       want 91999 / 1226 / 31843 bytes - then re-copy step 3 of NEXT_STEPS.md
-       echo "       and clear stale bytecode:  find . -name __pycache__ -type d -exec rm -rf {} +""
+    echo "       want audit_day.py to contain BUILD = \"audit-2026-09-24d\" any size is fine if the marker matches — do NOT chase byte counts"
+    echo "       and clear stale bytecode:  find . -name __pycache__ -type d -exec rm -rf {} +"
     exit 1
   fi
   echo "[OK] auditor and selftest both clean - every number it prints is trustworthy"
@@ -96,7 +120,8 @@ fi
 
 hr
 [ -n "$QUIET" ] || echo "== 2/4 day audit (15 tests) =="
-GBM_NO_BROWSER=1 "$PY" audit_day.py --date "$DAY" --out "day_report_$DAY.txt" ${NOB:-}
+GBM_NO_BROWSER=1 "$PY" audit_day.py --date "$DAY" --out "day_report_$DAY.txt" ${WINDOW:-} ${NOB:-}
+[ "$WINDOW" = "--window" ] && echo "[info] --window: this run grades only the trading hours; the default grades the whole day"
 
 hr
 [ -n "$QUIET" ] || echo "== 3/4 history across days =="

@@ -11,7 +11,9 @@ All three are fixed in the zip you are about to re-download.
 
 STEP 1 - download and unpack the new kit
 -----------------------------------------
-Download  Gold-BookMap-AUDIT-KIT.zip   (72048 bytes, 15 real files + 1 folder, no .env inside)
+Download  Gold-BookMap-AUDIT-KIT.zip   (15 real files + 1 folder, no .env inside.
+              Do not trust the .zip byte size - zip size varies with the filesystem.
+              Trust the sizes of the FILES inside it, checked in STEP 2.)
 
   cd ~/Downloads
   rm -rf Gold-BookMap-AUDIT-KIT
@@ -28,9 +30,11 @@ STEP 2 - copy only 2 files into your project
   ls -la audit_day.py daily_check.sh
 
 EXPECT:
-  audit_day.py    91999
+  audit_day.py    92995
   daily_check.sh   5927
 (If the numbers are different, you copied the wrong folder - repeat step 2.)
+If your files say 91999 / 5927 you are one tiny update behind: only audit_day.py changed
+(it now prints 'print hours present: N of 15' instead of calling a 10-hour print gap 'thin').
 
 
 STEP 3 - open the report that is ALREADY written for 2026-09-23
@@ -110,7 +114,18 @@ If main.py 48991 does not appear, STOP and tell me - do not start the robot.
 Undo, always:  cp main.py.bak main.py
 
 
-STEP 7 - start today, and grade it tomorrow morning
+STEP 7 - one command that proves everything above, any morning
+----------------------------------------------------------------
+  bash morning_check.sh            # before you start the robot
+  bash morning_check.sh --live     # 15 min AFTER main.py is running
+
+EXPECT: "RESULT: N PASS, 0 FAIL" (WAIT lines are time-of-day effects, they are fine).
+The FAIL lines worth fearing are these two - both describe yesterday:
+  [FAIL] file FROZEN while main.py runs      = BookMap stopped writing the tape
+  [FAIL] NO LOG LINE for 40 min              = the robot stopped thinking
+  [FAIL] ZERO trade prints today             = depth flowing, prints not: add-on setting
+
+STEP 8 - start today, and grade it tomorrow morning
 --------------------------------------------------
   Start the robot the way you always do.
   Tomorrow:  bash daily_check.sh 2026-09-24

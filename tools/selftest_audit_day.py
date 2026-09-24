@@ -118,6 +118,17 @@ def build_fake_day(dst: Path, n_prints=54000, n_decisions=200, n_diary=120, n_cy
                                 "struct": rnd.choice([-0.6, 1.0, 0.2, -1.3]),
                                 "trend": rnd.choice([0.5, -0.5, 0.8, -0.2])},
                 "notes": notes,
+                # v7.1 real shape: judge_votes is a LIST of dicts, not a dict. Without
+                # this the selftest could not see the 'list has no .items()' crash that
+                # killed a live report on 2026-09-24.
+                "judge_votes": [
+                    {"judge": "footprint_delta", "dir": rnd.choice([1.0, -1.0]),
+                     "weight": 1.5, "raw": "footprint delta"},
+                    {"judge": "l3_net_flow", "dir": rnd.choice([1.0, -1.0, 0.0]),
+                     "weight": 1.5, "raw": "L3 NET FLOW"},
+                    {"judge": "vwap_trend", "dir": 1.0, "weight": 1.0, "raw": "VWAP trend UP"},
+                    {"judge": "poc_day", "dir": 0.0, "weight": 1.0, "raw": "POC day"},
+                ],
             }) + "\n")
     (dst / "data" / "tracked_bot_positions.json").write_text(
         json.dumps({"position_ids": [], "updated_at": f"{DAY}T21:00:00"}), encoding="utf-8")

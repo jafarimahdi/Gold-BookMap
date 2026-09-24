@@ -12,29 +12,26 @@ data/*
 logs/*
 !logs/.gitkeep
 bot.lock
-
 # ===== Python =====
 __pycache__/
 *.py[cod]
 *.egg-info/
 .venv/
 venv/
-
 # ===== OS / editor noise =====
 Thumbs.db
 .DS_Store
 ticks*.csv
-
 # ===== packages =====
 *.zip
 Gold-BookMap-*.zip
-
-
 # backups + generated day reports
 .env.bak*
 *.bak
 day_report_*.txt
-
 # any env copy, any name, forever (only the empty template is shareable)
 .env*
 !.env.example
+# ===== any env dump that is not the real .env and not the example =====
+# ===== the audit kit FOLDER is a build copy; the sources are committed at the root =====
+Gold-BookMap-AUDIT-KIT/

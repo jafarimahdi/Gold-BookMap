@@ -8,6 +8,12 @@ duplicated key wins (exactly what `config.py` does).
 
 ---
 
+**One command to prove the whole setup is alive on any morning: `bash morning_check.sh`**
+(before starting) and `bash morning_check.sh --live` (15 min after starting `main.py`).
+It checks installed file sizes, `.env`, compile, the Budapest session guard, whether
+`ticks.csv` is growing, trade prints per hour, MT5 artefacts, and whether the robot's
+own log went silent. It never writes anything.
+
 **If you are lost: `START_HERE_NOW.txt` (inside the kit) is the same route, compressed to 7 steps,
 with the exact line you should see after each one.**
 
@@ -23,7 +29,7 @@ cp tools/check_history.py tools/dashboard.py tools/selftest_audit_day.py /a/gitH
 cd /a/gitHub/Gold-BookMap
 ls -la audit_day.py dashboard.py daily_check.sh
 ```
-Sizes must be `audit_day.py    91999`, `dashboard.py 1226` (loader), `daily_check.sh   5927`;
+Sizes must be `audit_day.py    92995`, `dashboard.py 1226` (loader), `daily_check.sh   5927`;
 `tools/dashboard.py` must be 31843 - that is the file that draws the dashboard.
 If a size differs the copy failed — stop and send me that `ls` line.
 

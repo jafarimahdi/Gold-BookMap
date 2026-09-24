@@ -24,7 +24,6 @@ Functions:
 
 from __future__ import annotations
 
-import calendar
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Optional, Set, Tuple
@@ -108,39 +107,11 @@ def time_of_day(now: Optional[datetime] = None) -> str:
         return "NEW_YORK"
     return "OFF_HOURS"
 
-def _last_sunday(year: int, month: int):
-    """Naive datetime of the last Sunday of that month (EU DST switches)."""
-    last = datetime(year, month, calendar.monthrange(year, month)[1])
-    return last - timedelta(days=(last.weekday() + 1) % 7)
-
-
-def _eu_offset_hours(utc_naive: datetime) -> int:
-    """2 while EU summer time is on, 1 in winter. Rule: last Sunday of March 01:00 UTC
-    until last Sunday of October 01:00 UTC (what Budapest has done since 1996)."""
-    start = _last_sunday(utc_naive.year, 3).replace(hour=1)
-    end = _last_sunday(utc_naive.year, 10).replace(hour=1)
-    return 2 if start <= utc_naive < end else 1
-
-
 def budapest_hour(now: Optional[datetime] = None) -> int:
-    """Hour in Budapest, correct all year - including the day the clock changes.
-
-    This used to be a hardcoded "+2 (Sep)", which is right for summer and silently an
-    hour wrong from the last Sunday of October on: the 08:00-23:00 trading gate would
-    have slid to 07:00-22:00 on its own. Tries the system tz database first and falls
-    back to the EU rule above, so a Windows box without tzdata still gets the true hour
-    instead of a wrong one.
-    """
-    n = now or datetime.now(timezone.utc)
-    if n.tzinfo is None:
-        n = n.replace(tzinfo=timezone.utc)
-    try:
-        from zoneinfo import ZoneInfo
-        return n.astimezone(ZoneInfo("Europe/Budapest")).hour
-    except Exception:
-        pass
-    u = n.astimezone(timezone.utc).replace(tzinfo=None)
-    return (u.hour + _eu_offset_hours(u)) % 24
+    """Budapest is UTC+2 (CEST). Convert UTC hour to Budapest hour."""
+    utc_h = hour_of_day(now)
+    # Budapest CEST = UTC+2 (summer), CET = UTC+1 (winter) — use +2 for now (Sep)
+    return (utc_h + 2) % 24
 
 def is_budapest_trading_hours(now: Optional[datetime] = None) -> bool:
     """User requested: trade 08:00-23:00 Budapest = 06:00-21:00 UTC."""
@@ -149,7 +120,8 @@ def is_budapest_trading_hours(now: Optional[datetime] = None) -> bool:
         start_str = str(getattr(config, "BUDAPEST_START", "08:00") or "08:00")
         end_str = str(getattr(config, "BUDAPEST_END", "23:00") or "23:00")
         # Parse Budapest local times, convert to UTC
-        # real Budapest local time (DST-correct), not a fixed offset constant
+        # Budapest is UTC+2 in Sep (CEST)
+        offset = int(getattr(config, "BUDAPEST_UTC_OFFSET", 2))
         b_h = budapest_hour(now)
         # Parse start/end hour
         s_h = int(start_str.split(":")[0])
