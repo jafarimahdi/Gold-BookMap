@@ -59,7 +59,7 @@ def LOGS_DIR():
 # BUILD MARKER - the shell scripts check for THIS string instead of a byte count,
 # so an intentional edit can never make morning_check.sh yell "re-copy it from the
 # kit" at a perfectly good file. Bump the date whenever you ship a new auditor.
-BUILD = "audit-2026-09-24l"
+BUILD = "audit-2026-09-24l2"
 BASE_DIR_FOR_ENV = Path(__file__).resolve().parent
 
 
@@ -1464,6 +1464,16 @@ def test_5_guards(text, decisions, feed):
             else:
                 why.append(f"WHO ANSWERED: all {_fb['total']} answer(s) came from the AI, "
                            f"none from the backup rule ({_fb['source']})")
+            if _fb.get("none"):
+                why.append(f"   of those, {_fb['none']} cycle(s) got NO answer at all "
+                           f"(no API key / SDK missing / every key rate-limited / every call "
+                           f"failed). Those rows carry ai_confidence 0.0 and are HOLDs by "
+                           f"default - they are not the AI declining to trade, they are the "
+                           f"AI never being reached")
+            if _fb.get("cached"):
+                why.append(f"   {_fb['cached']} answer(s) were re-used from the cache rather "
+                           f"than freshly asked - real AI output, but the model was not "
+                           f"consulted again that cycle")
         why.append(f"{len(skipped_rows)} decision(s) SKIPPED before the executor (confidence/AI gate)")
     if feed is not None and feed.get("n", 0) < 1000:
         why.append(f"feed delivered only {feed.get('n', 0):,} prints -> the guards had nothing to judge; this is a plumbing failure, not a strategy decision")
@@ -2105,8 +2115,16 @@ def _fallback_stats(decisions, diary):
     models = Counter()
     for d in decisions or []:
         m = str(d.get("ai_model") or "").strip().lower()
-        if m:
-            models["fallback" if m.startswith("fallback") else "ai"] += 1
+        if not m:
+            continue
+        if m.startswith("fallback"):
+            models["fallback"] += 1
+        elif m.startswith("none"):
+            models["none"] += 1          # 24m/A1b: nobody answered - not the AI, not a rule
+        else:
+            models["ai"] += 1
+            if m.endswith("-cached"):
+                models["cached"] += 1
     if not models:
         for rec in diary or []:
             raw = str(rec.get("ai_rationale") or "")
@@ -2116,8 +2134,9 @@ def _fallback_stats(decisions, diary):
         src = "diary ai_rationale (pre-24k rows have no ai_model column)"
     else:
         src = "ai_model column"
-    total = sum(models.values())
+    total = models.get("ai", 0) + models.get("fallback", 0) + models.get("none", 0)
     return {"ai": models.get("ai", 0), "fallback": models.get("fallback", 0),
+            "none": models.get("none", 0), "cached": models.get("cached", 0),
             "total": total, "source": src}
 
 

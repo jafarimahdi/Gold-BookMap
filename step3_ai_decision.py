@@ -158,7 +158,10 @@ class Decision:
     confidence: float      # 0-100
     rationale: str
     raw_response: str = ""
-    model: str = config.GEMINI_MODEL
+    # 24m/A1b: this used to default to config.GEMINI_MODEL, which stamped the real
+    # model's name onto answers Gemini never produced (the no-call HOLD paths below).
+    # An unlabelled decision must LOOK unlabelled; every real path sets this explicitly.
+    model: str = ""
     timestamp: Optional[datetime] = None
 
     def to_dict(self) -> Dict[str, Any]:
@@ -531,6 +534,15 @@ class AIDecisionEngine:
         # v5.2: Check cache first
         cached = self._check_cache(snapshot)
         if cached:
+            # 24m/A1b: a cache hit is a real AI answer being RE-USED, not a new call.
+            # Labelling it separately keeps the report honest about how many times the
+            # model was actually asked, without pretending the answer came from a rule.
+            m = str(getattr(cached, "model", "") or "unknown")
+            if not m.endswith("-cached"):
+                try:
+                    cached.model = f"{m}-cached"
+                except Exception:
+                    pass
             return cached
 
         prompt = self.build_prompt(snapshot)
@@ -543,6 +555,7 @@ class AIDecisionEngine:
                 return fb
             return Decision(action="HOLD", confidence=0.0,
                             rationale="Gemini API key not configured.",
+                            model="none-no-api-key",
                             timestamp=datetime.now(timezone.utc))
         if genai is None:
             logger.warning("STEP 3: Gemini SDK not installed "
@@ -552,6 +565,7 @@ class AIDecisionEngine:
                 return fb
             return Decision(action="HOLD", confidence=0.0,
                             rationale="google-genai SDK not installed.",
+                            model="none-no-sdk",
                             timestamp=datetime.now(timezone.utc))
 
         models = getattr(config, "GEMINI_MODELS", None) or [self.model]
@@ -649,11 +663,13 @@ class AIDecisionEngine:
                            "after a short cooldown.")
             return Decision(action="HOLD", confidence=0.0,
                             rationale="Gemini rate-limited (all keys paused)",
+                            model="none-rate-limited",
                             timestamp=datetime.now(timezone.utc))
         logger.warning("STEP 3: Gemini call failed on all keys/models "
                        "(last model %s).", tried_model or "?")
         return Decision(action="HOLD", confidence=0.0,
                         rationale=f"Gemini call failed: {last_error}",
+                        model="none-call-failed",
                         timestamp=datetime.now(timezone.utc))
 
     # ------------------------------------------------------------------ #
