@@ -234,6 +234,15 @@ def _check_flash_crash(snapshot) -> str:
         logger.debug(f"Flash crash check error: {e}")
     return ""
 
+def _judge_panel_from_notes(notes):
+    """v7.1 add-on hook: per-judge panel for the diary; safe if judge_panel.py absent."""
+    try:
+        from judge_panel import parse_judge_panel
+        return parse_judge_panel(list(notes or []))
+    except Exception:
+        return []
+
+
 def _record(step: str, status: str) -> None:
     STATUS.append((step, status))
     logger.info("%s -> %s", step, status)
@@ -437,10 +446,26 @@ def run_step2(data):
             "regime": getattr(snapshot, "regime", "UNKNOWN"),
             "team_scores": team_scores,
             "killzone": killzone,
-            "notes": getattr(snapshot, "notes", [])[:50],  # first 50 notes
+            # v7.1: the whole judge panel, so every "who voted what" question can
+            # be answered after the day. 200 notes (not 50) so no judge is cut off.
+            # v7.1: per-judge panel. Works with EITHER a patched step2 (the snapshot
+            # already carries judge_votes) OR the plain P3 step2 (this module derives
+            # the panel from the notes). No judge_panel.py -> field becomes [].
+            "judge_votes": (list(getattr(snapshot, "judge_votes", []) or [])
+                            or _judge_panel_from_notes(getattr(snapshot, "notes", []) or [])),
+            "notes": getattr(snapshot, "notes", [])[:200],
         }
         with open(hist_path, "a", encoding="utf-8") as hf:
             hf.write(_json.dumps(record) + "\n")
+        # v5.0: rotate snapshots_history if >50MB to prevent big file crash
+        try:
+            if hist_path.stat().st_size > 50*1024*1024:
+                # Keep last 20k lines (~20MB)
+                lines = hist_path.read_text(encoding="utf-8").splitlines()[-20000:]
+                hist_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+                logger.info(f"Rotated snapshots_history.jsonl >50MB -> kept last 20k")
+        except:
+            pass
     except Exception as he:
         try:
             logger.debug(f"snapshot history save failed: {he}")
