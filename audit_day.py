@@ -59,7 +59,7 @@ def LOGS_DIR():
 # BUILD MARKER - the shell scripts check for THIS string instead of a byte count,
 # so an intentional edit can never make morning_check.sh yell "re-copy it from the
 # kit" at a perfectly good file. Bump the date whenever you ship a new auditor.
-BUILD = "audit-2026-09-24j"
+BUILD = "audit-2026-09-24k"
 BASE_DIR_FOR_ENV = Path(__file__).resolve().parent
 
 
@@ -632,25 +632,60 @@ def load_mbo(day, max_lines=0, lo_min=None, hi_min=None):
 
 
 def load_decisions(day):
-    """decisions_log.csv rows for that day."""
-    rows = []
-    p = DATA_DIR() / "decisions_log.csv"
-    if not p.exists():
-        return rows, p
-    with open(p, encoding="utf-8", errors="ignore", newline="") as f:
-        for r in csv.DictReader(f):
-            dt = parse_ts(r.get("timestamp", ""))
-            if on_day(dt, day):
-                r["_dt"] = dt
-                for k in ("price", "signal_strength", "signal_confidence",
-                          "divergence", "ai_confidence"):
-                    try:
-                        r[k] = float(r.get(k) or 0)
-                    except Exception:
-                        r[k] = 0.0
-                rows.append(r)
+    """Every decision row for that day, from the day's own mirror AND the rolling log.
+
+    decisions_log.csv is capped at DECISIONS_LOG_MAX_ROWS (5000) and maintenance deletes
+    the OLDEST rows first. At ~850 decisions a day that erases the start of the history
+    roughly every six days, and a past-day audit would then report "the robot logged
+    nothing that day" - which would be false, and exactly the kind of invented silence
+    this auditor exists to prevent.
+
+    Build 24k writes data/decisions_<yyyymmdd>.csv as the day happens and never trims it.
+    Both files are read and merged on (timestamp, direction, exec_status, order_id), so a
+    row counted twice is impossible and a row present in only one source is never lost.
+    DECISION_SOURCE records what was actually used, and the report prints it.
+    """
+    rows, seen = [], set()
+    day_p = DATA_DIR() / f"decisions_{day:%Y%m%d}.csv"
+    roll_p = DATA_DIR() / "decisions_log.csv"
+    used = []
+    for p in (day_p, roll_p):
+        if not p.exists():
+            continue
+        found = 0
+        try:
+            with open(p, encoding="utf-8", errors="ignore", newline="") as f:
+                for r in csv.DictReader(f):
+                    dt = parse_ts(r.get("timestamp", ""))
+                    if not on_day(dt, day):
+                        continue
+                    key = (dt.isoformat() if dt else "", r.get("signal_direction", ""),
+                           r.get("exec_status", ""), str(r.get("order_id", "")),
+                           str(r.get("signal_confidence", "")))
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    r["_dt"] = dt
+                    for k in ("price", "signal_strength", "signal_confidence",
+                              "divergence", "ai_confidence"):
+                        try:
+                            r[k] = float(r.get(k) or 0)
+                        except Exception:
+                            r[k] = 0.0
+                    rows.append(r)
+                    found += 1
+        except OSError:
+            continue
+        if found:
+            used.append(f"{p.name} ({found})")
     rows.sort(key=lambda r: r["_dt"])
-    return rows, p
+    global DECISION_SOURCE
+    DECISION_SOURCE = " + ".join(used) if used else "no decision file held this day"
+    return rows, (day_p if day_p.exists() else roll_p)
+
+
+DECISION_SOURCE = "not read yet"
+DIARY_FOR_DAY = []          # set once per graded day, so test 5 can name the answer source
 
 
 def load_diary(day):
@@ -1353,6 +1388,18 @@ def test_5_guards(text, decisions, feed):
         for _r, _c in _why_dec:
             why.append(f"   refused x{_c}: {_r}")
     if skipped_rows:
+        _fb = _fallback_stats(decisions, DIARY_FOR_DAY)
+        if _fb["total"]:
+            if _fb["fallback"]:
+                why.append(f"WHO ANSWERED: {_fb['ai']} answer(s) from the AI, "
+                           f"{_fb['fallback']} from the robot's own backup rule "
+                           f"({pct(_fb['fallback'], _fb['total']):.0f}% of {_fb['total']}, read from "
+                           f"{_fb['source']}). The backup is stamped at AI_FALLBACK_CONFIDENCE "
+                           f"(70 by default) - ABOVE the {fmt(CONF_MIN,0)}% gate - so those rows "
+                           f"are not evidence that the AI agreed with anything")
+            else:
+                why.append(f"WHO ANSWERED: all {_fb['total']} answer(s) came from the AI, "
+                           f"none from the backup rule ({_fb['source']})")
         why.append(f"{len(skipped_rows)} decision(s) SKIPPED before the executor (confidence/AI gate)")
     if feed is not None and feed.get("n", 0) < 1000:
         why.append(f"feed delivered only {feed.get('n', 0):,} prints -> the guards had nothing to judge; this is a plumbing failure, not a strategy decision")
@@ -1948,6 +1995,42 @@ def _mt5_truth(day):
                 pass
     except Exception as e:
         return None, f"query failed ({e.__class__.__name__}: {e})"
+
+
+def _decision_source_line():
+    """One line naming where the day's decisions actually came from."""
+    return DECISION_SOURCE
+
+
+def _fallback_stats(decisions, diary):
+    """How many of the day's answers came from the AI, and how many from the backup rule.
+
+    Two sources, because the truth must also be available for days recorded before the
+    ai_model column existed (build 24k):
+      - decisions rows: the ai_model column ("gemini-..." vs "fallback-...")
+      - diary records : ai_rationale, whose fallback text has always contained "FALLBACK"
+
+    This matters because AI_FALLBACK_CONFIDENCE defaults to 70, which is ABOVE the 50%
+    gate: a rule-made answer can pass a gate the real AI never cleared, and every earlier
+    report presented it as "the AI was confident".
+    """
+    models = Counter()
+    for d in decisions or []:
+        m = str(d.get("ai_model") or "").strip().lower()
+        if m:
+            models["fallback" if m.startswith("fallback") else "ai"] += 1
+    if not models:
+        for rec in diary or []:
+            raw = str(rec.get("ai_rationale") or "")
+            if not raw:
+                continue
+            models["fallback" if "FALLBACK" in raw.upper() else "ai"] += 1
+        src = "diary ai_rationale (pre-24k rows have no ai_model column)"
+    else:
+        src = "ai_model column"
+    total = sum(models.values())
+    return {"ai": models.get("ai", 0), "fallback": models.get("fallback", 0),
+            "total": total, "source": src}
 
 
 def _outcomes_for_day(day):
@@ -2970,6 +3053,7 @@ def main(argv=None):
                                   ([], DATA_DIR() / "decisions_log.csv"))
     diary, epath = _load_safe("diary", lambda: load_diary(day),
                               ([], DATA_DIR() / "snapshots_history.jsonl"))
+    globals()["DIARY_FOR_DAY"] = diary or []     # 24k: test 5 names who answered
     ticks, ticks_path, scanned = _load_safe("tape", lambda: load_ticks(day), ([], None, 0))
     tick_files = _load_safe("tape files", lambda: all_ticks_files(day), [])
     _mbo = _load_safe("mbo", lambda: load_mbo(day),
@@ -3080,6 +3164,8 @@ def main(argv=None):
     for b_ in mbo_bad:
         say(f"   !! MBO CHUNK UNREADABLE: {b_} - those rows are NOT in the count above")
     say(f"   decisions  : {dpath}  ({len(decisions)} rows this day)")
+    say(f"                source: {_decision_source_line()}"
+        f"   [the per-day mirror is never trimmed; decisions_log.csv keeps only the last 5000 rows]")
     say(f"   diary      : {epath}  ({len(diary)} snapshots this day)")
 
     DAY_COUNTS.clear()

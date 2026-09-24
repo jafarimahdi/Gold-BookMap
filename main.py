@@ -24,7 +24,7 @@ import os
 import sys
 import time
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 
 import config
 from config import DATA_DIR, LOGS_DIR
@@ -350,6 +350,11 @@ def _safety_gates(data) -> tuple:
 _DECISION_LOG_FIELDS = [
     "timestamp", "symbol", "price", "signal_direction", "signal_strength",
     "signal_confidence", "regime", "divergence", "ai_action", "ai_confidence",
+    # 24k: WHO answered. "gemini-3.5-flash-lite" is the AI; anything starting with
+    # "fallback" is this robot's own rule stamped at AI_FALLBACK_CONFIDENCE (70 by
+    # default, i.e. above the 50 gate). Without this column a rule and the AI are
+    # indistinguishable in every report ever written.
+    "ai_model",
     "exec_status", "order_id", "news_state", "minutes_to_event",
     "next_event_title", "reason",
 ]
@@ -360,7 +365,9 @@ def log_decision(snapshot, decision, exec_result) -> None:
     path = DATA_DIR / "decisions_log.csv"
     write_header = not path.exists() or path.stat().st_size == 0
     row = {
-        "timestamp": datetime.now().isoformat(timespec="seconds"),
+        # 24k: tz-aware UTC. A bare "2026-09-24T17:14:29" means nothing on its own -
+        # every reader had to guess a timezone. "+00:00" removes the guess forever.
+        "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "symbol": getattr(snapshot, "symbol", config.SYMBOL),
         "price": getattr(snapshot, "price", 0.0),
         "signal_direction": getattr(snapshot, "signal_direction", ""),
@@ -370,6 +377,7 @@ def log_decision(snapshot, decision, exec_result) -> None:
         "divergence": getattr(snapshot, "divergence", 0.0),
         "ai_action": getattr(decision, "action", ""),
         "ai_confidence": getattr(decision, "confidence", 0.0),
+        "ai_model": (getattr(decision, "model", "") or "unknown"),
         "exec_status": getattr(exec_result, "status", ""),
         "order_id": getattr(exec_result, "order_id", ""),
         "news_state": getattr(getattr(snapshot, "news", None), "news_state", ""),
@@ -388,6 +396,23 @@ def log_decision(snapshot, decision, exec_result) -> None:
         logger.info("Decision logged -> %s", path)
     except OSError as exc:
         logger.warning("Could not write decision log: %s", exc)
+
+    # 24k (A2): the day's own copy. decisions_log.csv is capped at
+    # DECISIONS_LOG_MAX_ROWS (5000) and maintenance deletes the OLDEST rows - at ~850
+    # decisions a day that silently erases the start of the history about every six
+    # days, and a past-day audit would then honestly report "the robot logged nothing
+    # that day". This mirror is per-day and never trimmed, so a graded day stays
+    # gradeable forever. Same idea as diary_YYYYMMDD.jsonl, which has done this since 24f.
+    try:
+        _day_path = DATA_DIR / f"decisions_{datetime.now(timezone.utc):%Y%m%d}.csv"
+        _day_header = not _day_path.exists() or _day_path.stat().st_size == 0
+        with open(_day_path, "a", newline="", encoding="utf-8") as fh:
+            writer = csv.DictWriter(fh, fieldnames=_DECISION_LOG_FIELDS)
+            if _day_header:
+                writer.writeheader()
+            writer.writerow(row)
+    except OSError as exc:
+        logger.warning("Could not write per-day decision mirror: %s", exc)
 
 
 # --------------------------------------------------------------------------- #
@@ -836,7 +861,7 @@ def log_trade_outcome(order_id, symbol, side, pnl, exit_price,
     path = DATA_DIR / "trade_outcomes.csv"
     write_header = not path.exists() or path.stat().st_size == 0
     row = {
-        "timestamp": _dt.now().isoformat(timespec="seconds"),
+        "timestamp": _dt.now(timezone.utc).isoformat(timespec="seconds"),
         "order_id": order_id or "",
         "symbol": symbol,
         "side": side,
@@ -970,25 +995,30 @@ def run_pipeline() -> None:
         try:
             decision = run_step3(snapshot)
             _record_latency("STEP3 AI", (time.time()-t2)*1000)
-            # v4.3: update snapshots_history.jsonl with AI vote for judge accuracy audit
+            # 24k (A5+A6): attach the AI answer to the record it actually belongs to,
+            # and replace only that record.
+            #
+            # Before: this read the WHOLE diary, edited lines[-1] - whatever it was -
+            # and wrote the WHOLE file back, every cycle. Two defects in one block:
+            #   A5  the comment said "only update if timestamp matches" but nothing
+            #       checked, so on a cycle where step 2 wrote no record the answer
+            #       landed on the PREVIOUS minute's record (which already had one).
+            #   A6  at the 20k-line cap that is ~20 MB read + 20 MB written every ~66 s,
+            #       non-atomically: a kill mid-write could truncate the whole diary,
+            #       the only file the judges can be graded from.
             try:
-                import json as _json2
-                hist_path = DATA_DIR / "snapshots_history.jsonl"
-                if hist_path.exists():
-                    # Read last line, update with AI info, rewrite
-                    lines = hist_path.read_text(encoding="utf-8").splitlines()
-                    if lines:
-                        last = _json2.loads(lines[-1])
-                        # Only update if timestamp matches snapshot
-                        last["ai_action"] = getattr(decision, "action", "HOLD")
-                        last["ai_confidence"] = float(getattr(decision, "confidence", 0) or 0)
-                        last["ai_rationale"] = getattr(decision, "rationale", "")[:200]
-                        lines[-1] = _json2.dumps(last)
-                        hist_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+                _update_last_diary_ai(
+                    DATA_DIR / "snapshots_history.jsonl",
+                    getattr(snapshot, "timestamp", None),
+                    action=getattr(decision, "action", "HOLD"),
+                    confidence=float(getattr(decision, "confidence", 0) or 0),
+                    rationale=str(getattr(decision, "rationale", ""))[:200],
+                    model=(getattr(decision, "model", "") or "unknown"),
+                )
             except Exception as _ae:
                 try:
                     logger.debug(f"AI history update failed: {_ae}")
-                except:
+                except Exception:
                     pass
         except Exception as exc:
             logger.exception("STEP 3 failed")
@@ -1183,6 +1213,91 @@ def _write_run_config() -> None:
                     payload.get("BOOKMAP_MAX_DEPTH_LEVELS"))
     except OSError as exc:
         logger.warning("Could not write run_config: %s", exc)
+
+
+def _same_stamp(a, b) -> bool:
+    """True when two timestamps mean the same instant (or the same naive text).
+
+    Diary records are written by step 2 from snapshot.timestamp; the AI update arrives
+    moments later with the same object. Comparing text alone breaks as soon as one side
+    carries an offset and the other does not, so compare instants when both are aware.
+    """
+    if a is None or b is None:
+        return False
+    if hasattr(a, "isoformat") and hasattr(b, "isoformat"):
+        try:
+            if a.tzinfo is not None and b.tzinfo is not None:
+                return abs((a - b).total_seconds()) < 1.0
+        except Exception:
+            pass
+    sa, sb = str(getattr(a, "isoformat", lambda: a)()), str(getattr(b, "isoformat", lambda: b)())
+    return sa[:19] == sb[:19]
+
+
+def _update_last_diary_ai(hist_path, snap_ts, action, confidence, rationale, model) -> bool:
+    """Write the AI vote into the LAST diary record, but only if it is the right one.
+
+    Returns True when the record was updated. Never rewrites the whole file: it finds the
+    start of the final line, truncates there and appends the corrected record, then flushes
+    and fsyncs. Cost is independent of how long the diary has grown.
+    """
+    import json as _json2
+    if not hist_path.exists() or hist_path.stat().st_size == 0:
+        return False
+    with open(hist_path, "r+b") as fh:
+        size = fh.seek(0, 2)
+        # walk backwards to the newline that starts the final record
+        chunk, pos, start = 4096, size, 0
+        tail = b""
+        while pos > 0:
+            step = min(chunk, pos)
+            pos -= step
+            fh.seek(pos)
+            tail = fh.read(step) + tail
+            stripped = tail.rstrip(b"\n")
+            idx = stripped.rfind(b"\n")
+            if idx != -1:
+                start = pos + idx + 1
+                break
+        fh.seek(start)
+        raw = fh.read().strip()
+        if not raw:
+            return False
+        try:
+            last = _json2.loads(raw.decode("utf-8", "replace"))
+        except Exception:
+            return False
+        # A5: the record must be the one this AI answer is about
+        if snap_ts is not None and not _same_stamp(_parse_iso_safe(last.get("timestamp")), snap_ts):
+            logger.debug("AI vote not attached: last diary record is not this snapshot")
+            return False
+        if last.get("ai_action") is not None and last.get("ai_rationale"):
+            logger.debug("AI vote not attached: this record already carries one")
+            return False
+        last["ai_action"] = action
+        last["ai_confidence"] = confidence
+        last["ai_rationale"] = rationale
+        last["ai_model"] = model
+        fh.seek(start)
+        fh.truncate()
+        fh.write((_json2.dumps(last) + "\n").encode("utf-8"))
+        fh.flush()
+        try:
+            import os as _os2
+            _os2.fsync(fh.fileno())
+        except Exception:
+            pass
+    return True
+
+
+def _parse_iso_safe(s):
+    """Best-effort ISO parse; naive strings keep their old meaning (machine local)."""
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(str(s).replace("Z", "+00:00"))
+    except Exception:
+        return None
 
 
 def _append_diary(record: dict, hist_path) -> None:
