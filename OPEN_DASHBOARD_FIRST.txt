@@ -1,0 +1,42 @@
+START HERE  -  double-click, read, copy, paste
+==============================================
+
+  dashboard.bat              <- the daily one
+      runs setup check + the 15 tests for the newest log day (normally yesterday),
+      writes the files, and opens ONE browser tab with everything:
+        - a verdict banner in words (CLEAN DAY / GOOD DAY, WITH NOTES /
+          ALIVE, NOT YET MEASURABLE / STOP - the day is not gradeable)
+        - 4 gauges, 10 KPI tiles, the gate / AI gate / spread / silence chips
+        - 5 tabs: Scoreboard (15 clickable test cards), Judges (accuracy bars),
+          Hours & guards (24-cell heat strip + "why it said NO"),
+          By hand (7-item checklist that stays ticked), Full text
+        - "How the robot was doing before": one row per audited day
+      Top right:  [ Copy everything for chat ]  -> paste it straight to me.
+      For a fixed day:  dashboard.bat 2026-09-23
+
+  daily_check.bat            <- same run, console only, no tab opens
+  data\index.html            <- double-click any time, runs nothing: every audited
+                                 day as a card, newest first, click to open
+  data\history_report.html   <- the styled trend table
+
+Nothing is uploaded and nothing is downloaded. The report is one self-contained file
+(no CDN, no fonts, no external script), so it looks the same offline, on another PC,
+in an email attachment, or printed to PDF. The only saved state is your day-note and
+the checklist ticks, kept in your browser's localStorage on this machine.
+
+Files written each run (plain files, in the project folder):
+  day_report_<date>.txt               the text you paste to me
+  data\day_report_<date>.html         the dashboard above
+  data\day_metrics_<date>.json        machine-readable numbers (history + index read these)
+  data\judge_panel_<date>.csv         per-judge votes and accuracy
+  data\judge_weight_suggestions.json  what each judge should weigh (needs >= 20 votes)
+  data\history_report.html            trend table
+  data\index.html                     all-days page
+
+From Git Bash the same run is:   bash daily_check.sh
+      re-open the tab without re-running:   bash daily_check.sh --open
+      verify the tester itself:             bash daily_check.sh --check
+
+Both .bat files call Git Bash at  C:\Program Files\Git\bin\bash.exe.
+If a window says bash.exe not found: right-click the .bat -> Edit, and point that
+path at your own git\bin\bash.exe.

@@ -1,0 +1,129 @@
+================================================================
+ WHAT TO DO NOW - 7 small steps. One at a time.
+ (Git Bash, HP-240. If a step's "expect" line does not match,
+  STOP and send me exactly what you got. Do not skip ahead.)
+================================================================
+
+WHO IS AT FAULT FOR WHAT: your install was fine. Three bugs were in MY
+tester (the browser tab, a duplicate .env key, a double-counted test 3).
+All three are fixed in the zip you are about to re-download.
+
+
+STEP 1 - download and unpack the new kit
+-----------------------------------------
+Download  Gold-BookMap-AUDIT-KIT.zip   (72048 bytes, 15 real files + 1 folder, no .env inside)
+
+  cd ~/Downloads
+  rm -rf Gold-BookMap-AUDIT-KIT
+  unzip -o Gold-BookMap-AUDIT-KIT.zip
+
+EXPECT: 16 lines of "inflating: ..." and nothing about .env
+
+
+STEP 2 - copy only 2 files into your project
+--------------------------------------------
+  cd ~/Downloads/Gold-BookMap-AUDIT-KIT
+  cp audit_day.py daily_check.sh /a/gitHub/Gold-BookMap/
+  cd /a/gitHub/Gold-BookMap
+  ls -la audit_day.py daily_check.sh
+
+EXPECT:
+  audit_day.py    91999
+  daily_check.sh   5927
+(If the numbers are different, you copied the wrong folder - repeat step 2.)
+
+
+STEP 3 - open the report that is ALREADY written for 2026-09-23
+---------------------------------------------------------------
+You do not have to re-run the audit. The HTML file already exists in data/.
+
+  python audit_day.py --open-html data/day_report_2026-09-23.html
+
+EXPECT: "[ok] opened ..." AND a new browser tab with the dashboard.
+        (Yesterday no tab appeared because my opener was broken. Now fixed.)
+
+Then in that tab: click the button "Copy everything for chat" and paste it
+to me in chat. That is the single thing I need most.
+
+
+STEP 4 - fix the one leftover in .env (2 minutes)
+------------------------------------------------
+Last time we added AI_MAX_CALLS_PER_DAY=2000 but your .env already had
+AI_MAX_CALLS_PER_DAY=0 above it. The 0 is dead weight; kill it:
+
+  cd /a/gitHub/Gold-BookMap
+  cp .env .env.bak.fix
+  python - <<'EOF'
+from pathlib import Path
+lines = Path(".env").read_text().splitlines()
+keys = {ln.split("=",1)[0].strip() for ln in lines if "=" in ln}
+dups = {k for k in keys if sum(1 for ln in lines if ln.split("=",1)[0].strip() == k) > 1}
+seen, out = set(), []
+for ln in reversed(lines):                 # keep the LAST copy = what config.py reads
+    k = ln.split("=",1)[0].strip() if "=" in ln else ""
+    if k in dups:
+        if k in seen: continue
+        seen.add(k)
+    out.append(ln)
+Path(".env").write_text("\n".join(reversed(out)) + "\n")
+print("dropped", len(lines) - len(out), "dead line(s);", " ".join(sorted(dups)) or "no duplicates")
+EOF
+
+EXPECT: "dropped 1 dead line(s); AI_MAX_CALLS_PER_DAY"
+        (if it says "no duplicates" instead, it was already clean - that is fine)
+
+Check it, and your settings must still read 10800 / 20 / 50 / 6 / 0.50 / 2000:
+
+  for k in BOOKMAP_WINDOW_SECONDS BOOKMAP_MAX_DEPTH_LEVELS CONFIDENCE_THRESHOLD AI_MIN_SIGNAL_STRENGTH V6_CFD_SPREAD_MAX AI_MAX_CALLS_PER_DAY GEMINI_API_KEY; do printf "%-28s %s\n" "$k" "$(grep -c "^$k=" .env)"; done
+
+EXPECT: every number in that column = 1 (exactly one line per key, no repeats).
+        Do NOT retype any value. Do NOT delete GEMINI_API_KEY.
+
+
+STEP 5 - prove the tester itself is honest
+-----------------------------------------
+  bash daily_check.sh --check
+
+EXPECT all of:
+  [OK] audit_day.py compiles
+  [OK] visual layer loads, 6788 bytes of style, 2060 bytes of script, from A:\gitHub\Gold-BookMap\tools\dashboard.py
+  [OK] dashboard API complete (day report + index + trend table)
+  [demo] verdict: auditor OK - every test produced a real grade and the dashboard rendered
+  SELFTEST PASSED
+  [OK] auditor and selftest both clean
+
+
+STEP 6 - the v7.1 diary patch, BEFORE you start today's run
+-----------------------------------------------------------
+Never while main.py is running. Close it first.
+
+  cd ~/Downloads && rm -rf Gold-BookMap-v7.1-JUDGE-PATCH && unzip -o Gold-BookMap-v7.1-JUDGE-PATCH.zip
+  cd /a/gitHub/Gold-BookMap
+  cp main.py main.py.bak
+  cp ~/Downloads/Gold-BookMap-v7.1-JUDGE-PATCH/main.py .
+  cp ~/Downloads/Gold-BookMap-v7.1-JUDGE-PATCH/judge_panel.py .
+  ls -la main.py judge_panel.py
+  python -m py_compile main.py judge_panel.py audit_day.py dashboard.py tools/dashboard.py && echo COMPILE_OK
+
+EXPECT: main.py 48991, judge_panel.py 15606, then COMPILE_OK.
+If main.py 48991 does not appear, STOP and tell me - do not start the robot.
+Undo, always:  cp main.py.bak main.py
+
+
+STEP 7 - start today, and grade it tomorrow morning
+--------------------------------------------------
+  Start the robot the way you always do.
+  Tomorrow:  bash daily_check.sh 2026-09-24
+  The tab opens by itself now. Copy button -> paste to me.
+
+
+OPTIONAL (only if you are not tired) - one line that answers a real question
+-----------------------------------------------------------------------------
+Your ticks.csv holds 2,441,883 rows for 2026-09-23, but my audit only counted
+22,022 of them as trade prints. That is either my parser being too strict or
+the bridge really writing thin data. This tells us which (about 1 minute):
+
+  cd /a/gitHub/Gold-BookMap
+  awk -F, '$1 ~ /^2026-09-23/ {c[$2]++; t++} END {for (k in c) printf "%s=%d ", k, c[k]; print "| total=" t}' ticks.csv
+
+Send me the output. Nothing else - the rest can wait for my answer.

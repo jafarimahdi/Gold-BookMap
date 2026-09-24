@@ -29,3 +29,8 @@ ticks*.csv
 *.zip
 Gold-BookMap-*.zip
 
+
+# backups + generated day reports
+.env.bak*
+*.bak
+day_report_*.txt
