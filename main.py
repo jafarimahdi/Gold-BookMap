@@ -562,7 +562,8 @@ def run_step3(snapshot):
         decision = Decision(
             action="HOLD", confidence=0.0,
             rationale=f"signal {strength:.1f} below AI threshold "
-                      f"{min_strength:.0f} (AI skipped)")
+                      f"{min_strength:.0f} (AI skipped)",
+            model="none-weak-signal")
         _record("STEP 3  AI DECISION",
                 f"HOLD (signal {strength:.1f} < {min_strength:.0f}, AI skipped)")
         return decision
@@ -572,7 +573,8 @@ def run_step3(snapshot):
         wait = (min_interval - (now - _LAST_AI_CALL)) / 60.0
         decision = Decision(
             action="HOLD", confidence=0.0,
-            rationale=f"AI throttled ({wait:.0f} min until next call)")
+            rationale=f"AI throttled ({wait:.0f} min until next call)",
+            model="none-throttled")
         _record("STEP 3  AI DECISION",
                 f"HOLD (AI throttled, {wait:.0f} min until next call)")
         return decision
@@ -580,7 +582,8 @@ def run_step3(snapshot):
     if max_per_day > 0 and _ai_calls_today() >= max_per_day:
         decision = Decision(
             action="HOLD", confidence=0.0,
-            rationale=f"daily AI cap reached ({max_per_day})")
+            rationale=f"daily AI cap reached ({max_per_day})",
+            model="none-daily-cap")
         _record("STEP 3  AI DECISION",
                 f"HOLD (daily AI cap {max_per_day} reached)")
         return decision

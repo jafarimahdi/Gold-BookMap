@@ -59,7 +59,7 @@ def LOGS_DIR():
 # BUILD MARKER - the shell scripts check for THIS string instead of a byte count,
 # so an intentional edit can never make morning_check.sh yell "re-copy it from the
 # kit" at a perfectly good file. Bump the date whenever you ship a new auditor.
-BUILD = "audit-2026-09-24l2"
+BUILD = "audit-2026-09-24l3"
 BASE_DIR_FOR_ENV = Path(__file__).resolve().parent
 
 
@@ -1464,6 +1464,14 @@ def test_5_guards(text, decisions, feed):
             else:
                 why.append(f"WHO ANSWERED: all {_fb['total']} answer(s) came from the AI, "
                            f"none from the backup rule ({_fb['source']})")
+            if _fb.get("none") and _fb.get("none_why"):
+                why.append("   why the AI was not reached: " + ", ".join(
+                    f"{_k} x{_v}" for _k, _v in _fb["none_why"]))
+                why.append("      none-weak-signal = the strategy never asked (signal below "
+                           "AI_MIN_SIGNAL_STRENGTH) - by design. none-throttled / none-daily-cap "
+                           "= AI_MIN_INTERVAL_MINUTES or AI_MAX_CALLS_PER_DAY silenced it - your "
+                           "setting, changeable. none-rate-limited / none-call-failed = Google "
+                           "refused or the call broke - not your choice, and worth watching")
             if _fb.get("none"):
                 why.append(f"   of those, {_fb['none']} cycle(s) got NO answer at all "
                            f"(no API key / SDK missing / every key rate-limited / every call "
@@ -2113,14 +2121,16 @@ def _fallback_stats(decisions, diary):
     report presented it as "the AI was confident".
     """
     models = Counter()
+    none_why = Counter()
     for d in decisions or []:
         m = str(d.get("ai_model") or "").strip().lower()
         if not m:
             continue
         if m.startswith("fallback"):
             models["fallback"] += 1
-        elif m.startswith("none"):
+        elif m.startswith("none") or m == "unknown":
             models["none"] += 1          # 24m/A1b: nobody answered - not the AI, not a rule
+            none_why[m] += 1
         else:
             models["ai"] += 1
             if m.endswith("-cached"):
@@ -2137,6 +2147,7 @@ def _fallback_stats(decisions, diary):
     total = models.get("ai", 0) + models.get("fallback", 0) + models.get("none", 0)
     return {"ai": models.get("ai", 0), "fallback": models.get("fallback", 0),
             "none": models.get("none", 0), "cached": models.get("cached", 0),
+            "none_why": none_why.most_common(),
             "total": total, "source": src}
 
 
