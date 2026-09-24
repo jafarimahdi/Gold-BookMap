@@ -34,3 +34,7 @@ Gold-BookMap-*.zip
 .env.bak*
 *.bak
 day_report_*.txt
+
+# any env copy, any name, forever (only the empty template is shareable)
+.env*
+!.env.example
