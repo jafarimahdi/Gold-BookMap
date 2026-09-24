@@ -207,7 +207,7 @@ def decisions_page(day, decisions, diary, series, title_extra=""):
   </div>
 </div>""")
     head = f"{day} - {len(decisions or [])} decisions {title_extra}"
-    return _page(f"Decisions &mdash; {esc(day)}", head, "".join(rows) or
+    return _page(f"Decisions — {esc(day)}", head, "".join(rows) or
                  "<p>No decisions were logged for this day.</p>")
 
 
@@ -246,7 +246,7 @@ def trades_page(day, decisions, outcomes, tracked, mt5=None):
                     f"remembers to look trades up later; they are NOT a list of open trades.</p>")
     if mt5:
         body.append(f"<h3>MT5 right now</h3><p>{esc(mt5)}</p>")
-    return _page(f"Trades &mdash; {esc(day)}", f"Position lifecycle, {day}", "".join(body))
+    return _page(f"Trades — {esc(day)}", f"Position lifecycle, {day}", "".join(body))
 
 
 # --------------------------------------------------------------------------- #
@@ -335,7 +335,7 @@ def judges_page(day, diary, series, decisions=None):
             })
 
     if not per:
-        return _page(f"Judges &mdash; {esc(day)}", f"Judges, {day}",
+        return _page(f"Judges — {esc(day)}", f"Judges, {day}",
                      "<p>No judge votes were recorded for this day, so there is nothing to "
                      "score. That is a diary problem, not a judge problem.</p>")
 
@@ -394,7 +394,7 @@ def judges_page(day, diary, series, decisions=None):
 
     summary = (f"{len(per)} judge(s) voted across {total_snaps} snapshot(s). "
                f"Click any judge to see every call it made and the reason it gave.")
-    return _page(f"Judges &mdash; {esc(day)}", f"Judges, {day}",
+    return _page(f"Judges — {esc(day)}", f"Judges, {day}",
                  f"<p>{summary}</p>" + "".join(blocks))
 
 

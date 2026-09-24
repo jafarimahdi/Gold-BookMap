@@ -59,7 +59,7 @@ def LOGS_DIR():
 # BUILD MARKER - the shell scripts check for THIS string instead of a byte count,
 # so an intentional edit can never make morning_check.sh yell "re-copy it from the
 # kit" at a perfectly good file. Bump the date whenever you ship a new auditor.
-BUILD = "audit-2026-09-24m"
+BUILD = "audit-2026-09-24t"
 BASE_DIR_FOR_ENV = Path(__file__).resolve().parent
 
 
@@ -686,6 +686,10 @@ def load_decisions(day):
     return rows, (day_p if day_p.exists() else roll_p)
 
 
+_PAGE_PARTS = {}           # 24o: sub-pages kept in memory so ONE page can embed them
+AI_RECORD = {}             # 24n: the AI's veto/agree/oppose record for the graded day
+SCOREBOARD = []            # 24n: ranked deciders (judges + AI)
+SCOREBOARD_THIN = []       # 24n: deciders with too few calls to grade
 DECISION_SOURCE = "not read yet"
 DIARY_FOR_DAY = []          # set once per graded day, so test 5 can name the answer source
 
@@ -1755,30 +1759,622 @@ def test_8_teams(diary):
     return r, None
 
 
-def test_9_judges(day, diary, ticks, candles):
-    r = Report(9)
-    if not diary:
-        r.add("NA", "JUDGE PANEL",
-              "how did each judge behave: footprint, L3, iceberg, whale, VWAP...",
-              ["no diary (data/snapshots_history.jsonl) for this day -> the judges cannot be graded",
-               "start main.py with the v7.1 patch, let it run 08:00-23:00, then re-run this audit"])
-        return r, None
-    if not candles:
-        r.add("NA", "JUDGE PANEL",
-              "how did each judge behave: footprint, L3, iceberg, whale, VWAP...",
-              [f"diary has {len(diary)} records but there is no ticks.csv for {day:%Y-%m-%d} to score them against",
-               "judges can be listed but not graded -> I will not fake a verdict"])
-        panel_counts = Counter()
-        for rec in diary[-400:]:
-            panel, src = judge_panel(rec)
-            for j, d, w in panel:
-                panel_counts[j] += 1
-        if panel_counts:
-            say("        votes actually recorded per judge (who even spoke):")
-            for j, c in panel_counts.most_common(12):
-                say(f"           {j:<20} {c:>5}")
-        return r, None
+JUDGE_SCORES = {}          # 24n: filled by test_9, read by the scoreboard
 
+
+def ai_decision_record(decisions, ticks, candles):
+    """Grade the AI on the same walk-forward the what-if test uses.
+
+    Three groups, because they answer different questions:
+      VETO     panel said BUY/SELL, the AI said HOLD  -> would the trade have won?
+               a veto is RIGHT when the trade would have LOST.
+      AGREED   panel said BUY/SELL, the AI said the same -> normal scoring.
+      OPPOSED  the AI said the opposite direction to the panel.
+    Rows where the AI never answered (ai_model starts with 'none') are excluded: a
+    silent AI is not an opinion, and counting silence as a veto would flatter it.
+    """
+    out = {"veto": [], "agreed": [], "opposed": [], "silent": 0, "no_price": 0}
+    if not candles:
+        return out
+    for d in decisions or []:
+        sig = str(d.get("signal_direction") or "").upper()
+        if sig not in ("BUY", "SELL"):
+            continue
+        model = str(d.get("ai_model") or "").strip().lower()
+        if model.startswith("none") or model == "unknown":
+            out["silent"] += 1
+            continue
+        act = str(d.get("ai_action") or "").upper()
+        dt = d.get("_dt")
+        try:
+            price = float(d.get("price") or 0)
+        except (TypeError, ValueError):
+            price = 0.0
+        if not dt or price < 1000:
+            out["no_price"] += 1
+            continue
+        pts = simulate(ticks, candles, dt, sig, price)
+        if pts is None:
+            out["no_price"] += 1
+            continue
+        item = {"dt": dt, "dir": sig, "price": price, "pts": pts,
+                "conf": d.get("ai_confidence"), "model": model,
+                "reason": str(d.get("reason") or "")[:120]}
+        if act in ("HOLD", "NONE", "WAIT", ""):
+            out["veto"].append(item)
+        elif act == sig:
+            out["agreed"].append(item)
+        else:
+            out["opposed"].append(item)
+    return out
+
+
+def _sb_row(name, kind, n, hit, pts_list, weight=None, note=""):
+    tot = sum(pts_list) if pts_list else 0.0
+    avg = (tot / len(pts_list)) if pts_list else 0.0
+    return {"name": name, "kind": kind, "n": n, "hit": hit,
+            "right": (pct(hit, n) if n else 0.0), "pts": tot, "avg": avg,
+            "w": weight, "note": note}
+
+
+def build_scoreboard(ai_rec):
+    """One ranked list: the 33 judges and the AI, graded the same way."""
+    rows, thin = [], []
+    for j, st in JUDGE_SCORES.items():
+        r = _sb_row(j, "judge", st["n"], st["hit"], st["pts"], st["w"])
+        (rows if st["n"] >= 3 else thin).append(r)
+    veto = ai_rec.get("veto") or []
+    if veto:
+        # a veto is RIGHT when the trade it blocked would have lost money
+        saved = [v for v in veto if v["pts"] < 0]
+        # points the vetoes SAVED (positive = good doorman)
+        pts_saved = [-v["pts"] for v in veto]
+        r = _sb_row("THE AI (veto)", "ai", len(veto), len(saved), pts_saved,
+                    note="pts = money the vetoes saved (+) or cost (-)")
+        (rows if len(veto) >= 3 else thin).append(r)
+    agreed = ai_rec.get("agreed") or []
+    if agreed:
+        wins = [a for a in agreed if a["pts"] > 0]
+        r = _sb_row("THE AI (agreed)", "ai", len(agreed), len(wins),
+                    [a["pts"] for a in agreed],
+                    note="trades the AI approved, replayed")
+        (rows if len(agreed) >= 3 else thin).append(r)
+    opposed = ai_rec.get("opposed") or []
+    if opposed:
+        r = _sb_row("THE AI (opposed)", "ai", len(opposed),
+                    len([o for o in opposed if o["pts"] < 0]),
+                    [-o["pts"] for o in opposed],
+                    note="AI pointed the other way to the panel")
+        (rows if len(opposed) >= 3 else thin).append(r)
+    rows.sort(key=lambda r: (r["avg"], r["right"]), reverse=True)
+    return rows, thin
+
+
+def print_scoreboard(day, rows, thin, ai_rec):
+    say("")
+    say("=" * 108)
+    say(" THE SCOREBOARD - who is actually right? (judges and the AI, graded the same way)")
+    say("=" * 108)
+    if not rows:
+        say("   nothing could be graded on this day: no price data to replay the calls against,")
+        say("   or fewer than 3 scored calls each. Grading nothing is not the same as grading badly.")
+        return
+    say(f"   {'DECIDER':<22}{'TYPE':>7}{'CALLS':>7}{'RIGHT%':>8}{'PTS':>9}{'PER CALL':>10}"
+        f"{'WEIGHT':>8}   VERDICT")
+    for r in rows:
+        w = f"{r['w']:.2f}" if r["w"] is not None else "-"
+        if r["right"] >= 60 and r["avg"] > 0:
+            verdict = "carrying its weight"
+        elif r["avg"] > 0:
+            verdict = "profitable but coin-flip accurate"
+        elif r["right"] >= 55:
+            verdict = "often right, but the wins are too small"
+        else:
+            verdict = "losing money on this day"
+        say(f"   {r['name']:<22}{r['kind']:>7}{r['n']:>7}{r['right']:>7.0f}%"
+            f"{r['pts']:>9.1f}{r['avg']:>10.2f}{w:>8}   {verdict}")
+    if thin:
+        say(f"   not graded (fewer than 3 scored calls): "
+            f"{', '.join(t['name'] for t in thin[:14])}")
+        say("      they are named, not hidden - a thin sample is weather, not climate")
+    say("")
+    veto = ai_rec.get("veto") or []
+    if veto:
+        saved = [v for v in veto if v["pts"] < 0]
+        cost = [v for v in veto if v["pts"] > 0]
+        net = sum(-v["pts"] for v in veto)
+        say(f"   THE AI'S VETO RECORD: the panel wanted a trade {len(veto)} time(s) and the AI "
+            f"said HOLD.")
+        say(f"      {len(saved)} of those trades would have LOST  -> the veto saved "
+            f"{sum(-v['pts'] for v in saved):+.1f} pts")
+        say(f"      {len(cost)} of those trades would have WON   -> the veto cost "
+            f"{sum(-v['pts'] for v in cost):+.1f} pts")
+        say(f"      net effect of letting the AI hold the door: {net:+.1f} pts")
+        if len(veto) < 20:
+            say(f"      {len(veto)} veto(es) is too few to decide anything. Read this line again "
+                f"after 3-5 graded days before changing AI_AS_VOTE - on a small sample this "
+                f"number is luck wearing a suit.")
+        elif net > 0:
+            say("      on this sample the doorman EARNS his job: the trades he blocked were "
+                "losers on balance")
+        else:
+            say("      on this sample the doorman COSTS money: the trades he blocked would have "
+                "made more than they lost")
+        worst = [v for v in sorted(veto, key=lambda v: v["pts"], reverse=True)[:3]
+                 if v["pts"] > 0]
+        if worst:
+            say("      the vetoes that cost the most:")
+            for v in worst:
+                say(f"         {hhmm(v['dt'])} {v['dir']} would have made {v['pts']:+.1f} pts "
+                    f"- AI said HOLD ({v['reason']})")
+        best = [v for v in sorted(veto, key=lambda v: v["pts"])[:3] if v["pts"] < 0]
+        if best:
+            say("      the vetoes that saved the most:")
+            for v in best:
+                say(f"         {hhmm(v['dt'])} {v['dir']} would have lost {v['pts']:+.1f} pts "
+                    f"- AI said HOLD ({v['reason']})")
+    if ai_rec.get("silent"):
+        say(f"   ({ai_rec['silent']} signal(s) are excluded because the AI never answered - "
+            f"silence is not a veto, and counting it as one would flatter the AI)")
+    say("")
+
+
+# What each decider watches, in plain words. Group is for reading, not for scoring.
+JUDGE_ROSTER = {
+    "footprint_delta":    ("Footprint", "At each price, were buyers or sellers the aggressors? The core order-flow read."),
+    "footprint_levels":   ("Footprint", "Counts how many price levels lean buy vs sell - breadth, not size."),
+    "absorption":         ("Footprint", "Heavy selling that does NOT move price down = someone big is absorbing it."),
+    "delta_pressure":     ("Footprint", "Sustained one-sided aggression building up."),
+    "cvd_momentum":       ("Footprint", "Is cumulative delta accelerating or fading?"),
+    "cvd_divergence":     ("Footprint", "Price makes a new high but delta does not - the move is not supported."),
+    "volume_roc":         ("Footprint", "Sudden change in traded volume - something woke up."),
+    "l3_imbalance":       ("Order book", "More size resting on one side of the book than the other."),
+    "l3_net_flow":        ("Order book", "Net aggressive buying minus selling. Your heaviest judge (1.5)."),
+    "l3_ofi_streak":      ("Order book", "Order-flow imbalance pushing the same way several prints in a row."),
+    "l3_large_ofi":       ("Order book", "The same, but only counting large orders."),
+    "l3_aggr_limit":      ("Order book", "Aggressive market orders vs passive limit orders."),
+    "microprice":         ("Order book", "The true mid, weighted by book size - leans toward the next tick."),
+    "queue_pos":          ("Order book", "How deep the queue is at the best bid/ask."),
+    "iceberg":            ("Hidden size", "A resting order that keeps refilling - someone hiding a big position."),
+    "iceberg_legacy":     ("Hidden size", "The older iceberg rule, kept for comparison."),
+    "iceberg_noise":      ("Hidden size", "OFF (weight 0.0) - was too noisy and is deliberately silenced."),
+    "whale_walls":        ("Hidden size", "A very large resting order acting as a wall. Weight 1.4."),
+    "spoof_invert":       ("Hidden size", "A big order that vanishes before being hit - fake pressure, so fade it."),
+    "spoof_invert_loose": ("Hidden size", "The same idea with a looser threshold."),
+    "sweep":              ("Hidden size", "Someone cleared several price levels in one go - urgency."),
+    "vwap_trend":         ("Structure", "Price above or below VWAP, and which way VWAP is sloping."),
+    "vwap_bands":         ("Structure", "How far price has stretched from VWAP - snap-back or breakout."),
+    "vwap_zscore":        ("Structure", "The same stretch, measured in standard deviations."),
+    "poc_day":            ("Structure", "Today's point of control - the price with the most traded volume."),
+    "htf_poc":            ("Structure", "The same, but from higher timeframes. Slowest judge: 120 minutes."),
+    "value_area":         ("Structure", "Is price inside or outside the day's value area?"),
+    "supply_demand":      ("Structure", "Known supply and demand zones from earlier trading."),
+    "mtf":                ("Structure", "Multi-timeframe agreement: H1, M15 and M5 pointing the same way."),
+    "macro_yield":        ("Macro", "Bond yields. Rising yields usually press gold down."),
+    "macro_dxy":          ("Macro", "The dollar index. A stronger dollar usually presses gold down."),
+    "macro_vix":          ("Macro", "Volatility/fear gauge."),
+    "macro_risk":         ("Macro", "Overall risk-on vs risk-off mood."),
+    "news_sentiment":     ("Macro", "Tone of the incoming news feed."),
+}
+
+
+def panel_roster():
+    """(rows, n_active). One row per decider, ending with the AI."""
+    _order = {"Footprint": 0, "Order book": 1, "Hidden size": 2,
+              "Structure": 3, "Macro": 4, "?": 5}
+    names = sorted(set(JUDGE_DEFAULT_W) | set(JUDGE_HORIZON) | set(JUDGE_ROSTER),
+                   key=lambda n: (_order.get(JUDGE_ROSTER.get(n, ("?", ""))[0], 5), n))
+    rows = []
+    active = 0
+    for n in names:
+        grp, desc = JUDGE_ROSTER.get(n, ("?", "no description recorded"))
+        w = JUDGE_DEFAULT_W.get(n)
+        h = JUDGE_HORIZON.get(n)
+        mins = (h[0] * 5) if h else None
+        on = not (w is not None and float(w) == 0.0)
+        if on:
+            active += 1
+        rows.append({"name": n, "group": grp, "desc": desc, "w": w,
+                     "mins": mins, "on": on, "kind": "judge"})
+    rows.append({"name": "THE AI (Gemini)", "group": "Referee",
+                 "desc": "Asked only when the panel's signal is strong enough. Today it is a "
+                         "GATE, not a vote: whatever it says is final, and it can refuse a "
+                         "trade all 33 judges wanted.",
+                 "w": None, "mins": None, "on": True, "kind": "ai"})
+    return rows, active
+
+
+def print_roster():
+    rows, active = panel_roster()
+    say("")
+    rule()
+    say(f" THE PANEL - every decider by name ({active} active judges + the AI)")
+    rule()
+    last_group = None
+    for r in rows:
+        if r["group"] != last_group:
+            say(f"   -- {r['group']} --")
+            last_group = r["group"]
+        w = f"{r['w']:.2f}" if r["w"] is not None else "  - "
+        m = f"{r['mins']:>4}m" if r["mins"] else "   -"
+        flag = "" if r["on"] else "   [OFF]"
+        say(f"   {r['name']:<22} w {w}  clock {m}{flag}")
+        say(f"      {r['desc']}")
+    say("")
+
+
+def _strip_to_body(html_text):
+    """Return (style_text, body_inner) from a page produced by insight._page()."""
+    if not html_text:
+        return "", ""
+    style = ""
+    m = re.search(r"<style[^>]*>(.*?)</style>", html_text, re.S | re.I)
+    if m:
+        style = m.group(1)
+    m = re.search(r"<body[^>]*>(.*?)</body>", html_text, re.S | re.I)
+    body = m.group(1) if m else html_text
+    return style, body
+
+
+_ONE_PAGE_CSS = """
+body{font:14px/1.6 system-ui,Segoe UI,Arial;margin:0;background:#0f1115;color:#e8e8ea}
+.wrap{max-width:1180px;margin:0 auto;padding:24px}
+h1{font-size:22px;margin:0 0 6px}
+h2{font-size:17px;margin:0 0 10px;padding-bottom:6px;border-bottom:1px solid #2a2d34}
+.verdict{background:#171a21;border:1px solid #2a2d34;border-radius:8px;padding:12px 14px;
+         margin:12px 0 18px;font-family:ui-monospace,Consolas,monospace;font-size:13px;
+         white-space:pre-wrap;word-break:break-word}
+nav{position:sticky;top:0;background:#0f1115ee;backdrop-filter:blur(6px);padding:10px 0;
+    border-bottom:1px solid #2a2d34;margin-bottom:18px;z-index:5}
+nav a{color:#7fb2ff;text-decoration:none;margin-right:16px;font-size:13px;white-space:nowrap}
+nav a:hover{text-decoration:underline}
+section{margin:0 0 34px}
+.sub{color:#9aa0aa;margin:0 0 10px;font-size:13px}
+pre.console{background:#0b0d11;border:1px solid #2a2d34;border-radius:8px;padding:14px;
+            overflow-x:auto;font:12px/1.5 ui-monospace,Consolas,monospace;color:#d6d8dc;
+            max-height:1500px}
+table{border-collapse:collapse;width:100%}
+th,td{padding:6px 8px;border-bottom:1px solid #2a2d34;text-align:left;vertical-align:top}
+th{color:#9aa0aa}
+.foot{color:#6e7480;font-size:12px;margin-top:30px;border-top:1px solid #2a2d34;padding-top:12px}
+.cards{display:flex;gap:10px;flex-wrap:wrap;margin:6px 0 14px}
+.card{background:#171a21;border:1px solid #2a2d34;border-radius:8px;padding:10px 14px;min-width:110px}
+.card b{display:block;font-size:22px;line-height:1.1}
+.card span{color:#9aa0aa;font-size:12px}
+.card.good b{color:#5ad18a} .card.bad b{color:#ef6a6a}
+.filters{margin:6px 0 10px}
+.filters button{background:#171a21;color:#c8ccd4;border:1px solid #2a2d34;border-radius:999px;
+  padding:5px 13px;margin-right:7px;cursor:pointer;font-size:12px}
+.filters button.on{background:#2b6cb0;color:#fff;border-color:#2b6cb0}
+.filters button:hover{border-color:#4a4f5a}
+#paneltable td{font-size:13px}
+#paneltable th{white-space:nowrap;user-select:none}
+.desc{display:none;color:#8e949e;font-size:11.5px;max-width:460px;margin-top:3px}
+body.showdesc .desc{display:block}
+.filters button.alt{border-style:dashed}
+details>summary{cursor:pointer;list-style:none}
+details>summary::-webkit-details-marker{display:none}
+details>summary h2{display:inline-block;margin:0 0 10px}
+details>summary h2:before{content:'\25B8 ';color:#6e7480}
+details[open]>summary h2:before{content:'\25BE ';color:#6e7480}
+details>summary:hover h2{color:#7fb2ff}
+.lt{font-size:15px;width:16px;padding-right:0}
+.lt.good{color:#5ad18a} .lt.bad{color:#ef6a6a} .lt.none{color:#6e7480} .lt.off{color:#3d424b}
+.barwrap{display:flex;align-items:center;gap:7px;min-width:110px}
+.barnum{font-variant-numeric:tabular-nums;font-size:12px;width:34px;text-align:right;color:#c8ccd4}
+.bar{flex:1;height:7px;background:#242832;border-radius:4px;overflow:hidden;min-width:48px}
+.bar i{display:block;height:100%}
+.gbar{background:#5ad18a} .rbar{background:#ef6a6a}
+.num{font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap}
+.pos{color:#5ad18a} .neg{color:#ef6a6a} .dim{color:#6e7480}
+.picker{margin:4px 0 14px;display:flex;align-items:center;flex-wrap:wrap}
+.picker select{background:#171a21;color:#e8e8ea;border:1px solid #3a3f4a;border-radius:6px;
+  padding:7px 10px;font-size:14px;min-width:260px;cursor:pointer}
+.picker select:hover{border-color:#2b6cb0}
+.picker label{color:#9aa0aa;font-size:13px}
+.strip{display:inline-flex;gap:3px}
+.strip .sq{width:11px;height:11px;border-radius:2px;display:inline-block}
+.strip .sq.good{background:#5ad18a} .strip .sq.bad{background:#ef6a6a}
+.picker + .sub{margin-top:0}
+a{color:#7fb2ff}
+"""
+
+_PANEL_JS = """
+<script>
+(function(){
+ var tb=document.getElementById('panelbody');
+ if(!tb) return;
+ function apply(f){
+   tb.querySelectorAll('tr').forEach(function(tr){
+     var s=tr.getAttribute('data-state');
+     var show = (f==='all') || (f==='graded' ? (s==='good'||s==='bad') : s===f);
+     tr.style.display = show ? '' : 'none';});
+ }
+ document.querySelectorAll('#panelfilter button[data-f]').forEach(function(b){
+   b.onclick=function(){
+     document.querySelectorAll('#panelfilter button[data-f]').forEach(function(x){x.className='';});
+     b.className='on';
+     apply(b.getAttribute('data-f'));
+   };});
+ var dt=document.getElementById('desctoggle');
+ if(dt){ dt.onclick=function(){
+     var on=document.body.classList.toggle('showdesc');
+     dt.textContent = on ? '- descriptions' : '+ descriptions';
+   };}
+ var dir={};
+ document.querySelectorAll('#paneltable th[data-k]').forEach(function(th){
+   th.style.cursor='pointer';
+   th.onclick=function(){
+     var k=th.getAttribute('data-k');
+     dir[k]=!dir[k];
+     var rows=[].slice.call(tb.querySelectorAll('tr'));
+     rows.sort(function(a,b){
+       var x=parseFloat(a.getAttribute('data-'+k)), y=parseFloat(b.getAttribute('data-'+k));
+       return dir[k]?x-y:y-x;});
+     rows.forEach(function(r){tb.appendChild(r);});
+   };});
+ apply('graded');
+})();
+</script>
+"""
+
+
+def _bar(pct_val, good=True):
+    """A percentage you can read without reading: number + a filled bar."""
+    p = max(0.0, min(100.0, float(pct_val or 0)))
+    cls = "gbar" if good else "rbar"
+    return (f"<div class='barwrap'><span class='barnum'>{p:.0f}%</span>"
+            f"<span class='bar'><i class='{cls}' style='width:{p:.0f}%'></i></span></div>")
+
+
+def _panel_scoreboard_html(sb_rows, sb_thin, ai_rec):
+    """The roster and the scores in ONE table - the thing the operator actually wants
+    to look at. Judges that were not graded keep their row and say why."""
+    def esc(s):
+        return (str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+
+    scored = {r["name"]: r for r in list(sb_rows) + list(sb_thin)}
+    ai_desc = ("Gemini. Asked only when the panel's signal is strong enough. Today it is a "
+               "GATE, not a vote: whatever it says is final. 'veto' = the panel wanted a "
+               "trade and the AI refused; right means the blocked trade would have lost.")
+    graded = {r["name"] for r in sb_rows}
+    roster, active = panel_roster()
+
+    # how much of the day's winnings/losses each judge is responsible for
+    tot_abs = sum(abs(r["pts"]) for r in sb_rows) or 1.0
+    n_help = sum(1 for r in sb_rows if r["pts"] > 0)
+    n_hurt = sum(1 for r in sb_rows if r["pts"] <= 0)
+    n_ungraded = len(roster) - len(graded)
+
+    cards = (
+        f"<div class='cards'>"
+        f"<div class='card'><b>{active}</b><span>judges on the panel</span></div>"
+        f"<div class='card'><b>{len(graded)}</b><span>graded today</span></div>"
+        f"<div class='card good'><b>{n_help}</b><span>made money</span></div>"
+        f"<div class='card bad'><b>{n_hurt}</b><span>cost money</span></div>"
+        f"<div class='card'><b>{n_ungraded}</b><span>too few calls to grade</span></div>"
+        f"</div>")
+
+    # The AI is scored under three names (veto / agreed / opposed) but appears once in
+    # the roster. Expand it so each of its records gets its own row with the same
+    # description, instead of the roster row saying "did not vote".
+    roster = [r for r in roster if r["kind"] != "ai"] + [
+        {"name": nm, "group": "Referee", "desc": ai_desc, "w": None, "mins": None,
+         "on": True, "kind": "ai"}
+        for nm in ("THE AI (veto)", "THE AI (agreed)", "THE AI (opposed)")
+        if nm in scored]
+
+    rows_html = []
+    for r in roster:
+        nm = r["name"]
+        s = scored.get(nm)
+        is_graded = nm in graded
+        w = f"{r['w']:.2f}" if r["w"] is not None else "&mdash;"
+        clock = f"{r['mins']} min" if r["mins"] else "&mdash;"
+        if not r["on"]:
+            state, light, why = "off", "&#9679;", "switched off (weight 0.00)"
+        elif not is_graded:
+            state, light = "none", "&#9679;"
+            why = (f"only {s['n']} scored call(s) - too few to grade"
+                   if s else "did not vote today")
+        elif s["pts"] > 0:
+            state, light, why = "good", "&#9679;", "made money"
+        else:
+            state, light, why = "bad", "&#9679;", "cost money"
+        if is_graded:
+            share = abs(s["pts"]) / tot_abs * 100.0
+            right = _bar(s["right"], good=s["right"] >= 50)
+            calls = f"{s['n']}"
+            pts = f"<span class='{'pos' if s['pts'] > 0 else 'neg'}'>{s['pts']:+.1f}</span>"
+            avg = f"<span class='{'pos' if s['avg'] > 0 else 'neg'}'>{s['avg']:+.2f}</span>"
+            infl = _bar(share, good=s["pts"] > 0)
+        else:
+            right = calls = pts = avg = infl = "<span class='dim'>&mdash;</span>"
+        rows_html.append(
+            f"<tr data-state='{state}' data-right='{(s['right'] if is_graded else -1):.1f}' "
+            f"data-pts='{(s['pts'] if is_graded else 0):.2f}' "
+            f"data-avg='{(s['avg'] if is_graded else 0):.3f}' "
+            f"data-calls='{(s['n'] if is_graded else 0)}'>"
+            f"<td class='lt {state}'>{light}</td>"
+            f"<td><b>{esc(nm)}</b><div class='desc'>{esc(r['desc'])}</div></td>"
+            f"<td>{esc(r['group'])}</td><td>{w}</td><td>{clock}</td>"
+            f"<td>{calls}</td><td>{right}</td><td class='num'>{pts}</td>"
+            f"<td class='num'>{avg}</td><td>{infl}</td>"
+            f"<td class='dim'>{esc(why)}</td></tr>")
+
+    js = _PANEL_JS
+
+    return (cards +
+            "<div id='panelfilter' class='filters'>"
+            "<button data-f='graded' class='on'>graded today</button>"
+            "<button data-f='good'>made money</button>"
+            "<button data-f='bad'>cost money</button>"
+            "<button data-f='none'>not graded</button>"
+            "<button data-f='off'>switched off</button>"
+            "<button data-f='all'>show all</button>"
+            "<button id='desctoggle' class='alt'>+ descriptions</button></div>"
+            "<table id='paneltable'><thead><tr><th></th><th>judge / what it watches</th>"
+            "<th>group</th><th>weight</th><th>clock</th><th data-k='calls'>calls &#8645;</th>"
+            "<th data-k='right'>how often right &#8645;</th><th data-k='pts'>points &#8645;</th>"
+            "<th data-k='avg'>per call &#8645;</th><th>share of the day</th><th>verdict</th>"
+            "</tr></thead><tbody id='panelbody'>" + "".join(rows_html) + "</tbody></table>" + js)
+
+
+def one_page_shell(title, heading, body_html):
+    """The same look as the day report, for standalone pages like the cross-day view."""
+    return f"""<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{title}</title><style>{_ONE_PAGE_CSS}</style></head><body><div class="wrap">
+<h1>{heading}</h1>{body_html}
+<p class="foot">Same scoring code as the nightly report - this page reads it, it does
+not recompute it.</p></div>{_PANEL_JS}</body></html>"""
+
+
+def one_page_report(day, console_lines, sb_rows, sb_thin, ai_rec, parts):
+    """Everything about one day in a single self-contained HTML document.
+
+    parts: {"decisions": html, "trades": html, "judges": html} - any may be missing.
+    """
+    def esc(s):
+        return (str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+
+    styles, sections, nav = [], [], []
+
+    def add_section(sid, title, inner, subtitle="", open_by_default=True):
+        # title may legitimately contain HTML entities - escaping it printed "&mdash;"
+        # on the page. Titles are ours, not user data, so they pass through as written.
+        nav.append(f"<a href='#{sid}'>{title}</a>")
+        sub = f"<p class='sub'>{subtitle}</p>" if subtitle else ""
+        op = " open" if open_by_default else ""
+        sections.append(
+            f"<section id='{sid}'><details{op}><summary><h2>{title}</h2></summary>"
+            f"{sub}{inner}</details></section>")
+
+    # --- 0+1. ONE table: who they are AND how they did ----------------------------
+    add_section("panel", "The panel &mdash; everyone, and how they did today",
+                _panel_scoreboard_html(sb_rows, sb_thin, ai_rec),
+                "Every judge appears once. Green = it made money today, red = it cost "
+                "money, grey = too few calls to grade. Click a column heading to sort, "
+                "or use the buttons to filter.")
+
+    # --- the AI's veto record, in its own section ---------------------------------
+    _s, _b = _strip_to_body(scoreboard_html(day, sb_rows, sb_thin, ai_rec))
+    styles.append(_s)
+    _m = re.search(r"<h2>The AI's veto record</h2>(.*)$", _b, re.S)
+    add_section("veto", "The AI's veto record",
+                (_m.group(1) if _m else _b),
+                "Every time the panel wanted a trade and the AI said HOLD. A veto is "
+                "RIGHT when the trade it blocked would have lost money.")
+
+    # --- the cross-day scoreboard, dropdown and all, embedded right here ----------
+    # Built by the caller and handed in, so this function still never recomputes.
+    if parts.get("crossday"):
+        add_section("crossday", "The last days &mdash; who is actually right, over time",
+                    parts["crossday"],
+                    "One day is weather, several days is climate. Use the dropdown to "
+                    "switch window - every view was built from the SAME single reading "
+                    "of the tape, so two views can never disagree. Sort by CONSISTENCY "
+                    "(how many days it finished green), not by points. A past day's full "
+                    "night report is one click away at the top of its view.",
+                    open_by_default=False)
+
+    # --- 2. the full night report, verbatim ---------------------------------------
+    txt = "\n".join(str(x) for x in (console_lines or []))
+    add_section("report", "The full night report (all 15 tests)",
+                f"<pre class='console'>{esc(txt)}</pre>",
+                "Exactly what the console printed - nothing summarised away.",
+                open_by_default=False)
+
+    # --- 3. the existing learning pages, embedded ---------------------------------
+    for sid, title, sub in (
+            ("decisions", "Every decision", "Each cycle, the panel behind it, and what happened next."),
+            ("trades", "Trades", "Signal to position to close - or an honest 'nothing traded'."),
+            ("judges", "Every judge, call by call", "Each judge's votes graded on its own clock.")):
+        raw = (parts or {}).get(sid)
+        if not raw:
+            continue
+        s, b = _strip_to_body(raw)
+        if s:
+            styles.append(s)
+        add_section(sid, title, b, sub, open_by_default=False)
+
+    verdict = esc(SUMMARY_ONE_LINER or "")
+    shared = _ONE_PAGE_CSS
+    return f"""<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Gold-BookMap - {day:%Y-%m-%d} - full day report</title>
+<style>{shared}
+{''.join(styles)}
+</style></head><body><div class="wrap">
+<h1>Gold-BookMap &mdash; full day report &mdash; {day:%Y-%m-%d}</h1>
+<div class="verdict">{verdict}</div>
+<nav>{''.join(nav)}</nav>
+{''.join(sections)}
+<p class="foot">One page, one run. Every number here is the same number the console
+printed &mdash; this document embeds them, it does not recompute them, so the page and
+the terminal can never disagree. Times are Budapest local unless a line says UTC.</p>
+</div></body></html>"""
+
+
+def scoreboard_html(day, rows, thin, ai_rec):
+    def esc(s):
+        return (str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+    trs = []
+    for r in rows:
+        cls = "good" if r["avg"] > 0 else "bad"
+        w = f"{r['w']:.2f}" if r["w"] is not None else "-"
+        trs.append(
+            f"<tr class='{cls}'><td>{esc(r['name'])}</td><td>{esc(r['kind'])}</td>"
+            f"<td>{r['n']}</td><td>{r['right']:.0f}%</td><td>{r['pts']:+.1f}</td>"
+            f"<td>{r['avg']:+.2f}</td><td>{w}</td><td>{esc(r['note'])}</td></tr>")
+    veto = ai_rec.get("veto") or []
+    vhtml = "<p>No veto to grade on this day.</p>"
+    if veto:
+        net = sum(-v["pts"] for v in veto)
+        saved = [v for v in veto if v["pts"] < 0]
+        vrows = "".join(
+            f"<tr class='{'good' if v['pts'] < 0 else 'bad'}'><td>{v['dt']:%H:%M}</td>"
+            f"<td>{esc(v['dir'])}</td><td>{v['price']:.2f}</td><td>{v['pts']:+.1f}</td>"
+            f"<td>{'saved' if v['pts'] < 0 else 'cost'} {abs(v['pts']):.1f} pts</td>"
+            f"<td>{esc(v['reason'])}</td></tr>"
+            for v in sorted(veto, key=lambda x: x["dt"]))
+        vhtml = (f"<p>The panel wanted a trade <b>{len(veto)}</b> time(s) and the AI said HOLD. "
+                 f"<b>{len(saved)}</b> of those trades would have lost. Net effect of the "
+                 f"veto: <b>{net:+.1f} pts</b>.</p>"
+                 f"<table><tr><th>time</th><th>panel wanted</th><th>price</th>"
+                 f"<th>trade would have made</th><th>the veto</th><th>reason logged</th></tr>"
+                 f"{vrows}</table>")
+    thin_html = ("<p class='thin'>Not graded (fewer than 3 scored calls): "
+                 + esc(", ".join(t["name"] for t in thin)) + "</p>") if thin else ""
+    return f"""<!doctype html><html><head><meta charset="utf-8">
+<title>Scoreboard {day:%Y-%m-%d}</title><style>
+body{{font:14px/1.5 system-ui,Segoe UI,Arial;margin:24px;background:#0f1115;color:#e8e8ea}}
+h1{{font-size:20px}} h2{{font-size:16px;margin-top:28px}}
+table{{border-collapse:collapse;width:100%;margin-top:8px}}
+th,td{{padding:6px 8px;border-bottom:1px solid #2a2d34;text-align:left}}
+th{{color:#9aa0aa;font-weight:600}}
+tr.good td:nth-child(5),tr.good td:nth-child(6){{color:#5ad18a}}
+tr.bad td:nth-child(5),tr.bad td:nth-child(6){{color:#ef6a6a}}
+.thin{{color:#9aa0aa}} .note{{color:#9aa0aa;margin-top:4px}}
+</style></head><body>
+<h1>The scoreboard &mdash; {day:%Y-%m-%d}</h1>
+<p class="note">Every decider graded the same way: each call is replayed forward on the
+tape over that decider's own clock. "RIGHT%" is how often it pointed the correct way;
+"PER CALL" is the points it earned on average. The judges' numbers are the same ones
+test&nbsp;9 printed &mdash; this page reads them, it does not recompute them.</p>
+<table><tr><th>decider</th><th>type</th><th>calls</th><th>right%</th><th>pts</th>
+<th>per call</th><th>weight</th><th>note</th></tr>{''.join(trs)}</table>
+{thin_html}
+<h2>The AI's veto record</h2>
+<p class="note">A veto is <b>right</b> when the trade it blocked would have lost money.</p>
+{vhtml}
+</body></html>"""
+
+
+def collect_day_scores(diary, candles):
+    """THE judge scoring loop. test_9 calls it, and so does the cross-day scoreboard,
+    so a judge can never be scored two different ways (the B2 lesson, enforced in code
+    rather than in a comment). Returns (stats, used, srcs, recs)."""
     stats = defaultdict(lambda: {"votes": 0, "buy": 0, "sell": 0, "quiet": 0,
                                  "q_hit": 0, "q_tot": 0, "pts": [], "agree": 0,
                                  "agree_tot": 0, "by_hour": defaultdict(lambda: [0, 0]),
@@ -1829,6 +2425,374 @@ def test_9_judges(day, diary, ticks, candles):
                 st["by_regime"][regime][0] += 1
             if pts is not None:
                 st["pts"].append(pts)
+    return stats, used, srcs, recs
+
+
+def per_day_scores(days):
+    """Read every day ONCE. Returns (results, skipped) where results is a list of
+    (day, {judge: {n, hit, pts}}, {ai_label: {n, hit, pts}}, {judge: weight})."""
+    results, skipped = [], []
+    for day in days:
+        try:
+            decisions, _dp = load_decisions(day)
+            diary, _ep = load_diary(day)
+            ticks, _tp, _sc = load_ticks(day)
+        except Exception as e:
+            skipped.append((day, f"could not read this day ({type(e).__name__})"))
+            continue
+        if not ticks:
+            skipped.append((day, "no price data for this day - nothing to replay votes against"))
+            continue
+        if not diary:
+            skipped.append((day, "no diary for this day - the judges left no record"))
+            continue
+        candles = build_candles(ticks)
+        if not candles:
+            skipped.append((day, "tape too short to build M5 candles"))
+            continue
+        stats, used, _srcs, _recs = collect_day_scores(diary, candles)
+        if not used:
+            skipped.append((day, "diary carried no judge panel (older build)"))
+            continue
+        jd, wd = {}, {}
+        for j, st in stats.items():
+            if st["q_tot"] < 3:
+                continue
+            jd[j] = {"n": st["q_tot"], "hit": st["q_hit"],
+                     "pts": (sum(st["pts"]) if st["pts"] else 0.0)}
+            if st["w"]:
+                wd[j] = statistics.median(st["w"])
+        rec = ai_decision_record(decisions, ticks, candles)
+        ad = {}
+        for label, items, sign in (("THE AI (veto)", rec.get("veto") or [], -1),
+                                   ("THE AI (agreed)", rec.get("agreed") or [], +1),
+                                   ("THE AI (opposed)", rec.get("opposed") or [], -1)):
+            if len(items) < 3:
+                continue
+            hit = sum(1 for i in items if (i["pts"] < 0) == (sign < 0))
+            ad[label] = {"n": len(items), "hit": hit,
+                         "pts": sum(sign * i["pts"] for i in items)}
+        results.append((day, jd, ad, wd))
+    return results, skipped
+
+
+def aggregate_days(results):
+    """Fold per-day results into the same shape cross_day_scores() produced."""
+    per = defaultdict(lambda: {"days": 0, "n": 0, "hit": 0, "pts": 0.0,
+                               "day_pts": [], "day_right": [], "w": None,
+                               "green_days": 0, "kind": "judge", "strip": []})
+    for day, jd, ad, wd in results:
+        for src, kind in ((jd, "judge"), (ad, "ai")):
+            for name, v in src.items():
+                e = per[name]
+                e["kind"] = kind
+                e["days"] += 1
+                e["n"] += v["n"]
+                e["hit"] += v["hit"]
+                e["pts"] += v["pts"]
+                e["day_pts"].append(v["pts"])
+                e["day_right"].append(pct(v["hit"], v["n"]))
+                e["strip"].append((day, v["pts"]))
+                if v["pts"] > 0:
+                    e["green_days"] += 1
+                if name in wd:
+                    e["w"] = wd[name]
+    return per
+
+
+def cross_day_scores(days):
+    """Grade every decider over several days. Returns (per, used_days, skipped)."""
+    per = defaultdict(lambda: {"days": 0, "n": 0, "hit": 0, "pts": 0.0,
+                               "day_pts": [], "day_right": [], "w": None,
+                               "green_days": 0, "kind": "judge"})
+    used_days, skipped = [], []
+    for day in days:
+        try:
+            decisions, _dp = load_decisions(day)
+            diary, _ep = load_diary(day)
+            ticks, _tp, _sc = load_ticks(day)
+        except Exception as e:
+            skipped.append((day, f"could not read this day ({type(e).__name__})"))
+            continue
+        if not ticks:
+            skipped.append((day, "no price data for this day - nothing to replay votes against"))
+            continue
+        if not diary:
+            skipped.append((day, "no diary for this day - the judges left no record"))
+            continue
+        candles = build_candles(ticks)
+        if not candles:
+            skipped.append((day, "tape too short to build M5 candles"))
+            continue
+        stats, used, _srcs, _recs = collect_day_scores(diary, candles)
+        if not used:
+            skipped.append((day, "diary carried no judge panel (older build)"))
+            continue
+        used_days.append(day)
+        for j, st in stats.items():
+            if st["q_tot"] < 3:
+                continue
+            e = per[j]
+            e["days"] += 1
+            e["n"] += st["q_tot"]
+            e["hit"] += st["q_hit"]
+            dp = sum(st["pts"]) if st["pts"] else 0.0
+            e["pts"] += dp
+            e["day_pts"].append(dp)
+            e["day_right"].append(pct(st["q_hit"], st["q_tot"]))
+            if dp > 0:
+                e["green_days"] += 1
+            if st["w"]:
+                e["w"] = statistics.median(st["w"])
+        rec = ai_decision_record(decisions, ticks, candles)
+        for label, items, sign in (("THE AI (veto)", rec.get("veto") or [], -1),
+                                   ("THE AI (agreed)", rec.get("agreed") or [], +1),
+                                   ("THE AI (opposed)", rec.get("opposed") or [], -1)):
+            if len(items) < 3:
+                continue
+            e = per[label]
+            e["kind"] = "ai"
+            e["days"] += 1
+            e["n"] += len(items)
+            e["hit"] += sum(1 for i in items if (i["pts"] < 0) == (sign < 0))
+            dp = sum(sign * i["pts"] for i in items)
+            e["pts"] += dp
+            e["day_pts"].append(dp)
+            e["day_right"].append(pct(sum(1 for i in items if (i["pts"] < 0) == (sign < 0)),
+                                      len(items)))
+            if dp > 0:
+                e["green_days"] += 1
+    return per, used_days, skipped
+
+
+def print_cross_day(per, used_days, skipped):
+    rule()
+    say(f" THE CROSS-DAY SCOREBOARD - {len(used_days)} day(s) with data: "
+        f"{', '.join(f'{d:%m-%d}' for d in used_days) or 'none'}")
+    rule()
+    if skipped:
+        for d, why in skipped:
+            say(f"   skipped {d:%Y-%m-%d}: {why}")
+        say("   (skipped days are named, never silently folded into the totals)")
+    if not per:
+        say("   nothing could be graded across these days.")
+        say("")
+        return []
+    rows = []
+    for name, e in per.items():
+        avg = e["pts"] / e["n"] if e["n"] else 0.0
+        rows.append({
+            "name": name, "kind": e["kind"], "days": e["days"], "n": e["n"],
+            "right": pct(e["hit"], e["n"]), "pts": e["pts"], "avg": avg,
+            "green": e["green_days"],
+            "consistency": pct(e["green_days"], e["days"]) if e["days"] else 0.0,
+            "best": max(e["day_pts"]) if e["day_pts"] else 0.0,
+            "worst": min(e["day_pts"]) if e["day_pts"] else 0.0,
+            "swing": (statistics.pstdev(e["day_pts"]) if len(e["day_pts"]) > 1 else 0.0),
+            "w": e["w"],
+        })
+    rows.sort(key=lambda r: (r["consistency"], r["avg"]), reverse=True)
+    say(f"   {'DECIDER':<22}{'DAYS':>5}{'GREEN':>7}{'CONSIST':>9}{'CALLS':>7}"
+        f"{'RIGHT%':>8}{'PTS':>9}{'PER CALL':>10}{'BEST DAY':>10}{'WORST':>9}")
+    for r in rows:
+        say(f"   {r['name']:<22}{r['days']:>5}{r['green']:>7}{r['consistency']:>8.0f}%"
+            f"{r['n']:>7}{r['right']:>7.0f}%{r['pts']:>9.1f}{r['avg']:>10.2f}"
+            f"{r['best']:>10.1f}{r['worst']:>9.1f}")
+    say("")
+    say("   HOW TO READ THIS - 'CONSIST' is the column that matters. It is the share of")
+    say("   graded days this decider ended PROFITABLE. 100% over 5 days is a real edge;")
+    say("   40% with a big total means one lucky day is carrying it, and tomorrow it will")
+    say("   probably give the points back. Sort your weights by this column, not by PTS.")
+    if len(used_days) < 3:
+        say(f"   WARNING: only {len(used_days)} day(s) of data. That is still weather. Come")
+        say("   back at 5 days before moving any weight or deciding AI_AS_VOTE.")
+    trusted = [r for r in rows if r["days"] >= 3 and r["consistency"] >= 67 and r["avg"] > 0]
+    doubted = [r for r in rows if r["days"] >= 3 and r["consistency"] <= 33 and r["pts"] < 0]
+    if trusted:
+        say("   EARNING THEIR WEIGHT (profitable on 2 days in 3 or better): "
+            + ", ".join(r["name"] for r in trusted[:10]))
+    if doubted:
+        say("   CANDIDATES FOR A LOWER WEIGHT (losing, and rarely green): "
+            + ", ".join(r["name"] for r in doubted[:10]))
+    say("")
+    return rows
+
+
+def _strip_html(strip):
+    """One square per day, oldest left. Green = that day ended profitable."""
+    if not strip:
+        return "<span class='dim'>&mdash;</span>"
+    out = []
+    for day, pts in strip:
+        cls = "sq good" if pts > 0 else "sq bad"
+        out.append(f"<i class='{cls}' title='{day:%Y-%m-%d}: {pts:+.1f} pts'></i>")
+    return "<span class='strip'>" + "".join(out) + "</span>"
+
+
+def cross_day_page(results, skipped, n_asked):
+    """ONE page holding every window, switched by a dropdown. Nothing is recomputed
+    when you switch - every view below was built from the same single pass over the
+    tape, so two views can never disagree with each other."""
+    def esc(s):
+        return (str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+
+    days_sorted = [d for d, _, _, _ in results]
+    views = []          # (key, label, html)
+
+    def rows_for(subset):
+        per = aggregate_days(subset)
+        rows = []
+        for name, e in per.items():
+            avg = e["pts"] / e["n"] if e["n"] else 0.0
+            rows.append({
+                "name": name, "kind": e["kind"], "days": e["days"], "n": e["n"],
+                "right": pct(e["hit"], e["n"]), "pts": e["pts"], "avg": avg,
+                "green": e["green_days"],
+                "consistency": pct(e["green_days"], e["days"]) if e["days"] else 0.0,
+                "best": max(e["day_pts"]) if e["day_pts"] else 0.0,
+                "worst": min(e["day_pts"]) if e["day_pts"] else 0.0,
+                "w": e["w"], "strip": e["strip"]})
+        rows.sort(key=lambda r: (r["consistency"], r["avg"]), reverse=True)
+        return rows
+
+    windows = []
+    for k in (1, 3, 5, 8):
+        if k <= len(results) and k <= n_asked:
+            windows.append(k)
+    if len(results) not in windows and results:
+        windows.append(len(results))
+    for k in windows:
+        subset = results[-k:]
+        label = ("the most recent day with data" if k == 1 else f"the last {k} days with data")
+        views.append((f"w{k}", label, cross_day_html(rows_for(subset),
+                                                     [d for d, _, _, _ in subset], [])))
+    for day, jd, ad, wd in reversed(results):
+        rp = DATA_DIR() / f"report_{day:%Y-%m-%d}.html"
+        link = (f"<p class='sub'><a href='{rp.name}'>open the full night report for "
+                f"{day:%Y-%m-%d} &rarr;</a></p>") if rp.exists() else ""
+        views.append((f"d{day:%Y%m%d}", f"just {day:%Y-%m-%d} ({day:%a})",
+                      link + cross_day_html(rows_for([(day, jd, ad, wd)]), [day], [])))
+
+    opts = "".join(f"<option value='{k}'>{esc(lbl)}</option>" for k, lbl, _ in views)
+    blocks = "".join(
+        f"<div class='view' id='{k}' style='display:{'block' if i == 0 else 'none'}'>{h}</div>"
+        for i, (k, _lbl, h) in enumerate(views))
+    sk = ""
+    if skipped:
+        sk = ("<p class='sub'>Days skipped, and why (named on purpose - a missing day must "
+              "never quietly lower a total): "
+              + esc("; ".join(f"{d:%Y-%m-%d} - {w}" for d, w in skipped)) + "</p>")
+    picker = (f"<div class='picker'><label for='win'>Show me:&nbsp;</label>"
+              f"<select id='win'>{opts}</select>"
+              f"<span class='sub' style='margin-left:12px'>"
+              f"{len(results)} day(s) of tape were read for this page</span></div>{sk}")
+    js = """
+<script>
+(function(){
+  var sel=document.getElementById('win');
+  if(!sel) return;
+  sel.onchange=function(){
+    document.querySelectorAll('.view').forEach(function(v){v.style.display='none';});
+    var el=document.getElementById(sel.value);
+    if(el) el.style.display='block';
+  };
+})();
+</script>"""
+    return picker + blocks + js
+
+
+def cross_day_html(rows, used_days, skipped):
+    def esc(s):
+        return (str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+    roster, _active = panel_roster()
+    desc = {r["name"]: r["desc"] for r in roster}
+    trs = []
+    for r in rows:
+        st = "good" if r["avg"] > 0 and r["consistency"] >= 50 else (
+            "bad" if r["pts"] < 0 else "none")
+        d = desc.get(r["name"], "Gemini, the referee." if r["kind"] == "ai" else "")
+        trs.append(
+            f"<tr data-state='{st}' data-consistency='{r['consistency']:.1f}' "
+            f"data-right='{r['right']:.1f}' data-pts='{r['pts']:.2f}' "
+            f"data-avg='{r['avg']:.3f}' data-days='{r['days']}'>"
+            f"<td class='lt {st}'>&#9679;</td>"
+            f"<td><b>{esc(r['name'])}</b><div class='desc'>{esc(d)}</div></td>"
+            f"<td>{r['days']}</td><td>{_bar(r['consistency'], r['consistency'] >= 50)}</td>"
+            f"<td>{r['n']}</td><td>{_bar(r['right'], r['right'] >= 50)}</td>"
+            f"<td class='num'><span class='{'pos' if r['pts'] > 0 else 'neg'}'>{r['pts']:+.1f}</span></td>"
+            f"<td class='num'><span class='{'pos' if r['avg'] > 0 else 'neg'}'>{r['avg']:+.2f}</span></td>"
+            f"<td class='num pos'>{r['best']:+.1f}</td>"
+            f"<td class='num neg'>{r['worst']:+.1f}</td>"
+            f"<td>{_strip_html(r.get('strip') or [])}</td></tr>")
+    sk = ""
+    if skipped:
+        sk = ("<p class='sub'>Skipped days (named, never folded into the totals): "
+              + esc("; ".join(f"{d:%Y-%m-%d} - {w}" for d, w in skipped)) + "</p>")
+    return (f"<p class='sub'>{len(used_days)} day(s) with data: "
+            f"{esc(', '.join(f'{d:%Y-%m-%d}' for d in used_days))}</p>{sk}"
+            "<p class='sub'><b>CONSISTENCY is the column that matters</b> - the share of "
+            "graded days this decider ended profitable. One lucky day can make PTS look "
+            "good; it cannot make consistency look good.</p>"
+            "<table id='paneltable'><thead><tr><th></th><th>decider</th>"
+            "<th data-k='days'>days &#8645;</th><th data-k='consistency'>consistency &#8645;</th>"
+            "<th>calls</th><th data-k='right'>how often right &#8645;</th>"
+            "<th data-k='pts'>points &#8645;</th><th data-k='avg'>per call &#8645;</th>"
+            "<th>best day</th><th>worst day</th><th>day by day</th></tr></thead>"
+            f"<tbody id='panelbody'>{''.join(trs)}</tbody></table>")
+
+
+def run_cross_day(n, args):
+    """--scoreboard N"""
+    today = datetime.now(BUDA).date()
+    days = [today - timedelta(days=i) for i in range(int(n))]
+    days.sort()
+    results, skipped = per_day_scores(days)
+    per = aggregate_days(results)
+    used_days = [d for d, _, _, _ in results]
+    rows = print_cross_day(per, used_days, skipped)
+    if rows and not getattr(args, "no_html", False):
+        try:
+            body = cross_day_page(results, skipped, int(n))
+            html = one_page_shell(
+                f"Cross-day scoreboard - last {int(n)} days",
+                f"Who is actually right, over {len(used_days)} day(s)",
+                body)
+            p = DATA_DIR() / f"scoreboard_last{int(n)}days.html"
+            p.write_text(html, encoding="utf-8")
+            print(f"[saved] {p}")
+            print("        ^ the cross-day view: sort by CONSISTENCY, not by points")
+            if not getattr(args, "no_browser", False):
+                _open_in_browser(p)
+        except Exception as e:
+            print(f"[warn] cross-day page not written: {type(e).__name__}: {e}")
+    return 0
+
+
+def test_9_judges(day, diary, ticks, candles):
+    r = Report(9)
+    if not diary:
+        r.add("NA", "JUDGE PANEL",
+              "how did each judge behave: footprint, L3, iceberg, whale, VWAP...",
+              ["no diary (data/snapshots_history.jsonl) for this day -> the judges cannot be graded",
+               "start main.py with the v7.1 patch, let it run 08:00-23:00, then re-run this audit"])
+        return r, None
+    if not candles:
+        r.add("NA", "JUDGE PANEL",
+              "how did each judge behave: footprint, L3, iceberg, whale, VWAP...",
+              [f"diary has {len(diary)} records but there is no ticks.csv for {day:%Y-%m-%d} to score them against",
+               "judges can be listed but not graded -> I will not fake a verdict"])
+        panel_counts = Counter()
+        for rec in diary[-400:]:
+            panel, src = judge_panel(rec)
+            for j, d, w in panel:
+                panel_counts[j] += 1
+        if panel_counts:
+            say("        votes actually recorded per judge (who even spoke):")
+            for j, c in panel_counts.most_common(12):
+                say(f"           {j:<20} {c:>5}")
+        return r, None
+
+    stats, used, srcs, recs = collect_day_scores(diary, candles)
 
     if used == 0:
         r.add("WARN", "JUDGE PANEL", "how did each judge behave: footprint, L3, iceberg, whale, VWAP...",
@@ -1852,6 +2816,17 @@ def test_9_judges(day, diary, ticks, candles):
         avg = statistics.mean(st["pts"]) if st["pts"] else 0.0
         rows.append((j, st, acc, pts, avg))
     rows.sort(key=lambda x: (x[2], x[3]), reverse=True)
+
+    # 24n: publish, do not recompute. The scoreboard below reads exactly these numbers,
+    # so a judge can never show one score in the panel and another on the scoreboard.
+    JUDGE_SCORES.clear()
+    for _j, _st in stats.items():
+        JUDGE_SCORES[_j] = {
+            "votes": _st["votes"], "n": _st["q_tot"], "hit": _st["q_hit"],
+            "pts": list(_st["pts"]),
+            "w": (statistics.median(_st["w"]) if _st["w"] else JUDGE_DEFAULT_W.get(_j, 0.5)),
+            "agree": _st["agree"], "agree_tot": _st["agree_tot"],
+        }
 
     say(f"        {used}/{len(recs)} diary records had a judge panel "
         f"({', '.join(f'{k}:{v}' for k, v in srcs.items())}) | "
@@ -3115,6 +4090,11 @@ def main(argv=None):
     ap.add_argument("--latest", action="store_true",
                     help="audit the newest day that has a log (no need to remember dates)")
     ap.add_argument("--html", help="write a styled report here (default: data/day_report_<date>.html)")
+    ap.add_argument("--crossday-days", type=int, default=5,
+                    help="how many days the cross-day section inside the one-page "
+                         "report should cover (default 5, 0 = off)")
+    ap.add_argument("--no-crossday", action="store_true",
+                    help="do not embed the cross-day section (faster, reads one day only)")
     ap.add_argument("--no-html", action="store_true", help="skip the HTML report")
     ap.add_argument("--no-index", action="store_true", help="skip rewriting data/index.html")
     ap.add_argument("--no-browser", action="store_true",
@@ -3139,6 +4119,9 @@ def main(argv=None):
                         help="do not write the decisions/trades HTML pages for the day")
     ap.add_argument("--weight-ab", nargs="?", const=3, type=int, metavar="N", default=None,
                         help="compare judge-weight sets on the last N days (default 3)")
+    ap.add_argument("--scoreboard", nargs="?", const=5, type=int, metavar="N", default=None,
+                        help="cross-day scoreboard: grade every judge and the AI over the "
+                             "last N days and show which are CONSISTENTLY right (default 5)")
     ap.add_argument("--walk-forward", type=int, metavar="N", default=0,
                         help="learn on N days, test on the next, rolling - no peeking forward")
     ap.add_argument("--open-html", dest="open_html", metavar="PATH",
@@ -3310,6 +4293,9 @@ def main(argv=None):
             print(f"[warn] could not save the explain text: {e}")
         return 0
 
+    if getattr(args, "scoreboard", None):
+        return run_cross_day(args.scoreboard, args)
+
     if args.weight_ab is not None or args.walk_forward:
         if ins is None:
             print("[fail] the insight layer is missing - re-copy tools/insight.py from the kit")
@@ -3432,6 +4418,17 @@ def main(argv=None):
         print(f"[warn] candle build failed ({type(_ce).__name__}: {_ce}) -> judge clock left empty")
         candles = []
     reports["judges"], _judges = _safe_test(9, "JUDGE PANEL", test_9_judges, day, diary, ticks, candles)
+    # 24n: the scoreboard - judges and the AI side by side, one grading method
+    try:
+        AI_RECORD.clear()
+        AI_RECORD.update(ai_decision_record(decisions, ticks, candles))
+        _sb_rows, _sb_thin = build_scoreboard(AI_RECORD)
+        SCOREBOARD.clear()
+        SCOREBOARD.extend(_sb_rows)
+        SCOREBOARD_THIN.clear()
+        SCOREBOARD_THIN.extend(_sb_thin)
+    except Exception as _e:
+        print(f"[warn] scoreboard not built: {type(_e).__name__}: {_e}")
     reports["cov"], _ = _safe_test(10, "DIARY COVERAGE", test_10_judge_coverage, day, diary)
     reports["ver"], _ = _safe_test(11, "VERSION CHECK", test_11_version_config, text, day)
     reports["lat"], _lat = _safe_test(12, "SPEED CHECK", test_12_latency, text)
@@ -3595,7 +4592,8 @@ def main(argv=None):
                 series = _minute_prices(day)
                 if series:
                     dp = DATA_DIR() / f"decisions_{day:%Y-%m-%d}.html"
-                    dp.write_text(ins2.decisions_page(day, decisions, diary, series), encoding="utf-8")
+                    _PAGE_PARTS["decisions"] = ins2.decisions_page(day, decisions, diary, series)
+                    dp.write_text(_PAGE_PARTS["decisions"], encoding="utf-8")
                     print(f"[saved] {dp}   <- every decision with the panel behind it and what happened next")
                     outs, _op = _outcomes_for_day(day)
                     tracked = _as_dict(read_json(DATA_DIR() / "tracked_bot_positions.json"))
@@ -3603,14 +4601,58 @@ def main(argv=None):
                     truth, _why = _mt5_truth(day)
                     mt5_txt = (f"{truth['open_now']} open position(s) now, {truth['deals_total']} deal(s) "
                                f"that day, net {truth['pnl']:+.2f}" if truth else None)
-                    tp.write_text(ins2.trades_page(day, decisions, outs, tracked, mt5_txt), encoding="utf-8")
+                    _PAGE_PARTS["trades"] = ins2.trades_page(day, decisions, outs, tracked, mt5_txt)
+                    tp.write_text(_PAGE_PARTS["trades"], encoding="utf-8")
                     print(f"[saved] {tp}   <- signal -> position -> close, or an honest 'nothing traded'")
                     if hasattr(ins2, "judges_page"):
                         gp = DATA_DIR() / f"judges_{day:%Y-%m-%d}.html"
-                        gp.write_text(ins2.judges_page(day, diary, series, decisions), encoding="utf-8")
+                        _PAGE_PARTS["judges"] = ins2.judges_page(day, diary, series, decisions)
+                        gp.write_text(_PAGE_PARTS["judges"], encoding="utf-8")
                         print(f"[saved] {gp}   <- every judge, every call it made, and what happened next")
             except Exception as e:
                 print(f"[warn] decisions/trades pages: {type(e).__name__}: {e}")
+
+    # 24n: one place to see who is right - printed for every day, HTML alongside
+    try:
+        print_roster()
+        print_scoreboard(day, SCOREBOARD, SCOREBOARD_THIN, AI_RECORD)
+        if not getattr(args, "no_html", False) and (SCOREBOARD or AI_RECORD.get("veto")):
+            _sp = DATA_DIR() / f"scoreboard_{day:%Y-%m-%d}.html"
+            _sp.write_text(scoreboard_html(day, SCOREBOARD, SCOREBOARD_THIN, AI_RECORD),
+                           encoding="utf-8")
+            print(f"[saved] {_sp}   <- every judge and the AI, ranked, plus the AI's veto record")
+    except Exception as _e:
+        print(f"[warn] scoreboard not printed: {type(_e).__name__}: {_e}")
+
+    # 24o: ONE page with everything on it. Written last, because it embeds the others.
+    if not getattr(args, "no_html", False):
+        try:
+            # 24t: the cross-day window ENDS on the day being audited, not on today,
+            # so re-auditing an old date shows that date's neighbourhood, not this week's.
+            _nd = int(getattr(args, "crossday_days", 5) or 5)
+            if _nd > 0 and not getattr(args, "no_crossday", False):
+                try:
+                    _days = sorted(day - timedelta(days=i) for i in range(_nd))
+                    _res, _skp = per_day_scores(_days)
+                    if _res:
+                        _PAGE_PARTS["crossday"] = cross_day_page(_res, _skp, _nd)
+                        print(f"[one-page] cross-day section: {len(_res)} day(s) of tape "
+                              f"folded in, {len(_skp)} named as skipped")
+                    else:
+                        print("[one-page] cross-day section skipped: no other day has "
+                              "usable tape yet (this is normal on your first days)")
+                except Exception as _e:
+                    print(f"[warn] cross-day section not embedded: "
+                          f"{type(_e).__name__}: {_e}")
+            _op = DATA_DIR() / f"report_{day:%Y-%m-%d}.html"
+            _op.write_text(one_page_report(day, OUT, SCOREBOARD, SCOREBOARD_THIN,
+                                           AI_RECORD, _PAGE_PARTS), encoding="utf-8")
+            print(f"[saved] {_op}")
+            print(f"        ^ THIS ONE HAS EVERYTHING: verdict, scoreboard, the AI's veto "
+                  f"record, all 15 tests, every decision, trades and judges. Open only this.")
+            to_open = _op
+        except Exception as _e:
+            print(f"[warn] one-page report not written: {type(_e).__name__}: {_e}")
 
     if _sfx:
         print("[index] skipped: this was a filtered grade - the day's whole-day card stays as it is")
