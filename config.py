@@ -291,6 +291,16 @@ def _refresh() -> None:
 
     g["MACRO_ENABLED"] = _fget("MACRO_ENABLED", "1") == "1"
     g["MACRO_CACHE_MINUTES"] = _fint("MACRO_CACHE_MINUTES", 15)
+    # 24u: the 8 retired judges. They still write their note lines (so the audit can
+    # keep grading them) but their vote is not counted. Blank the list to restore all.
+    g["RETIRED_JUDGES"] = set(
+        x.strip() for x in _fget(
+            "RETIRED_JUDGES",
+            "macro_yield,macro_dxy,macro_vix,vwap_zscore,spoof_invert_loose,"
+            "iceberg_legacy,l3_ofi_streak,delta_pressure").split(",") if x.strip())
+    # 24u: the macro OPPOSITION BRAKE is separate from the macro VOTES. Retiring the
+    # macro judges removes their votes; this keeps the brake. 0 disables it loudly.
+    g["MACRO_BRAKE_ENABLED"] = _fget("MACRO_BRAKE_ENABLED", "1") == "1"
     g["MACRO_TIMEOUT"] = _fint("MACRO_TIMEOUT", 8)
 
     g["MONITOR_POLL_SECONDS"] = _fint("MONITOR_POLL_SECONDS", 60)

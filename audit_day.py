@@ -59,7 +59,7 @@ def LOGS_DIR():
 # BUILD MARKER - the shell scripts check for THIS string instead of a byte count,
 # so an intentional edit can never make morning_check.sh yell "re-copy it from the
 # kit" at a perfectly good file. Bump the date whenever you ship a new auditor.
-BUILD = "audit-2026-09-24t"
+BUILD = "audit-2026-09-24u"
 BASE_DIR_FOR_ENV = Path(__file__).resolve().parent
 
 
@@ -1955,6 +1955,19 @@ JUDGE_ROSTER = {
     "macro_vix":          ("Macro", "Volatility/fear gauge."),
     "macro_risk":         ("Macro", "Overall risk-on vs risk-off mood."),
     "news_sentiment":     ("Macro", "Tone of the incoming news feed."),
+}
+
+
+RETIRED_JUDGES = {
+    # 24u, owner's decision 2026-09-24. Still graded by the audit, no longer voting.
+    "macro_yield": "retired: 120-min clock, wrong horizon for a 15-min scalp",
+    "macro_dxy": "retired: 120-min clock, wrong horizon for a 15-min scalp",
+    "macro_vix": "retired: 120-min clock, wrong horizon for a 15-min scalp",
+    "vwap_zscore": "retired: same distance as vwap_bands, different units",
+    "spoof_invert_loose": "retired: spoof_invert with a looser threshold",
+    "iceberg_legacy": "retired: superseded by iceberg",
+    "l3_ofi_streak": "retired: l3_net_flow over another window",
+    "delta_pressure": "retired: footprint_delta on a slower clock",
 }
 
 

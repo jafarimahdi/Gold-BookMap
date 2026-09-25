@@ -190,6 +190,24 @@ from pathlib import Path
 from datetime import datetime, timezone
 sys.path.insert(0, ".")
 import main
+
+# 24u: freeze this fixture at midday UTC. main stamps rows and names day-files from
+# datetime.now(); at 23:58 UTC that lands on a different Budapest day than the one the
+# auditor reads, and the contract check fails for a reason that has nothing to do with
+# the robot. Midday is the one hour where every calendar agrees.
+class _FrozenDT(datetime):
+    _BASE = datetime.now(timezone.utc).replace(hour=12, minute=0, second=0,
+                                               microsecond=0)
+
+    @classmethod
+    def now(cls, tz=None):
+        return cls._BASE.astimezone(tz) if tz is not None else cls._BASE.replace(tzinfo=None)
+
+    @classmethod
+    def utcnow(cls):
+        return cls._BASE.replace(tzinfo=None)
+
+main.datetime = _FrozenDT
 # every path the writers use, pointed at this scratch project
 main.DATA_DIR = Path("data")
 main.LOGS_DIR = Path("logs")
@@ -204,7 +222,7 @@ main._log_session_start("once")
 snap = types.SimpleNamespace(
     symbol="XAUUSD", price=2033.1, signal_direction="BUY", signal_strength=12.0,
     confidence=55.0, regime="TREND", divergence=0.0, notes=["contract test"],
-    judge_votes=[], timestamp=datetime.now(timezone.utc),
+    judge_votes=[], timestamp=_FrozenDT.now(timezone.utc),
     news=types.SimpleNamespace(news_state="CALM", minutes_to_next_event=60,
                                next_event_title="none"))
 dec = types.SimpleNamespace(action="BUY", confidence=55.0, rationale="contract test")
@@ -288,7 +306,18 @@ def case_writer_reader(fails: list) -> None:
         if w.returncode != 0 or "WROTE-OK" not in w.stdout:
             fails.append("contract: the robot's writers failed: " + (w.stderr or w.stdout)[-300:])
             return
-        day, ymd = datetime.now().strftime("%Y-%m-%d"), datetime.now().strftime("%Y%m%d")
+        # 24u: TWO calendars are in play here and they are not the same one.
+        #   - the robot STAMPS every row with datetime.now(timezone.utc) and names its
+        #     per-day files from the UTC date  -> that is the writers' calendar
+        #   - audit_day BUCKETS rows into days by Budapest local time
+        #     -> that is the readers' calendar
+        # Between 22:00 and 24:00 UTC (00:00-02:00 Budapest in summer) they disagree by
+        # one day. A naive datetime.now() matched neither and the contract check failed
+        # every night after midnight. Ask each side in its own calendar.
+        # the fixture's clock is frozen at 12:00 UTC (see _FrozenDT in the writer),
+        # so the UTC date and the Budapest date are the same day by construction.
+        _now = datetime.now(timezone.utc)
+        day, ymd = _now.strftime("%Y-%m-%d"), _now.strftime("%Y%m%d")
         for want in (f"run_config_{ymd}.json", f"diary_{ymd}.jsonl", "decisions_log.csv",
                      "snapshots_history.jsonl", "tracked_bot_positions.json"):
             if not (proj / "data" / want).exists():

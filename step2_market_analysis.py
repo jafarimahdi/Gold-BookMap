@@ -255,6 +255,10 @@ class MarketSnapshot:
     data_market: str = ""
     trade_market: str = ""
     notes: List[str] = field(default_factory=list)
+    # v7.1: the per-judge panel (who voted, which way, at what weight, from
+    # which note). Written from `notes` so the daily audit can score each judge
+    # instead of only the 4 team aggregates. Empty for non-BookMap providers.
+    judge_votes: List[Dict[str, Any]] = field(default_factory=list)
     # Data-quality labels prevent estimated CFD flow from being mistaken for
     # exchange trade prints or Level 3 data.
     data_quality: Dict[str, str] = field(default_factory=dict)
@@ -1930,6 +1934,10 @@ class SignalEngine:
         """Return (signal_strength 0-100, direction, confidence 0-100, notes)."""
         votes: List[Tuple[float, float]] = []
         macro_pairs: List[Tuple[float, float]] = []   # macro votes, for the opposition rule
+        # 24u: one gate for every retired judge. Returns True if this judge may vote.
+        _retired = getattr(config, "RETIRED_JUDGES", set()) or set()
+        def _may_vote(judge_name):
+            return judge_name not in _retired
         notes: List[str] = []
 
         # ---- 0) NEWS-TIME GATE ----------------------------------------------
@@ -2188,7 +2196,7 @@ class SignalEngine:
                 # For now use same OFI but boost if recent (we will enhance with minute buckets in future)
                 # Approximate: if buy_streak or sell_streak >=3, it's recent -> boost 2x
                 ofi_w = float(getattr(config, "SIGNAL_W_L3_OFI", 0.8))
-                if level3.buy_streak >= 3 or level3.sell_streak >= 3:
+                if (level3.buy_streak >= 3 or level3.sell_streak >= 3) and _may_vote('l3_ofi_streak'):
                     ofi_w *= 2.0
                     notes.append(f"v7.0 L3 OFI time-weighted recent streak B{level3.buy_streak}/S{level3.sell_streak} -> weight 2x {ofi_w:.1f}")
                 votes.append((np.tanh(level3.ofi / max(aggr_vol, 1.0) * 5.0), ofi_w))
@@ -2367,10 +2375,10 @@ class SignalEngine:
 
                 # Fallback old logic if no meta
                 if level3.order_book_imbalance > 0.2:
-                    votes.append((+1.0, iceberg_w * ib_mult))
+                    if _may_vote('iceberg_legacy'): votes.append((+1.0, iceberg_w * ib_mult))
                     notes.append(f"L3 icebergs {level3.iceberg_events} imb +{level3.order_book_imbalance:.2f} w {iceberg_w*ib_mult:.1f} -> BUY (M3)")
                 elif level3.order_book_imbalance < -0.2:
-                    votes.append((-1.0, iceberg_w * ib_mult))
+                    if _may_vote('iceberg_legacy'): votes.append((-1.0, iceberg_w * ib_mult))
                     notes.append(f"L3 icebergs {level3.iceberg_events} imb {level3.order_book_imbalance:.2f} w {iceberg_w*ib_mult:.1f} -> SELL (M3)")
                 else:
                     if level3.iceberg_levels:
@@ -2402,10 +2410,10 @@ class SignalEngine:
                         votes.append((+1.0, spoof_w * spoof_invert_w))
                         notes.append(f"SPOOF_INVERT fake asks {spoof_ask} (resistance trap) w {spoof_w*spoof_invert_w:.1f} -> BUY")
                     elif spoof_bid > spoof_ask:
-                        votes.append((-1.0, spoof_w * spoof_invert_w * 0.8))
+                        if _may_vote('spoof_invert_loose'): votes.append((-1.0, spoof_w * spoof_invert_w * 0.8))
                         notes.append(f"SPOOF_INVERT more fake bids {spoof_bid} vs asks {spoof_ask} -> SELL")
                     elif spoof_ask > spoof_bid:
-                        votes.append((+1.0, spoof_w * spoof_invert_w * 0.8))
+                        if _may_vote('spoof_invert_loose'): votes.append((+1.0, spoof_w * spoof_invert_w * 0.8))
                         notes.append(f"SPOOF_INVERT more fake asks {spoof_ask} vs bids {spoof_bid} -> BUY")
             except Exception as se:
                 notes.append(f"spoof vote error: {se}")
@@ -2514,7 +2522,7 @@ class SignalEngine:
         z = volume_profile.vwap_zscore
         if regime == "RANGE" and abs(z) > 1.5:
             fade_w = (0.8 if float(volatility.volatility_rank or 0.0) < 0.5 else 0.4) * mean_rev_mult
-            votes.append((-np.sign(z) * min(abs(z) / 2.0, 1.0), fade_w))
+            if _may_vote('vwap_zscore'): votes.append((-np.sign(z) * min(abs(z) / 2.0, 1.0), fade_w))
             notes.append("VWAP z-score %.1f -> mean reversion fade (adaptive %.2f)" % (z, fade_w))
 
         # v6.0 VWAP Bands ±1σ/±2σ mean reversion + v7.0 P1 #5 real std
@@ -2677,10 +2685,10 @@ class SignalEngine:
         # Delta vote: direct buy vs sell volume
         try:
             if order_flow.buying_pressure > 60:
-                votes.append((+1.0, 0.6))
+                if _may_vote('delta_pressure'): votes.append((+1.0, 0.6))
                 notes.append(f"Delta Buy% {order_flow.buying_pressure:.1f}% >60% -> BUY")
             elif order_flow.selling_pressure > 60:
-                votes.append((-1.0, 0.6))
+                if _may_vote('delta_pressure'): votes.append((-1.0, 0.6))
                 notes.append(f"Delta Sell% {order_flow.selling_pressure:.1f}% >60% -> SELL")
         except:
             pass
@@ -2723,7 +2731,8 @@ class SignalEngine:
             # M4: increase weight to 1.0 during HIGH events
             w_yield = macro_high_w if news.impact_level == "HIGH" else 0.8
             v = (-np.clip(y_chg / 0.02, -1.0, 1.0), w_yield)
-            votes.append(v); macro_pairs.append(v)
+            macro_pairs.append(v)          # brake: always
+            if _may_vote('macro_yield'): votes.append(v)
             notes.append("10Y %s %.2f%%/5d (w %.1f)" %
                          ("rising" if y_chg > 0 else "falling", abs(y_chg) * 100.0, w_yield))
         # Rising dollar pressures USD-priced gold -> bearish
@@ -2731,7 +2740,8 @@ class SignalEngine:
         if abs(d_chg) > 1e-6:
             w_dxy = macro_high_w if news.impact_level == "HIGH" else 0.6
             v = (-np.clip(d_chg / 0.01, -1.0, 1.0), w_dxy)
-            votes.append(v); macro_pairs.append(v)
+            macro_pairs.append(v)          # brake: always
+            if _may_vote('macro_dxy'): votes.append(v)
             notes.append("DXY %s %.2f%%/5d (w %.1f)" %
                          ("rising" if d_chg > 0 else "falling", abs(d_chg) * 100.0, w_dxy))
         # VIX stress spike vs its own 20-session median -> safe-haven bid.
@@ -2739,7 +2749,8 @@ class SignalEngine:
         if v_spk > 0.05:
             w_vix = macro_high_w if news.impact_level == "HIGH" else 0.4
             v = (+np.clip(v_spk / 0.20, 0.0, 1.0), w_vix)
-            votes.append(v); macro_pairs.append(v)
+            macro_pairs.append(v)          # brake: always
+            if _may_vote('macro_vix'): votes.append(v)
             notes.append("VIX stress +%.0f%% vs 20d median (w %.1f)" % (v_spk * 100.0, w_vix))
         if macro.risk_sentiment == "RISK_OFF":
             w_risk = macro_high_w if news.impact_level == "HIGH" else 0.5
@@ -2974,6 +2985,8 @@ class SignalEngine:
         self.last_macro_bias = 0.0   # v4.4: fresh reading for the PM
         if direction in ("BUY", "SELL"):
             dir_sign = 1.0 if direction == "BUY" else -1.0
+            if not getattr(config, "MACRO_BRAKE_ENABLED", True):
+                macro_pairs = []
             m_w = sum(w for _, w in macro_pairs)
             if m_w > 0:
                 macro_bias = sum(s * w for s, w in macro_pairs) / m_w  # -1..+1
@@ -2997,6 +3010,12 @@ class SignalEngine:
                 else:
                     direction = "NEUTRAL"
 
+        # 24u: never let a retirement be silent - the log must show it every cycle.
+        if _retired:
+            notes.append("RETIRED (not voting): " + ",".join(sorted(_retired))
+                         + (" | macro brake ON" if getattr(config, "MACRO_BRAKE_ENABLED", True)
+                            else " | macro brake OFF"))
+
         # confidence = agreement + strength
         agreement = sum(1 for s, _ in votes if (direction == "BUY" and s > 0)
                         or (direction == "SELL" and s < 0)
@@ -3018,6 +3037,168 @@ class SignalEngine:
 
         return (round(abs(score_scaled), 2), direction,
                 round(float(np.clip(confidence, 0, 100)), 2), notes)
+
+
+# ----------------------------------------------------------------------------- #
+# 11b. JUDGE PANEL  (who voted, which way, at what weight)
+# ----------------------------------------------------------------------------- #
+#
+# Every judge in `aggregate()` already announces itself in `notes`; only the
+# *label* was missing. Rather than touching ~90 votes.append() call sites (and
+# risking a behaviour change in a live build), the panel is derived from the
+# notes with one table of patterns. `audit_day.py` uses the same table, so a
+# diary recorded WITHOUT judge_votes can still be scored retroactively.
+
+_JUDGE_DEFAULT_W = {
+    "footprint_delta": 1.0, "footprint_levels": 0.4, "l3_imbalance": 0.8,
+    "l3_aggr_limit": 0.7, "l3_ofi_streak": 1.0, "l3_net_flow": 1.5,
+    "l3_large_ofi": 0.6, "iceberg": 1.0, "iceberg_noise": 0.0,
+    "iceberg_legacy": 0.6, "spoof_invert": 0.6, "spoof_invert_loose": 0.4,
+    "whale_walls": 1.4, "whale_balanced": 0.0, "queue_pos": 0.5,
+    "microprice": 0.6, "absorption": 0.6, "sweep": 0.9, "vwap_trend": 0.6,
+    "vwap_bands": 0.8, "vwap_zscore": 0.5, "poc_day": 0.5,
+    "supply_demand": 0.6, "value_area": 0.5, "htf_poc": 0.7,
+    "cvd_divergence": 0.6, "cvd_momentum": 0.5, "delta_pressure": 0.6,
+    "volume_roc": 0.4, "macro_yield": 0.8, "macro_dxy": 0.6, "macro_vix": 0.4,
+    "macro_risk": 0.5, "news_sentiment": 1.0, "mtf": 0.5, "trend_macd": 0.5,
+    "sma20": 0.4,
+}
+
+_JUDGE_PATTERNS = [
+    # (judge, regex)  groups: (dir)(weight)  - "no vote" lines still score, dir=0
+    ("footprint_delta",   r"footprint delta ([+-][\d.]+) dominant ([\d.]+) strength ([\d.]+) -> (BUY|SELL)"),
+    ("footprint_levels",  r"footprint (buying|selling) levels (\d+) > (?:selling|buying) (\d+) -> (BUY|SELL)"),
+    ("l3_imbalance",      r"(?:v6\.0 )?L3 (?:distance-weighted )?imbalance ([+-][\d.]+)(?:.*?-> (BUY|SELL))?"),
+    ("l3_aggr_limit",     r"Aggressive vs limit: (buy|sell) ratio ([\d.]+) vol ([\d.]+) -> (BUY|SELL) power"),
+    ("l3_ofi_streak",     r"L3 OFI time-weighted recent streak B(\d+)/S(\d+).*?-> weight ([\d.]+) ([+-][\d.]+)"),
+    ("l3_net_flow",       r"L3 NET FLOW (BUY|SELL) ([+-][\d.]+) \(buys ([\d.]+) vs sells ([\d.]+)\) w ([\d.]+)"),
+    ("l3_large_ofi",      r"L3 large orders (\d+) OFI ([+-][\d.]+) -> (BUY|SELL)"),
+    ("iceberg",           r"ICEBERG_(SUPPORT|RESISTANCE) @?[ ]?([\d.]*)?.*?(?:refills (\d+))?.*?w ([\d.]+)(?: -> (BUY|SELL))?"),
+    ("iceberg_noise",     r"ICEBERG weak (support|resistance) @ ([\d.]+).*?no vote"),
+    ("iceberg_legacy",    r"L3 icebergs (\d+) imb ([+-][\d.]+) w ([\d.]+) -> (BUY|SELL)"),
+    ("spoof_invert",      r"SPOOF_INVERT fake (bids|asks) (\d+).*?w ([\d.]+) -> (BUY|SELL)"),
+    ("spoof_invert_loose", r"SPOOF_INVERT more fake (bids|asks) (\d+) vs"),
+    ("whale_walls",       r"L3 whale (SUPPORT|RESISTANCE) (\d+) walls ([\d.]+) lots"),
+    ("whale_balanced",    r"L3 whales balanced bid ([\d.]+) ask ([\d.]+)"),
+    ("queue_pos",         r"QUEUE_POS good (bid|ask) ratio ([\d.]+)"),
+    ("microprice",        r"microprice ([\d.]+) vs mid ([\d.]+) dev ([+-][\d.]+)bps -> (BUY|SELL)"),
+    ("absorption",        r"absorption (?:net )?([+-][\d.]+).*?-> (BUY|SELL)"),
+    ("sweep",             r"v6\.0 SWEEP (BULLISH|BEARISH).*?w([+-]?[\d.]+)"),
+    ("vwap_trend",        r"VWAP trend (UP|DOWN) price ([\d.]+) vs VWAP ([\d.]+)"),
+    ("vwap_bands",        r"v6\.0 VWAP (\+\d\.\d|\+\d|\+2\.5|\+2|\+1|-2\.5|-2|-1)\u03c3?.*?-> (BUY|SELL)"),
+    ("vwap_zscore",       r"VWAP z-score ([+-]?[\d.]+)"),
+    ("poc_day",           r"POC day ([\d.]+) price ([\d.]+) -> (above|below)"),
+    ("supply_demand",     r"near (supply|demand) zone ([\d.]+)"),
+    ("value_area",        r"near (VAH|VAL) ([\d.]+)|price ([\d.]+) (?:above VAH|below VAL) ([\d.]+)"),
+    ("htf_poc",           r"HTF H(1|4) POC ([\d.]+) (?:far )?(above|below) price.*?magnet.*?-> (BUY|SELL)|(?:mean reversion|strong| ) (BUY|SELL)"),
+    ("cvd_divergence",    r"(bullish|bearish) CVD divergence"),
+    ("cvd_momentum",      r"CVD (rising|falling) delta ([+-]?[\d.]+) CVD ([+-]?[\d.]+)"),
+    ("delta_pressure",    r"Delta (Buy|Sell)% ([\d.]+) >60% -> (BUY|SELL)"),
+    ("volume_roc",        r"volume RoC \+([\d.]+)% with price (up|down) -> (bullish|bearish)"),
+    ("macro_yield",       r"10Y (rising|falling) ([\d.]+)%/5d \(w ([\d.]+)\)"),
+    ("macro_dxy",         r"DXY (rising|falling) ([\d.]+)%/5d \(w ([\d.]+)\)"),
+    ("macro_vix",         r"VIX stress \+([\d.]+)%"),
+    ("macro_risk",        r"risk-(off|on)"),
+    ("news_sentiment",    r"HIGH impact sentiment ([+-][\d.]+) weight ([\d.]+)"),
+    ("mtf",               r"^MTF (.+)"),
+    ("trend_macd",        r"^(?:v6\.0 )?trend[^\n]*MACD[^\n]*"),
+    ("sma20",             r"^SMA20[^\n]*"),
+]
+
+
+def parse_judge_panel(notes: List[str]) -> List[Dict[str, Any]]:
+    """Derive the per-judge panel from the Step-2 notes.
+
+    Returns [{judge, dir (-1/0/+1), weight, raw}] in note order. Never raises:
+    a note that matches nothing is simply not a judge line.
+    """
+    import re as _re
+    out: List[Dict[str, Any]] = []
+    for note in notes or []:
+        if not isinstance(note, str) or len(note) > 400:
+            continue
+        for judge, pat in _JUDGE_PATTERNS:
+            m = _re.search(pat, note)
+            if not m:
+                continue
+            d, w = 0.0, 0.0
+            g = m.groups()
+            for token in g:
+                if token in ("BUY", "bullish", "above", "rising_buy", "up"):
+                    d = 1.0
+                elif token in ("SELL", "bearish", "below", "down"):
+                    d = -1.0
+            # the applied weight is the only number we need to score the panel
+            mw = _re.search(r"(?:\bw|weight)\s+([\d.]+)", note)
+            if mw:
+                try:
+                    w = float(mw.group(1))
+                except ValueError:
+                    w = 0.0
+            if not w:
+                w = _JUDGE_DEFAULT_W.get(judge, 0.5)
+            if judge in ("footprint_delta", "l3_imbalance", "l3_net_flow",
+                         "l3_large_ofi", "spoof_invert_loose", "vwap_zscore"):
+                try:
+                    lead = float(g[0]) if g else 0.0
+                    if judge == "footprint_delta" and g and g[0].lstrip("+-").replace(".", "").isdigit():
+                        lead = float(g[0])
+                except (TypeError, ValueError):
+                    lead = 0.0
+                if judge == "footprint_delta":
+                    d = 1.0 if lead > 0 else (-1.0 if lead < 0 else 0.0)
+                elif judge == "spoof_invert_loose":
+                    d = -1.0 if (g and g[0] == "bids") else 1.0
+                elif judge in ("l3_net_flow",):
+                    d = 1.0 if (g and g[0] == "BUY") else -1.0
+                elif lead:
+                    d = 1.0 if lead > 0 else -1.0
+            elif judge == "l3_ofi_streak":
+                try:
+                    b, s = float(g[0]), float(g[1])
+                    d = 1.0 if b > s else (-1.0 if s > b else 0.0)
+                except (TypeError, ValueError, IndexError):
+                    pass
+            elif judge in ("iceberg", "whale_walls"):
+                d = 1.0 if (g and g[0] == "SUPPORT") else -1.0
+            elif judge == "iceberg_noise":
+                d = 0.0
+            elif judge == "whale_balanced":
+                d = 0.0
+            elif judge == "sweep":
+                d = 1.0 if (g and g[0] == "BULLISH") else -1.0
+            elif judge == "vwap_trend":
+                d = 1.0 if (g and g[0] == "UP") else -1.0
+            elif judge == "poc_day":
+                d = 1.0 if (g and g[2] == "above") else -1.0
+            elif judge == "supply_demand":
+                d = -1.0 if (g and g[0] == "supply") else 1.0
+            elif judge == "value_area":
+                g0 = next((x for x in g if x), "")
+                d = 1.0 if g0 == "VAL" else (-1.0 if g0 == "VAH" else 0.0)
+                if g0 == "":
+                    d = 1.0 if "above VAH" in note else -1.0
+            elif judge == "cvd_divergence":
+                d = 1.0 if (g and g[0] == "bullish") else -1.0
+            elif judge == "cvd_momentum":
+                d = 1.0 if (g and g[0] == "rising") else -1.0
+            elif judge == "delta_pressure":
+                d = 1.0 if (g and g[0] == "Buy") else -1.0
+            elif judge == "volume_roc":
+                d = 1.0 if (g and g[-1] == "bullish" and g[1] == "up") else \
+                    (1.0 if (g and g[-1] == "bearish" and g[1] == "down") else -1.0)
+            elif judge in ("macro_yield", "macro_dxy"):
+                d = -1.0 if (g and g[0] == "rising") else 1.0
+            elif judge == "macro_risk":
+                d = 1.0 if (g and g[0] == "off") else -1.0
+            elif judge == "queue_pos":
+                d = 1.0 if (g and g[0] == "bid") else -1.0
+            elif judge == "microprice":
+                d = 1.0 if (g and g[-1] == "BUY") else -1.0
+            out.append({"judge": judge, "dir": float(d), "weight": float(w or 0.5),
+                        "raw": note[:160]})
+            break
+    return out
 
 
 # ----------------------------------------------------------------------------- #
@@ -3737,7 +3918,14 @@ def analyze_market(market_data: Dict[str, Any],
     except Exception:
         macro_bias_now = 0.0
 
+    try:
+        judge_panel = parse_judge_panel(notes)
+    except Exception as _je:            # never let the diary break a live loop
+        judge_panel = []
+        notes.append(f"judge panel error: {_je}")
+
     snapshot = MarketSnapshot(
+        judge_votes=judge_panel,
         timestamp=now, price=price, bid=bid, ask=ask, volume=volume,
         order_flow=order_flow, footprint=footprint, level3=level3,
         volatility=volatility, trend=trend, volume_profile=vp, macro=macro,
