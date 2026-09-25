@@ -59,7 +59,7 @@ def LOGS_DIR():
 # BUILD MARKER - the shell scripts check for THIS string instead of a byte count,
 # so an intentional edit can never make morning_check.sh yell "re-copy it from the
 # kit" at a perfectly good file. Bump the date whenever you ship a new auditor.
-BUILD = "audit-2026-09-24u"
+BUILD = "audit-2026-09-25v"
 BASE_DIR_FOR_ENV = Path(__file__).resolve().parent
 
 

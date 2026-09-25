@@ -17,7 +17,32 @@ not rediscovered in three weeks as fresh findings.
 | A3 | **Model cooldown in step3 (C5)** | If the AI model errors or times out N times in a row, stop calling it for X minutes instead of retrying every cycle. Yes / no / different numbers. |
 | A4 | **Install `Gold-BookMap-24t.zip`** | Built, rehearsed, not yet installed. `audit_day.py` 244229 · `PANEL_ROSTER.md` 4853 · `tools/insight.py` 33659. |
 
-## A-URGENT-2. THE SELFTEST FAILS AFTER MIDNIGHT (found 2026-09-25 01:19)
+## A-URGENT-3. THREE WEIGHT TABLES THAT DISAGREE (found 2026-09-25 from the owner's .env)
+
+`PANEL_ROSTER.md` claims to describe the robot. It does not — it was generated from
+`audit_day.py`'s `JUDGE_DEFAULT_W`, which is the **auditor's assumption**. The robot uses
+`SIGNAL_W_*` from `config.py`/`.env`, and judges with no config key are hardcoded at the vote site
+in `step2`. A third copy of the table also exists inside `step2_market_analysis.py` (~line 3055).
+**10 of 11 checked judges disagree.** Examples: `sweep` 0.90 vs **1.50**, `l3_net_flow` 1.50 vs
+**1.00** (so it is NOT the loudest judge — `sweep` is), `vwap_trend` 0.60 vs **1.00**,
+`queue_pos` 0.50 vs **0.80**, `footprint_delta` 1.00 vs **0.70**.
+**Consequence:** every weight figure given on 2026-09-25 (the 4.6 order-book cluster, 85% one-feed,
+POWER 10.20 / SIGNAL 7.60) was computed from the wrong table and must be recomputed.
+**Not affected:** the force study, which reads the weight recorded on each vote.
+**Fix:** `tools/real_roster.py` (25z) measures the truth from the diary. Regenerate
+`PANEL_ROSTER.md` from that, then decide whether to collapse the three tables into one.
+
+## A-URGENT-2. THE SELFTEST FAILED AFTER MIDNIGHT
+
+Cause: the fixture stamped rows and named day-files with `datetime.now(timezone.utc)` while
+`audit_day` buckets rows into days by **Budapest** time. Between 22:00-24:00 UTC the two calendars
+differ by one day, so the fixture wrote "yesterday's" files and the auditor looked for "today's".
+Fix: the fixture's clock is frozen at **12:00 UTC**, the one hour where every calendar agrees.
+Production code untouched. Verified PASSED under `TZ=UTC` and `TZ=Europe/Budapest`.
+Known limit: still fails under extreme zones (UTC+14 / UTC-11); not relevant to a Budapest robot,
+recorded so it is not a surprise later.
+
+## (was) A-URGENT-2. THE SELFTEST FAILS AFTER MIDNIGHT (found 2026-09-25 01:19)
 
 `python tools/selftest_audit_day.py` now ends `SELFTEST FAILED` with:
 `contract: the day's decisions counted missing from the report` and `contract: sent to MT5 missing`.
