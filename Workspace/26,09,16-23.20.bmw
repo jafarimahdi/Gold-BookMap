@@ -2730,6 +2730,14 @@
             [],
             [],
             [],
+            [],
+            [],
+            [],
+            [],
+            [],
+            [],
+            [],
+            [],
             []
           ]
         },
@@ -2819,13 +2827,13 @@
                 "circleAlpha": 41,
                 "clusteringSmartParamSliderValue": 52
               },
-              "GRADIENT": {
-                "circleSize": 40,
+              "SPHERES": {
+                "circleSize": 45,
                 "circleAlpha": 41,
                 "clusteringSmartParamSliderValue": 52
               },
-              "SPHERES": {
-                "circleSize": 45,
+              "GRADIENT": {
+                "circleSize": 40,
                 "circleAlpha": 41,
                 "clusteringSmartParamSliderValue": 52
               }
@@ -3400,11 +3408,11 @@
             "toleranceMode": "ABSOLUTE",
             "currentAbsoluteToleranceValue": 7,
             "currentPercentageToleranceValue": 10,
-            "timeWidth": 14683152978000,
-            "autoBoundDisatanceBase": 123,
+            "timeWidth": 2339999999980,
+            "autoBoundDisatanceBase": 42,
             "autoPercentageToleranceValue": 20,
-            "noneRefPrice": 43290,
-            "noneHeight": 411
+            "noneRefPrice": 43275,
+            "noneHeight": 202
           }
         },
         "depthSettings": {

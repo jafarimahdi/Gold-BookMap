@@ -291,6 +291,10 @@ def _refresh() -> None:
 
     g["MACRO_ENABLED"] = _fget("MACRO_ENABLED", "1") == "1"
     g["MACRO_CACHE_MINUTES"] = _fint("MACRO_CACHE_MINUTES", 15)
+    # 26j/D6: an event is only treated as HIGH impact while it is actually close.
+    # Without this the calendar always contains a HIGH event somewhere and the robot
+    # ran at "HIGH alert" 70% of the day. 99999 restores the old always-on behaviour.
+    g["NEWS_HIGH_WINDOW_MINUTES"] = _ffloat("NEWS_HIGH_WINDOW_MINUTES", 120.0)
     # 24u: the 8 retired judges. They still write their note lines (so the audit can
     # keep grading them) but their vote is not counted. Blank the list to restore all.
     g["RETIRED_JUDGES"] = set(

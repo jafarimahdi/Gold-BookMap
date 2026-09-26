@@ -73,6 +73,8 @@ SIGNAL_JUDGES = ["l3_net_flow", "whale_walls", "iceberg", "l3_imbalance",
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Why is the SIGNAL team silent?")
     ap.add_argument("--date", help="YYYY-MM-DD (default: yesterday)")
+    ap.add_argument("--quality", action="store_true",
+                    help="data quality: when is ATR degraded, and does it cluster after a restart?")
     ap.add_argument("--teams", action="store_true",
                     help="parse the '4 Teams ensemble' lines and show how often each team "
                          "scored exactly 0.00 - an empty team, not a neutral one")
@@ -145,6 +147,67 @@ def main(argv=None):
     print("  QUEUE_POS_THRESHOLD=0.7     how near the front we must be")
     print("  BOOKMAP_MAX_DEPTH_LEVELS=20 levels collected (the analyzer reads only 5)")
     print("\n  These are YOUR .env lines. Nothing here changes them.")
+
+    if args.quality:
+        print("\n" + "=" * 96)
+        print("DATA QUALITY - when is ATR degraded?")
+        print("  'candle history shallow' fires below 60 M1 bars. ATR, MTF, order blocks and")
+        print("  HTF POC are all limited while it shows. ATR is the unit every target, stop and")
+        print("  force reading is measured in, so this decides how much to trust everything else.")
+        print("=" * 96)
+        rx = re.compile(r"candle history shallow \((\d+) M1 bars\)")
+        stamps = []
+        for rec in diary:
+            ts = rec.get("timestamp")
+            hit = None
+            for n in (rec.get("notes") or []):
+                if isinstance(n, str):
+                    m = rx.search(n)
+                    if m:
+                        hit = int(m.group(1))
+                        break
+            stamps.append((ts, hit))
+        shallow = [(ts, b) for ts, b in stamps if b is not None]
+        print(f"  {len(shallow)} of {len(stamps)} snapshots degraded "
+              f"({100.0*len(shallow)/max(len(stamps),1):.1f}%)")
+        if shallow:
+            bars = [b for _, b in shallow]
+            print(f"  bar counts while degraded: min {min(bars)}, median "
+                  f"{sorted(bars)[len(bars)//2]}, max {max(bars)}")
+            # find restarts = gaps in the diary bigger than 5 minutes
+            from datetime import datetime as _dt
+            def _p(s):
+                try:
+                    return _dt.fromisoformat(str(s).replace("Z", "+00:00"))
+                except Exception:
+                    return None
+            times = [(_p(ts), b) for ts, b in stamps]
+            times = [(t_, b) for t_, b in times if t_]
+            times.sort(key=lambda x: x[0])
+            restarts = [times[0][0]] if times else []
+            for i in range(1, len(times)):
+                if (times[i][0] - times[i-1][0]).total_seconds() > 300:
+                    restarts.append(times[i][0])
+            near = far = 0
+            for t_, b in times:
+                if b is None:
+                    continue
+                mins = min(abs((t_ - r).total_seconds()) / 60.0 for r in restarts) if restarts else 999
+                if mins <= 70:
+                    near += 1
+                else:
+                    far += 1
+            print(f"  restarts / tape gaps detected: {len(restarts)}")
+            print(f"  degraded WITHIN 70 min of a restart : {near}")
+            print(f"  degraded at any other time          : {far}")
+            if far == 0 and near:
+                print("\n  => ALL degradation is warm-up after a restart. The window setting is")
+                print("     not the cause; restarting less often (or a bigger catch-up) fixes it.")
+            elif far > near:
+                print("\n  => degradation happens mid-session, away from restarts. That points at")
+                print("     the tick window or gaps in the tape, not warm-up.")
+            else:
+                print("\n  => mixed. Mostly warm-up, but some mid-session gaps too.")
 
     if args.teams:
         print("\n" + "=" * 96)

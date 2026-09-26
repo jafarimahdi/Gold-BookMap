@@ -370,6 +370,14 @@ class _BridgeTail:
                 if first_fresh:
                     del st.ticks[:first_fresh]
             elif len(st.ticks) > 200:
+                # 26j/C1: this throws away the entire tick history. It fires when every
+                # tick is older than the window (overnight gap, weekend, restart with
+                # stale catch-up). It used to happen in complete silence, which hid the
+                # cause of "candle history shallow". Say it out loud; behaviour unchanged.
+                logger.warning(
+                    "BookMap window: no tick newer than %.0fs - collapsing history from "
+                    "%d ticks to 200. Candles/ATR/MTF will be shallow until it refills.",
+                    window, len(st.ticks))
                 del st.ticks[:-200]
             if st.mbo_events:
                 try:

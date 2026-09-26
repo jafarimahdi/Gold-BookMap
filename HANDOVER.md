@@ -317,6 +317,16 @@ Three confident conclusions died the same day they were born. Record them so nob
 
 **The lesson to carry forward: hold the plan loosely and the measurements tightly.**
 
+4. **"Walls do not hold, they get sliced through."** The barrier test measured max excursion
+   over the WHOLE horizon, so any trending day read as "sliced through". **Killed** by measuring
+   the 2 bars from the touch instead: same data, opposite answer.
+5. **"Going to the wall wins 100% of the time."** Win/loss flags with a near TP and a far stop
+   always look brilliant. **Killed** by scoring in ATR instead - the same trap that makes an
+   83%-right judge lose money.
+
+**Six measurement-driven corrections in one day. Treat any brand-new metric as provisional until
+its method has been attacked.**
+
 ## 7.1 The defects that survived measurement
 
 | # | defect | evidence | cost |

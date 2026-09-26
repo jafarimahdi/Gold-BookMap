@@ -28,6 +28,7 @@ import math
 import os
 import re
 import statistics
+import subprocess
 import sys
 from collections import Counter, defaultdict
 from datetime import datetime, date as date_cls, timedelta, timezone, tzinfo
@@ -59,7 +60,7 @@ def LOGS_DIR():
 # BUILD MARKER - the shell scripts check for THIS string instead of a byte count,
 # so an intentional edit can never make morning_check.sh yell "re-copy it from the
 # kit" at a perfectly good file. Bump the date whenever you ship a new auditor.
-BUILD = "audit-2026-09-25v"
+BUILD = "audit-2026-09-26h"
 BASE_DIR_FOR_ENV = Path(__file__).resolve().parent
 
 
@@ -2233,6 +2234,56 @@ def _panel_scoreboard_html(sb_rows, sb_thin, ai_rec):
             "</tr></thead><tbody id='panelbody'>" + "".join(rows_html) + "</tbody></table>" + js)
 
 
+DIAGNOSTIC_TOOLS = [
+    ("diag_roster", "The real roster &mdash; what each judge's weight actually was",
+     "Measured from the diary, after every runtime multiplier. 'MISMATCH' means the audit "
+     "table and the robot disagree; 'swing' means the weight moved during the day.",
+     ["tools/real_roster.py", "--date", "{day}"]),
+    ("diag_health", "Signal health &mdash; who spoke, who stayed silent, and why",
+     "A judge that never writes a line is not the same as a judge that looked and found "
+     "nothing. This separates the two, and shows the team scores.",
+     ["tools/signal_health.py", "--date", "{day}", "--teams"]),
+    ("diag_book", "The book &mdash; what a 'wall' really is on this instrument",
+     "Rebuilt from mbo.csv. The thresholds that decide whether whale_walls, iceberg and "
+     "spoof_invert ever speak should come from these numbers, not from a guess.",
+     ["tools/depth_profile.py", "--rows", "200000"]),
+    ("diag_force", "Force vs distance &mdash; does a louder panel travel further?",
+     "Non-overlapping windows only, so the sample size is honest. It refuses to give a "
+     "verdict until there is enough independent tape to support one.",
+     ["tools/force_study.py", "--date", "{day}", "--independent", "--no-html"]),
+]
+
+
+def collect_diagnostics(day, timeout=240):
+    """Run the measurement tools and capture their console output.
+
+    Subprocess on purpose: the tools import audit_day, so importing them here would be
+    circular. A missing or failing tool becomes one warning line, never a crash.
+    """
+    out = []
+    for sid, title, sub_text, argv in DIAGNOSTIC_TOOLS:
+        script = ROOT / argv[0]
+        if not script.exists():
+            out.append((sid, title, sub_text,
+                        f"{argv[0]} is not installed in this project - section skipped."))
+            continue
+        cmd = [sys.executable, str(script)] + [
+            a.format(day=f"{day:%Y-%m-%d}") for a in argv[1:]]
+        try:
+            r = subprocess.run(cmd, cwd=str(ROOT), capture_output=True, text=True,
+                               encoding="utf-8", errors="replace", timeout=timeout)
+            text = (r.stdout or "") + (("\n[stderr]\n" + r.stderr) if r.stderr.strip() else "")
+            if not text.strip():
+                text = f"{argv[0]} produced no output (exit {r.returncode})."
+        except subprocess.TimeoutExpired:
+            text = (f"{argv[0]} took longer than {timeout}s and was stopped. "
+                    f"Run it by hand if you need it; the rest of this report is unaffected.")
+        except Exception as e:
+            text = f"{argv[0]} could not be run: {type(e).__name__}: {e}"
+        out.append((sid, title, sub_text, text))
+    return out
+
+
 def one_page_shell(title, heading, body_html):
     """The same look as the day report, for standalone pages like the cross-day view."""
     return f"""<!doctype html><html><head><meta charset="utf-8">
@@ -2289,6 +2340,11 @@ def one_page_report(day, console_lines, sb_rows, sb_thin, ai_rec, parts):
                     "of the tape, so two views can never disagree. Sort by CONSISTENCY "
                     "(how many days it finished green), not by points. A past day's full "
                     "night report is one click away at the top of its view.",
+                    open_by_default=False)
+
+    # --- the measurement tools, embedded (PHASE 2b) --------------------------------
+    for _sid, _title, _sub, _text in (parts.get("diagnostics") or []):
+        add_section(_sid, _title, f"<pre class='console'>{esc(_text)}</pre>", _sub,
                     open_by_default=False)
 
     # --- 2. the full night report, verbatim ---------------------------------------
@@ -4103,6 +4159,9 @@ def main(argv=None):
     ap.add_argument("--latest", action="store_true",
                     help="audit the newest day that has a log (no need to remember dates)")
     ap.add_argument("--html", help="write a styled report here (default: data/day_report_<date>.html)")
+    ap.add_argument("--no-diagnostics", action="store_true",
+                    help="do not embed the measurement tools in the one-page report "
+                         "(faster; they can still be run by hand)")
     ap.add_argument("--crossday-days", type=int, default=5,
                     help="how many days the cross-day section inside the one-page "
                          "report should cover (default 5, 0 = off)")
@@ -4640,6 +4699,14 @@ def main(argv=None):
     # 24o: ONE page with everything on it. Written last, because it embeds the others.
     if not getattr(args, "no_html", False):
         try:
+            if not getattr(args, "no_diagnostics", False):
+                try:
+                    _PAGE_PARTS["diagnostics"] = collect_diagnostics(day)
+                    print(f"[one-page] diagnostics: "
+                          f"{len(_PAGE_PARTS['diagnostics'])} tool section(s) embedded")
+                except Exception as _e:
+                    print(f"[warn] diagnostics not embedded: {type(_e).__name__}: {_e}")
+
             # 24t: the cross-day window ENDS on the day being audited, not on today,
             # so re-auditing an old date shows that date's neighbourhood, not this week's.
             _nd = int(getattr(args, "crossday_days", 5) or 5)

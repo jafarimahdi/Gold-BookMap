@@ -28,7 +28,7 @@ Nothing in here is built without your word. Report-only steps are marked **[safe
 
 ---
 
-## PHASE 0 — TODAY (25 Sep) · the ceiling comes off
+## PHASE 0 — DONE, CONFIRMED LIVE (Fri 25 Sep) · the ceiling came off
 
 **Change:** `V6_4TEAMS_ENABLED=0` in `.env`, then `python main.py --loop`.
 Fixes **D1 + D2**. Also activates the 8 retirements for the first time.
@@ -40,6 +40,9 @@ python tools/signal_health.py --date 2026-09-25 --teams
 python tools/real_roster.py --date 2026-09-25
 ```
 
+**RESULT, measured Fri 25 Sep:** ensemble lines **608 -> 1**, confluence forced NEUTRAL
+**318 (52%) -> 0 (0%)**. The ceiling is gone. Phase 0 is closed.
+
 **Branch:**
 - `Confluence FAIL` = **0** and strength readings reach above 75.5 → Phase 0 worked, go to Phase 1
 - the lines are still there → the `.env` edit did not reach the robot; fix and repeat
@@ -47,7 +50,9 @@ python tools/real_roster.py --date 2026-09-25
 
 ---
 
-## PHASE 1 — TOMORROW (26 Sep) · wake the SIGNAL team
+## PHASE 1 — OVER THE WEEKEND, LIVE MONDAY 28 SEP · wake the SIGNAL team
+*(26-27 Sep are Saturday and Sunday: no market, no tape. Edit the three lines any time
+before Monday 08:00 Budapest and restart; Monday is then a full clean day.)*
 
 **Change three `.env` lines** (measured from your own book, with my two overrides):
 ```
@@ -67,6 +72,20 @@ Fixes **D3**. Restart required.
 - they vote *constantly* (every cycle) → thresholds too low, raise toward p99.9 (18 / 7 / 9)
 
 ---
+
+**RESULT, measured Fri 25 Sep evening (323 snapshots after the restart):**
+`whale_walls` **spoke for the first time ever - 14 votes** (3 SUPPORT, 11 RESISTANCE) plus 2
+"balanced" lines, which is the silence branch that can only run once a wall is found.
+**The threshold diagnosis is confirmed.** Still silent, each with a diagnosed cause:
+- `l3_large_ofi` - shares `L3_WHALE_THRESHOLD` as its single-order "large" size. A wall is
+  TOTAL size at a price (p99=11); a single order is p99.9=**9**. One key, two meanings. Needs
+  its own setting (code change), or the shared number lowered.
+- `spoof_invert` - needs one order >= 8 lots that also cancels inside 2s. ~0.1% of orders.
+- `iceberg` - needs 3 refills at one price. Rare with 1-lot orders and constant REPLACE churn.
+- `absorption` - **cannot appear until 26j is installed**; it writes no note before that.
+- `queue_pos` - gated by a fill-probability ratio (0.7), not a size. Untouched by Phase 1.
+
+**Do not tune again before a full clean day.** Monday runs at 10 / 5 / 8 to give a baseline.
 
 ## PHASE 2 — repair the measurement instruments **[mostly safe]**
 
@@ -140,6 +159,15 @@ you see in Bookmap with your own eyes. That comparison is worth more than any st
 **Depends on:** Phase 1 succeeding. Without wall detection there is nothing to map.
 
 ---
+
+**FIRST READING, Fri 25 Sep (16 observations - NO VERDICT, recorded for Monday):**
+- MAGNET: price reached the wall **75%** of the time, median **5 minutes**.
+- BARRIER: only 8% stalled at the wall, but **83% came back past it** after pushing ~1 ATR through.
+- THE DECISIVE TEST: the same walls traded two opposite ways, real 2.0 ATR stop, scored in ATR:
+  - **GO TO the wall** (targets-and-force): 11W/4L, **+2.09 ATR, +0.14 per trade**
+  - **BOUNCE off it** (what `whale_walls` votes today): 4W/11L, **-5.41 ATR, -0.36 per trade**
+- **If this holds, `whale_walls` is voting the wrong way round.** Flipping its sign would be
+  worth more than any new feature. Needs a few hundred observations before acting.
 
 ## PHASE 4b — WALL-AWARE STOPS **[the football idea — full design in `WALL_STOPS_DESIGN.md`]**
 

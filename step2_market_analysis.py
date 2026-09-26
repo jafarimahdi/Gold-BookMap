@@ -259,6 +259,15 @@ class MarketSnapshot:
     # which note). Written from `notes` so the daily audit can score each judge
     # instead of only the 4 team aggregates. Empty for non-BookMap providers.
     judge_votes: List[Dict[str, Any]] = field(default_factory=list)
+    # 26r: the POWER team's answer - which door first, and how sure
+    power: Dict[str, Any] = field(default_factory=dict)
+    # 26z: the SHOOTING team's plan - GO/NO_GO/WAIT with target and stop from the book
+    shot: Dict[str, Any] = field(default_factory=dict)
+    # 27c: the ESCORT team - paper trades being guarded, and how they finished
+    escort: Dict[str, Any] = field(default_factory=dict)
+    # 26o: the SIGNAL team's liquidity map - where the targets are, not an opinion.
+    # Empty dict when the module is absent, so the robot runs unchanged without it.
+    signal_map: Dict[str, Any] = field(default_factory=dict)
     # Data-quality labels prevent estimated CFD flow from being mistaken for
     # exchange trade prints or Level 3 data.
     data_quality: Dict[str, str] = field(default_factory=dict)
@@ -1934,6 +1943,18 @@ class SignalEngine:
         """Return (signal_strength 0-100, direction, confidence 0-100, notes)."""
         votes: List[Tuple[float, float]] = []
         macro_pairs: List[Tuple[float, float]] = []   # macro votes, for the opposition rule
+        # 26j/D6: decide ONCE, before anything reads it. "HIGH impact" only counts while
+        # the event is genuinely near - the calendar always holds a HIGH event somewhere,
+        # which kept the robot at permanent high alert (measured 70% of the day).
+        _hi_win = float(getattr(config, "NEWS_HIGH_WINDOW_MINUTES", 120.0))
+        try:
+            _mins = abs(float(getattr(news, "minutes_to_next_event", 0.0) or 0.0))
+        except Exception:
+            _mins = 0.0
+        _high_now = (getattr(news, "impact_level", "LOW") == "HIGH") and (_mins <= _hi_win)
+        if getattr(news, "impact_level", "LOW") == "HIGH" and not _high_now:
+            notes.append(f"HIGH event is {_mins:.0f} min away (> {_hi_win:.0f} window) "
+                         f"-> treated as a normal day, no boost")
         # 24u: one gate for every retired judge. Returns True if this judge may vote.
         _retired = getattr(config, "RETIRED_JUDGES", set()) or set()
         def _may_vote(judge_name):
@@ -2125,8 +2146,14 @@ class SignalEngine:
         else:
             notes.append("microprice vote removed v5.8.1 (L3 OFI better)")
         # absorption: net ask-absorption (buyers) vs bid-absorption (sellers)
-        votes.append((np.clip(order_flow.absorption_net * 0.5, -1.0, 1.0),
-                   float(getattr(config, "SIGNAL_W_ABSORB", 0.5))))
+        # 26j/D4: this vote used to be cast with NO note, so the audit could never see or
+        # grade it. It now writes a line whenever it actually leans one way.
+        _abs_net = int(getattr(order_flow, "absorption_net", 0) or 0)
+        _abs_w = float(getattr(config, "SIGNAL_W_ABSORB", 0.5))
+        votes.append((np.clip(_abs_net * 0.5, -1.0, 1.0), _abs_w))
+        if _abs_net:
+            notes.append(f"absorption net {_abs_net:+d} w {_abs_w:.1f} -> "
+                         f"{'BUY' if _abs_net > 0 else 'SELL'}")
 
         # ---- 4) Footprint RESTORED v5.8.3 (user requested: has aggressive buyer/seller data) ----
         # Footprint delta imbalance per price level + dominant level strength
@@ -2729,7 +2756,7 @@ class SignalEngine:
         y_chg = macro.yield_change_5d
         if abs(y_chg) > 1e-6:
             # M4: increase weight to 1.0 during HIGH events
-            w_yield = macro_high_w if news.impact_level == "HIGH" else 0.8
+            w_yield = macro_high_w if _high_now else 0.8
             v = (-np.clip(y_chg / 0.02, -1.0, 1.0), w_yield)
             macro_pairs.append(v)          # brake: always
             if _may_vote('macro_yield'): votes.append(v)
@@ -2738,7 +2765,7 @@ class SignalEngine:
         # Rising dollar pressures USD-priced gold -> bearish
         d_chg = macro.usd_change_5d
         if abs(d_chg) > 1e-6:
-            w_dxy = macro_high_w if news.impact_level == "HIGH" else 0.6
+            w_dxy = macro_high_w if _high_now else 0.6
             v = (-np.clip(d_chg / 0.01, -1.0, 1.0), w_dxy)
             macro_pairs.append(v)          # brake: always
             if _may_vote('macro_dxy'): votes.append(v)
@@ -2747,13 +2774,13 @@ class SignalEngine:
         # VIX stress spike vs its own 20-session median -> safe-haven bid.
         v_spk = macro.vix_spike
         if v_spk > 0.05:
-            w_vix = macro_high_w if news.impact_level == "HIGH" else 0.4
+            w_vix = macro_high_w if _high_now else 0.4
             v = (+np.clip(v_spk / 0.20, 0.0, 1.0), w_vix)
             macro_pairs.append(v)          # brake: always
             if _may_vote('macro_vix'): votes.append(v)
             notes.append("VIX stress +%.0f%% vs 20d median (w %.1f)" % (v_spk * 100.0, w_vix))
         if macro.risk_sentiment == "RISK_OFF":
-            w_risk = macro_high_w if news.impact_level == "HIGH" else 0.5
+            w_risk = macro_high_w if _high_now else 0.5
             v = (+1.0, w_risk)
             votes.append(v); macro_pairs.append(v)
             notes.append(f"risk-off -> safe haven bid (w {w_risk})")
@@ -2763,7 +2790,7 @@ class SignalEngine:
 
         # ---- 9) News sentiment ----------------------------------------------
         # M4: weight 0.4 normally, 1.0 during HIGH impact
-        sentiment_w = news_high_w if news.impact_level == "HIGH" else news_low_w
+        sentiment_w = news_high_w if _high_now else news_low_w
         votes.append((news.sentiment_score, sentiment_w))
         if news.impact_level == "HIGH":
             notes.append(f"HIGH impact sentiment {news.sentiment_score:+.2f} weight {sentiment_w} (boosted)")
@@ -3774,6 +3801,14 @@ def analyze_market(market_data: Dict[str, Any],
         l2.update(bid_depth, ask_depth)      # final snapshot (also feeds OFI)
         _save_book_state(bid_depth, ask_depth)
     l2_metrics = l2.summary(bid_depth, ask_depth)
+    # 26j/D4: absorption_net is a RUNNING TOTAL on a persistent analyzer - two events
+    # pinned the vote at full strength for the rest of the session. Clear it once this
+    # cycle has read it, so the number means "this cycle" and can be graded honestly.
+    try:
+        l2.absorption_events = 0
+        l2.absorption_net = 0
+    except Exception:
+        pass
 
     # ---- order flow (ticks) --------------------------------------------------
     order_flow = OrderFlowAnalyzer().analyze_tick_data(
@@ -3789,6 +3824,21 @@ def analyze_market(market_data: Dict[str, Any],
         l3.process_order_event(ev)
     if book:
         l3.update_order_book(book.get("bids", []), book.get("asks", []))
+
+    # ---- 26o: THE SIGNAL TEAM -------------------------------------------------
+    # SIGNAL does not vote. It answers "where are the targets?" and hands back a map.
+    # Pure addition: nothing below reads it for a trading decision yet.
+    _signal_map = {}
+    try:
+        from signal_team import build_signal_map, describe as _describe_map
+        _spread_now = abs(_f_ask - _f_bid) if (_f_ask := float(market_data.get("ask") or 0.0)) \
+            and (_f_bid := float(market_data.get("bid") or 0.0)) else 0.0
+        _signal_map = build_signal_map(l3, price, getattr(volatility, "atr", 0.0) or 0.0,
+                                       config, order_flow, spread=_spread_now)
+        if _signal_map.get("n"):
+            notes.append(_describe_map(_signal_map))
+    except Exception as _sm_err:
+        notes.append(f"signal map unavailable: {type(_sm_err).__name__}")
 
     # M1: Feed tick_data direct side into L3 aggressive counters (BookMap direct Buy/Sell)
     try:
@@ -3924,11 +3974,92 @@ def analyze_market(market_data: Dict[str, Any],
         judge_panel = []
         notes.append(f"judge panel error: {_je}")
 
+    # ---- D7a: hand the scout its REMEMBERED doors ----------------------------
+    # poc_day / htf_poc / supply_demand name prices, so they are door-makers. They now
+    # live with the scout instead of shouting street names at the force team.
+    try:
+        from signal_team import get_book as _gb_hist
+        _hist = []
+        if getattr(vp, "poc", 0):
+            _hist.append({"price": float(vp.poc), "kind": "poc_day"})
+        for _k, _v in (htf_poc or {}).items():
+            if _v:
+                _hist.append({"price": float(_v), "kind": "htf_poc"})
+        for _ob in (order_blocks or [])[:8]:
+            try:
+                _lo, _hi = float(_ob.get("low", 0)), float(_ob.get("high", 0))
+                _kind = "demand" if str(_ob.get("type", "")).lower().startswith("d") else "supply"
+                if _lo:
+                    _hist.append({"price": _lo, "kind": _kind})
+                if _hi and abs(_hi - _lo) > 1e-9:
+                    _hist.append({"price": _hi, "kind": _kind})
+            except Exception:
+                continue
+        if _hist:
+            _gb_hist().add_history(price, getattr(volatility, "atr", 0.0) or 0.0,
+                                   _hist, config)
+            _signal_map = _gb_hist()._render(
+                price, max(getattr(volatility, "atr", 0.0) or 0.0, 1e-9),
+                float(getattr(config, "L3_WHALE_THRESHOLD", 10.0)), 0, level3,
+                order_flow, _spread_now)
+    except Exception as _h_err:
+        notes.append(f"history doors unavailable: {type(_h_err).__name__}")
+
+    # ---- 26r: THE POWER TEAM ("the legs") ------------------------------------
+    # Answers one question about the scout's map: which door does price touch first?
+    # Writes its pick so it can be marked later. Casts no vote, sends no order.
+    _power = {}
+    try:
+        _pw_candles = [{"high": float(h), "low": float(l), "close": float(c)}
+                       for h, l, c in zip(high, low, close)] if len(close) else []
+        from power_team import decide as _power_decide, describe as _power_say
+        _power = _power_decide(_signal_map, order_flow, footprint, level3,
+                               vp, trend, volatility, news, macro,
+                               price=price, divergence=divergence,
+                               mtf=mtf_trends, config=config,
+                               tick_data=tick_data, candles=_pw_candles,
+                               atr=getattr(volatility, "atr", 0.0) or 0.0)
+        notes.append(_power_say(_power))
+    except Exception as _pw_err:
+        notes.append(f"power team unavailable: {type(_pw_err).__name__}: {_pw_err}")
+
+    # ---- 26z: THE SHOOTING TEAM ("the shooter") -------------------------------
+    # Checks the FRONT doors (the corridor to the target) and the BACK doors (shelter
+    # to lean on), then writes a full plan: GO / NO_GO / WAIT, with target and stop
+    # taken from the book instead of from an ATR multiple. It sends NOTHING.
+    _shot = {}
+    try:
+        from shooting_team import plan_shot as _plan, describe as _shot_say
+        from signal_team import get_book as _get_book
+        _shot = _plan(_signal_map, _power, price,
+                      getattr(volatility, "atr", 0.0) or 0.0,
+                      spread=_spread_now, config=config, book=_get_book())
+        notes.append(_shot_say(_shot))
+    except Exception as _sh_err:
+        notes.append(f"shooter unavailable: {type(_sh_err).__name__}: {_sh_err}")
+
+    # ---- 27c: THE ESCORT TEAM ("the friends") ---------------------------------
+    # Opens a PAPER trade whenever the shooter says GO, then guards it: five jobs, one
+    # voice each, and it may only ever make the trade safer. No order, no broker - the
+    # tape marks both the shooter's plan and the escort's interventions.
+    _escort = {}
+    try:
+        from escort_team import escort_cycle as _esc, describe as _esc_say
+        from signal_team import get_book as _get_book2
+        _escort = _esc(_shot, _signal_map, price,
+                       getattr(volatility, "atr", 0.0) or 0.0, _spread_now,
+                       order_flow, footprint, level3, news, divergence,
+                       _get_book2(), config)
+        notes.append(_esc_say(_escort))
+    except Exception as _ec_err:
+        notes.append(f"escort unavailable: {type(_ec_err).__name__}: {_ec_err}")
+
     snapshot = MarketSnapshot(
         judge_votes=judge_panel,
         timestamp=now, price=price, bid=bid, ask=ask, volume=volume,
         order_flow=order_flow, footprint=footprint, level3=level3,
         volatility=volatility, trend=trend, volume_profile=vp, macro=macro,
+        signal_map=_signal_map, power=_power, shot=_shot, escort=_escort,
         news=news, signal_strength=strength, signal_direction=direction,
         confidence=confidence, regime=regime, divergence=divergence,
         macro_bias=macro_bias_now,

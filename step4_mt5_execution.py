@@ -549,11 +549,18 @@ class MT5Executor:
         if mem_penalty > 0:
             base_bar = (config.SIGNAL_BUY_THRESHOLD if is_buy
                         else abs(config.SIGNAL_SELL_THRESHOLD))
-            score = float(getattr(snapshot, "signal_strength", 0.0) or 0.0)
-            score_signed = score if is_buy else -score
-            if score_signed < base_bar + mem_penalty:
-                reason = (f"score {score_signed:+.0f} below raised bar "
-                          f"{base_bar + mem_penalty:+.0f} ({'; '.join(mem_notes)})")
+            # 26p BUGFIX: signal_strength is a MAGNITUDE - the direction is carried
+            # separately in signal_direction, and base_bar already uses abs() on the
+            # sell side. Negating it for a SELL compared -36.65 against +50, so once
+            # the ratchet was armed by a losing day the robot could only ever BUY.
+            # Found 2026-09-25 in a live log: a SELL at strength 36.6, with the AI
+            # agreeing at 70%, was skipped as "score -37 below raised bar +25".
+            # Compare magnitude to magnitude on both sides.
+            score = abs(float(getattr(snapshot, "signal_strength", 0.0) or 0.0))
+            if score < base_bar + mem_penalty:
+                reason = (f"{'BUY' if is_buy else 'SELL'} strength {score:.0f} below "
+                          f"raised bar {base_bar + mem_penalty:.0f} "
+                          f"({'; '.join(mem_notes)})")
                 logger.info("STEP 4: SKIPPED — %s", reason)
                 return ExecutionResult(status="SKIPPED", reason=reason,
                                        symbol=self.symbol, price=price,

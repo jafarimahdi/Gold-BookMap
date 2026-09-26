@@ -480,6 +480,17 @@ def run_step2(data):
             # the panel from the notes). No judge_panel.py -> field becomes [].
             "judge_votes": (list(getattr(snapshot, "judge_votes", []) or [])
                             or _judge_panel_from_notes(getattr(snapshot, "notes", []) or [])),
+            # 26o: the SIGNAL team's map, stored as structured data rather than a
+            # sentence. signal_map.py had to parse note strings to find wall prices;
+            # from here the prices, sizes, distances and trust scores are first-class.
+            "signal_map": (getattr(snapshot, "signal_map", None) or {}),
+            # 26r: the POWER team's pick - which door it expected price to reach
+            # first. Stored so the tape can mark it afterwards, per judge.
+            "power": (getattr(snapshot, "power", None) or {}),
+            # 26z: the SHOOTING team's plan, so the tape can mark it afterwards
+            "shot": (getattr(snapshot, "shot", None) or {}),
+            # 27c: the ESCORT team - what it guarded and what it did about it
+            "escort": (getattr(snapshot, "escort", None) or {}),
             "notes": _notes_for_diary(getattr(snapshot, "notes", []) or []),
         }
         _append_diary(record, hist_path)
