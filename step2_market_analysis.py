@@ -4098,6 +4098,16 @@ def analyze_market(market_data: Dict[str, Any],
     # Shooting, Escort, Step 3 decision logic, or execution/risk decisions.
     _power_v2 = {}
     if bool(getattr(config, "POWER_V2_SHADOW_ENABLED", False)):
+        _regime_v2 = {
+            "market_regime": "UNKNOWN",
+            "breakout_confirmed": False,
+            "reason": "REGIME_CLASSIFIER_UNAVAILABLE",
+        }
+        try:
+            from power_v2_regime import classify_m5_regime
+            _regime_v2 = classify_m5_regime(tick_data, now=now)
+        except Exception as _rg2_err:
+            notes.append(f"POWER v2 regime unavailable: {type(_rg2_err).__name__}")
         try:
             from power_v2_shadow import run_power_v2_shadow
             _memory_root = None
@@ -4106,18 +4116,24 @@ def analyze_market(market_data: Dict[str, Any],
             _power_v2 = run_power_v2_shadow(
                 tick_data, now=now, symbol=symbol,
                 tick_size=float(getattr(config, "POWER_M5_TICK_SIZE", 0.0) or 0.0),
-                memory_root=_memory_root)
+                memory_root=_memory_root,
+                market_regime=_regime_v2.get("market_regime", "UNKNOWN"),
+                breakout_confirmed=bool(_regime_v2.get("breakout_confirmed", False)),
+                regime_diagnostics=_regime_v2)
             notes.append(
                 "POWER v2 SHADOW | "
                 f"{_power_v2.get('direction', 'NEITHER')} "
                 f"up={_power_v2.get('up_power_pct', 0):.1f}% "
                 f"down={_power_v2.get('down_power_pct', 0):.1f}% "
+                f"regime={_regime_v2.get('market_regime', 'UNKNOWN')} "
+                f"adx={_regime_v2.get('adx')} "
                 f"reason={_power_v2.get('reason_code', _power_v2.get('reason', 'UNAVAILABLE'))}"
             )
         except Exception as _pw2_err:
-            # Shadow failures must not interrupt existing analysis.
+            # Shadow failures must never interrupt existing analysis.
             _power_v2 = {"shadow_only": True, "direction": "NEITHER",
-                         "reason": f"SHADOW_ERROR:{type(_pw2_err).__name__}"}
+                         "reason": f"SHADOW_ERROR:{type(_pw2_err).__name__}",
+                         "regime_diagnostics": _regime_v2}
             notes.append(f"POWER v2 shadow unavailable: {type(_pw2_err).__name__}")
 
     # ---- 26z: THE SHOOTING TEAM ("the shooter") -------------------------------

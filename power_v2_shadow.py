@@ -64,6 +64,7 @@ def run_power_v2_shadow(
     memory_root: Any = None,
     market_regime: str = "UNKNOWN",
     breakout_confirmed: bool = False,
+    regime_diagnostics: Optional[Mapping[str, Any]] = None,
     grace_seconds: float = 5.0,
 ) -> Dict[str, Any]:
     """Evaluate v2 without affecting the legacy Power/Shooting path.
@@ -90,6 +91,7 @@ def run_power_v2_shadow(
         "bar_end_utc": bar_end.isoformat().replace("+00:00", "Z"),
         "input_judges": built["judges"],
         "adapter_diagnostics": built["diagnostics"],
+        "regime_diagnostics": dict(regime_diagnostics or {}),
     })
 
     if memory_root is not None:
@@ -101,7 +103,8 @@ def run_power_v2_shadow(
                 timestamp=bar_end,
                 symbol=symbol.strip(),
                 judges=built["judges"],
-                context={**context, "adapter_diagnostics": built["diagnostics"]},
+                context={**context, "adapter_diagnostics": built["diagnostics"],
+                         "regime_diagnostics": dict(regime_diagnostics or {})},
                 result={k: v for k, v in answer.items()
                         if k not in ("memory_status",)},
                 reference_price=_bar_close_price(tick_data or [], bar_end),
