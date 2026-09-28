@@ -621,6 +621,7 @@ class OrderBookDepthAnalyzer:
         self.cumulative_ofi = 0.0
         self.absorption_events = 0
         self.absorption_net = 0
+        self._abs_watch = {}          # side -> {price: last size seen}
         self._prev_bb_price: Optional[float] = None
         self._prev_bb_size: float = 0.0
         self._prev_ba_price: Optional[float] = None
@@ -748,7 +749,44 @@ class OrderBookDepthAnalyzer:
         best_ask = min(asks) if asks else 0.0
         mid = (best_bid + best_ask)/2.0 if best_bid and best_ask else 0.0
 
-        # -- bid side ----------------------------------------------------------
+        # ---- LEVEL-BASED ABSORPTION (added 2026-09-28) -----------------------
+        # The original rule below only watches whatever price happens to be BEST right
+        # now, and requires that exact price to repeat between two looks:
+        #     if abs(bb_price - self._prev_bb_price) < 1e-9
+        # In a live market the best price changes almost every update - on 2026-09-28
+        # the spread moved 0.30 -> 0.20 -> 0.10 within three cycles - so the condition
+        # was essentially never true and absorption_net read 0 all day, every day.
+        #
+        # It was watching ONE DOOR to see if it shrinks, but standing in front of a
+        # different door every time it looked up.
+        #
+        # This version watches every price that holds a wall, wherever it sits in the
+        # book, and notices when that SAME PRICE loses size. That is what absorption
+        # actually means: someone quietly eating a level.
+        try:
+            for side_name, levels, sign in (("bid", bids, -1), ("ask", asks, +1)):
+                watch = self._abs_watch.setdefault(side_name, {})
+                for lvl_p, lvl_s in (levels or {}).items():
+                    lvl_p, lvl_s = round(float(lvl_p), 2), float(lvl_s)
+                    was = watch.get(lvl_p)
+                    if was is not None and lvl_s < was - 1e-9:
+                        eaten = was - lvl_s
+                        if eaten >= self.wall_size * 0.25:
+                            self.absorption_events += 1
+                            self.absorption_net += sign
+                    if lvl_s >= self.wall_size:
+                        watch[lvl_p] = lvl_s
+                    else:
+                        watch.pop(lvl_p, None)
+                # keep the watch list near price so it cannot grow without bound
+                if len(watch) > 60:
+                    ref = best_bid if side_name == "bid" else best_ask
+                    for k in sorted(watch, key=lambda x: abs(x - (ref or 0)))[60:]:
+                        watch.pop(k, None)
+        except Exception:
+            pass
+
+        # -- bid side (original best-price rule, kept as a second opinion) ------
         if bb_size >= self.wall_size and bb_price is not None:
             if self._prev_bb_price is not None and abs(bb_price - self._prev_bb_price) < 1e-9:
                 if bb_size < self._prev_bb_size - 1e-9:
@@ -3825,7 +3863,14 @@ def analyze_market(market_data: Dict[str, Any],
 
     # ---- level 3 -------------------------------------------------------------
     # v5.3 M1+M3: L3 analyzer now ingests tick_data as aggressive flow + order_id tracking
-    l3 = Level3OrderBookAnalyzer(large_size=float(getattr(config, "L3_WHALE_THRESHOLD", 100.0)))
+    # A WALL is everyone at a price added up. A LARGE ORDER is one participant.
+    # They are different things and must not share a dial: measured on this book the
+    # biggest single order was 46 lots while walls reach 53, and the 99.9th percentile
+    # of a single order is 9. Sharing the whale threshold (10) meant l3_large_ofi saw
+    # 0-1 events per cycle all day.
+    l3 = Level3OrderBookAnalyzer(large_size=float(
+        getattr(config, "L3_LARGE_ORDER_LOTS",
+                getattr(config, "L3_WHALE_THRESHOLD", 100.0))))
     for ev in market_data.get("order_events") or []:
         l3.process_order_event(ev)
     if book:
@@ -3996,6 +4041,15 @@ def analyze_market(market_data: Dict[str, Any],
             _vv = getattr(vp, _va, 0)
             if _vv:
                 _hist.append({"price": float(_vv), "kind": "value_edge"})
+        # JUDGE session_levels: yesterday's high/low/close and today's open - the most
+        # watched prices in the market, and the scout had none of them.
+        try:
+            import session_levels as _sl
+            _st = _sl.update(price, DATA_DIR() if callable(globals().get("DATA_DIR"))
+                             else "data")
+            _hist.extend(_sl.levels_for_map(_st))
+        except Exception:
+            pass
         for _k, _v in (htf_poc or {}).items():
             if _v:
                 _hist.append({"price": float(_v), "kind": "htf_poc"})

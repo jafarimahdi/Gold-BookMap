@@ -301,6 +301,10 @@ def _refresh() -> None:
     g["SCOUT_MIN_SPREADS"] = _ffloat("SCOUT_MIN_SPREADS", 10.0)
     g["SCOUT_MIN_TARGET_USD"] = _ffloat("SCOUT_MIN_TARGET_USD", 0.0)
     g["SHOOT_MIN_REWARD_USD"] = _ffloat("SHOOT_MIN_REWARD_USD", 0.0)
+    # what counts as ONE BIG ORDER (not a wall). Measured on GC: p99.9 of a single
+    # order is 9 lots, max 46. The whale threshold (total size at a price) is a
+    # different measurement and must not be reused here.
+    g["L3_LARGE_ORDER_LOTS"] = _ffloat("L3_LARGE_ORDER_LOTS", 5.0)
     # 24u: the 8 retired judges. They still write their note lines (so the audit can
     # keep grading them) but their vote is not counted. Blank the list to restore all.
     g["RETIRED_JUDGES"] = set(

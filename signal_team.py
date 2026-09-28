@@ -71,10 +71,14 @@ SIGNAL_JUDGES = {
     # D7a (2026-09-25): moved here from POWER. They name REMEMBERED prices, and naming
     # a price is a door-maker's job. They also answer the owner's rule L2 - "what
     # happened previously when the price was here before".
-    "history": ["poc_day", "htf_poc", "supply_demand"],
+    "history": ["poc_day", "htf_poc", "supply_demand", "vwap", "value_edge",
+                # hired 2026-09-28: the most-watched prices in the market
+                "session_levels"],
     # hired 2026-09-25: nobody else watches walls DISAPPEAR, and an emptying corridor
     # is what lets price run
-    "change": ["road_vacuum"],
+    "change": ["road_vacuum",
+               # hired 2026-09-28: "shrinking" is not one thing - speed decides the trade
+               "wall_burn_rate"],
     # LEFT THIS TEAM: queue_pos -> moved to the SHOOTER (D7b). "Would we get filled"
     # is a question about this moment of execution, not about the map.
 }
@@ -127,7 +131,8 @@ class Level:
 
     __slots__ = ("price", "side", "first_seen", "last_seen", "cycles_seen",
                  "missing", "size_now", "size_first", "size_max", "sources",
-                 "refills", "spoofed", "attacked", "big_player", "outlier_x")
+                 "refills", "spoofed", "attacked", "big_player", "outlier_x",
+                 "samples")
 
     def __init__(self, price: float, side: str, size: float, now: float):
         self.price = price
@@ -145,6 +150,7 @@ class Level:
         self.attacked = 0
         self.big_player = False
         self.outlier_x = 0.0
+        self.samples = [(now, size)]      # (when, how big) - the burn-rate judge
 
     # -- what the memory makes possible -------------------------------------
     @property
@@ -164,6 +170,36 @@ class Level:
             return 0.0
         chg = (self.size_now - self.size_first) / self.size_first
         return max(-1.0, min(1.0, chg))
+
+    @property
+    def burn_rate(self) -> float:
+        """JUDGE wall_burn_rate: lots eaten per MINUTE.
+
+        "Shrinking" is not one thing. A 30-lot wall losing 1 lot a minute will stand for
+        half an hour - sell into it. The same wall losing 10 a minute is gone in three
+        minutes - go THROUGH it. Same word, opposite trade. Nothing else measures speed.
+        """
+        if len(self.samples) < 2:
+            return 0.0
+        t0, s0 = self.samples[0]
+        t1, s1 = self.samples[-1]
+        mins = (t1 - t0) / 60.0
+        if mins < 1e-6:
+            return 0.0
+        return (s0 - s1) / mins          # positive = being eaten
+
+    @property
+    def burn_word(self) -> str:
+        r = self.burn_rate
+        if r <= 0.5:
+            return "solid"
+        life = (self.size_now / r) if r > 0 else 999.0
+        return "melting-fast" if life < 3 else ("melting" if life < 10 else "eroding")
+
+    @property
+    def minutes_left(self) -> float:
+        r = self.burn_rate
+        return round(self.size_now / r, 1) if r > 0.5 else 999.0
 
     @property
     def trend_word(self) -> str:
@@ -276,6 +312,10 @@ class LevelBook:
                     # reports growth that never happened.
                     if lv.cycles_seen <= 1:
                         lv.size_first = lv.size_now
+                    if first_touch_this_cycle:
+                        lv.samples.append((now, lv.size_now))
+                        if len(lv.samples) > 12:
+                            lv.samples.pop(0)
             seen_now.add(p)
             return lv
 
@@ -463,6 +503,11 @@ class LevelBook:
             resistance = min(1.0, resistance + 0.10)
         # A wall that appears exactly where the market reacted before is the strongest
         # thing the scout can find: live orders AND a memory of the place.
+        # a door being eaten fast will not be there when price arrives
+        if lv.burn_word == "melting-fast":
+            resistance *= 0.45
+        elif lv.burn_word == "melting":
+            resistance *= 0.75
         if lv.size_now > 0 and any(s in ("poc_day", "htf_poc", "vwap", "supply", "demand")
                                    for s in lv.sources):
             resistance = min(1.0, resistance + 0.12)
@@ -475,6 +520,8 @@ class LevelBook:
             "attacked": lv.attacked, "big_player": lv.big_player,
             "sources": list(lv.sources), "missing": lv.missing,
             "outlier_x": lv.outlier_x,
+            "burn": round(lv.burn_rate, 2), "burn_word": lv.burn_word,
+            "minutes_left": lv.minutes_left,
             "attraction": round(max(0.0, min(1.0, attraction)), 3),
             "resistance": round(max(0.0, min(1.0, resistance)), 3),
         }
