@@ -42,9 +42,9 @@ Bookmap trades with timestamps + validated aggressor sides
 
 `power_m5_adapter.py` accepts timestamped trades and only trusts direct side labels by default (`is_direct` / `is_bookmap_direct`). It builds `footprint_delta`, `big_prints`, `footprint_levels`, and, when there is enough preceding data, short-window `cvd_momentum`. It deliberately does not fabricate `l3_aggr_limit`, a sweep, an absorption vote, or a range/breakout judgement.
 
-The adapter needs the **data instrument's tick size**, not automatically the CFD's tick size. Your configuration lists a CFD tick size of 0.05, while the Bookmap feed is futures-side; verify the Bookmap contract's actual increment before calling the adapter.
+The adapter needs the **data instrument's tick size**, not automatically the CFD's tick size. The checked feed label was `GCZ6.COMEX@RITHMIC`, and the observed minimum gap was 0.1; CME's GC contract specification also lists a $0.10 minimum fluctuation per troy ounce. This supports using 0.10 for that feed, not the CFD's 0.05 setting. Reconfirm if the Bookmap instrument changes.
 
-If timestamps or trusted side labels are absent, or the feed is stale, the adapter reports a blocker so POWER returns `NEITHER`. Do not switch `trust_explicit_side=True` until that source's side semantics are verified.
+If timestamps or trusted side labels are absent, or the feed is stale, the adapter reports a blocker so POWER returns `NEITHER`. The adapter also leaves `market_regime=UNKNOWN`; Power v2.2 will return NEITHER until another component supplies a verified TREND/RANGE state. Do not switch `trust_explicit_side=True` until that source's side semantics are verified.
 
 ## Intended call sequence (illustrative only)
 

@@ -38,10 +38,10 @@ Back in Git Bash:
 
 ```bash
 cd /a/gitHub/Gold-BookMap
-python -m unittest -v test_power_team_v2.py test_power_memory_book.py
+python -m unittest -v test_power_team_v2.py test_power_memory_book.py test_power_m5_adapter.py
 ```
 
-Expected result: all 16 tests pass. These are code-behavior tests, not evidence of a trading edge or proof that the app's incoming data is M5-normalized.
+Expected result: all 25 tests pass. These are code-behavior tests, not evidence of a trading edge or proof that the app's incoming data is M5-normalized.
 
 ## 4. Review what changed
 
@@ -62,7 +62,7 @@ The module is not automatically connected to the app. Unit tests exercise the wr
 
 The current caller expects the legacy Power schema (`pick=above/below`, `confidence`). V2 returns `direction=UP/DOWN/NEITHER`, force shares, activity, coverage, and reason codes. A later integration must update the new-version caller and Shooting/permission interface to consume `direction` and explicitly handle `NEITHER`.
 
-Before activation, the adapter must calculate the directional values from a consistent rolling M5 window, validate freshness/side labels, and supply trustworthy range/breakout and data-quality flags. The current candle-sweep signal is excluded because its project caller uses synthetic high/low/volume inputs.
+Before activation, the adapter must calculate the directional values from a consistent rolling M5 window, validate freshness/side labels, and receive an explicit, trustworthy `market_regime=TREND/RANGE` plus breakout/data-quality flags. Missing/unknown regime now deliberately returns NEITHER. The current candle-sweep signal is excluded because its project caller uses synthetic high/low/volume inputs.
 
 Keep the existing trading configuration unchanged; do not launch the robot while experimenting. Test with historical/replay data first. Never enable live orders merely because unit tests pass.
 

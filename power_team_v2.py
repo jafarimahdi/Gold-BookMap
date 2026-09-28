@@ -19,7 +19,7 @@ import math
 __all__ = ["decide", "describe", "DIRECTIONAL_WEIGHTS", "DIRECTIONAL_FAMILIES",
            "CONTEXT_JUDGES"]
 
-VERSION = "2.1.0"
+VERSION = "2.2.0"
 TIMEFRAME = "M5"
 
 # Group correlated inputs. Executed-flow readings together can contribute no
@@ -76,11 +76,14 @@ DEFAULTS = {
     "min_dominance": 0.60,
     "min_valid_judges": 3,
     "min_valid_families": 2,
+    "min_family_signal": 0.15,
+    "min_agreeing_families": 2,
     "range_dominance": 0.70,
     "range_activity": 0.50,
     "range_coverage": 0.70,
     "range_min_valid_judges": 4,
     "range_min_valid_families": 3,
+    "range_min_agreeing_families": 3,
 }
 
 
@@ -114,8 +117,10 @@ def decide(
 
     Hard blockers in ``context``: ``feed_stale``, ``data_quality_ok=False``,
     ``high_impact_news``, ``major_contradiction``, ``force_unreliable`` or
-    ``out_of_session``. A range yields NEITHER unless ``breakout_confirmed`` is
-    independently established; confirmed range breakouts face stricter thresholds.
+    ``out_of_session``. Caller must explicitly provide ``market_regime`` as
+    TREND or RANGE. Missing/unknown regime returns NEITHER. RANGE yields NEITHER
+    unless ``breakout_confirmed`` is independently established; confirmed range
+    breakouts face stricter thresholds and require all evidence families to agree.
     """
     judges = judges if isinstance(judges, Mapping) else {}
     context = context if isinstance(context, Mapping) else {}
@@ -185,8 +190,14 @@ def decide(
     activity = max(0.0, min(1.0, activity))
     dominant_share = max(up_pct, down_pct) / 100.0
     valid_family_count = sum(1 for f in family_scores.values() if f["coverage"] > 0)
-    in_range = bool(context.get("in_range", False))
+    family_floor = params["min_family_signal"]
+    supporting_up = sum(1 for values in family_scores.values()
+                        if values["coverage"] > 0 and values["score"] >= family_floor)
+    supporting_down = sum(1 for values in family_scores.values()
+                          if values["coverage"] > 0 and values["score"] <= -family_floor)
+    regime = str(context.get("market_regime", "UNKNOWN") or "UNKNOWN").upper()
     breakout_confirmed = bool(context.get("breakout_confirmed", False))
+    in_range = regime == "RANGE"
 
     blockers = (
         ("feed_stale", "STALE_FEED"),
@@ -203,7 +214,9 @@ def decide(
             direction, reason = "NEITHER", code
             break
     else:
-        if in_range and not breakout_confirmed:
+        if regime not in {"TREND", "RANGE"}:
+            direction, reason = "NEITHER", "REGIME_UNKNOWN_OR_UNCONFIRMED"
+        elif in_range and not breakout_confirmed:
             direction, reason = "NEITHER", "RANGE_NO_CONFIRMED_BREAKOUT"
         else:
             strict_range = in_range and breakout_confirmed
@@ -214,6 +227,8 @@ def decide(
                              else params["min_valid_judges"])
             min_families = int(params["range_min_valid_families"] if strict_range
                                else params["min_valid_families"])
+            min_agreeing = int(params["range_min_agreeing_families"] if strict_range
+                               else params["min_agreeing_families"])
             if (len(used) < min_judges or valid_family_count < min_families
                     or coverage < min_coverage):
                 direction, reason = "NEITHER", "INSUFFICIENT_COVERAGE"
@@ -221,15 +236,18 @@ def decide(
                 direction, reason = "NEITHER", "WEAK_OR_NO_FORCE"
             elif dominant_share < min_dominance:
                 direction, reason = "NEITHER", "FORCE_TOO_BALANCED"
-            elif up_pct > down_pct:
-                direction, reason = "UP", "UPWARD_FORCE_DOMINATES"
-            elif down_pct > up_pct:
-                direction, reason = "DOWN", "DOWNWARD_FORCE_DOMINATES"
             else:
-                direction, reason = "NEITHER", "FORCE_TOO_BALANCED"
+                if up_pct > down_pct and supporting_up >= min_agreeing:
+                    direction, reason = "UP", "UPWARD_FORCE_DOMINATES"
+                elif down_pct > up_pct and supporting_down >= min_agreeing:
+                    direction, reason = "DOWN", "DOWNWARD_FORCE_DOMINATES"
+                elif up_pct > down_pct or down_pct > up_pct:
+                    direction, reason = "NEITHER", "INSUFFICIENT_FAMILY_AGREEMENT"
+                else:
+                    direction, reason = "NEITHER", "FORCE_TOO_BALANCED"
 
     context_keys = (
-        "in_range", "breakout_confirmed", "high_impact_news", "feed_stale",
+        "market_regime", "breakout_confirmed", "high_impact_news", "feed_stale",
         "data_quality_ok", "major_contradiction", "force_unreliable",
         "out_of_session", "volume_roc", "absorption", "flow_efficiency",
         "cvd_divergence", "sweep", "stall_clock", "value_area", "mtf",
@@ -247,6 +265,8 @@ def decide(
         "activity": round(activity, 4),
         "coverage": round(coverage, 4),
         "valid_families": [k for k, v in family_scores.items() if v["coverage"] > 0],
+        "supporting_up_families": supporting_up,
+        "supporting_down_families": supporting_down,
         "family_scores": family_scores,
         "valid_judges": list(used),
         "judge_readings": used,

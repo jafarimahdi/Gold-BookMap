@@ -31,7 +31,7 @@ These are new filenames. Do not overwrite the old `power_team.py` or edit any ap
 python -m unittest -v test_power_team_v2.py test_power_memory_book.py test_power_m5_adapter.py
 ```
 
-Expected result: 21 tests pass. This verifies synthetic test cases and software behavior, not live-feed semantics or a trading edge.
+Expected result: 25 tests pass. This verifies synthetic test cases and software behavior, not live-feed semantics or a trading edge.
 
 ## 4. Review the adapter assumptions before using your own data
 

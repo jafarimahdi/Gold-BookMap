@@ -46,10 +46,11 @@ The team also reports:
 
 Initial conservative defaults in `power_team_v2.py`:
 
-- normal conditions: at least 55% weighted coverage, at least 3 valid judges, activity at least 0.18, and a leading side with at least 60% of directional evidence;
-- range: `NEITHER` unless a separate, reliable breakout confirmation is supplied;
-- confirmed range breakout: stricter thresholds—at least 70% coverage, 4 valid judges, all 3 independent evidence families represented, activity at least 0.50, and a side share of at least 70%;
-- stale feed, bad data quality, or high-impact news: `NEITHER`.
+- the caller must explicitly supply `market_regime=TREND` or `RANGE`; missing/unknown regime returns `NEITHER`;
+- normal TREND conditions: at least 55% weighted coverage, at least 3 valid judges, at least 2 valid evidence families, activity at least 0.18, a leading side with at least 60% of directional evidence, and at least 2 families with a signed score of at least 0.15 in that direction;
+- RANGE: `NEITHER` unless a separate, reliable breakout confirmation is supplied;
+- confirmed range breakout: stricter thresholds—at least 70% coverage, 4 valid judges, all 3 independent evidence families represented and agreeing, activity at least 0.50, and a side share of at least 70%;
+- stale feed, bad data quality, high-impact news, or a major contradiction: `NEITHER`.
 
 These are safe starting points for a **paper/research version**, not proven trading thresholds. Calibrate only with time-separated walk-forward tests and retain an untouched out-of-sample period.
 
@@ -64,7 +65,7 @@ The code caps evidence by family: executed flow has 60% of the total budget, lar
 | `footprint_delta` | Executed-flow family | Keep | Aggressor buy/sell imbalance across traded prices. Strong M5 input only if built from the same rolling five-minute window. |
 | `l3_aggr_limit` | Executed-flow family | Keep, rename in UI if possible | Executed aggressive buying versus selling shows urgency. In the current data model it reads aggressive executed volume; “limit” in the name can mislead. |
 | `cvd_momentum` | Executed-flow family, lower subweight | Keep only as short-window change | Recent CVD change can reveal pressure building or fading. Do not pass a session-cumulative value as M5 force; it overlaps with delta. |
-| `big_prints` | Large-executed-trades family | Conditional keep | Separates unusually large signed trades from small-trade churn. Size is a proxy, not proof of trader identity. The current implementation's 1,500-tick sample is not a guaranteed five-minute window; replace it with timestamp-bounded M5 sampling and validate side labels before enabling. |
+| `big_prints` | Large-executed-trades family | Conditional keep | Separates unusually large signed trades from small-trade churn. Size is a proxy, not proof of trader identity. Its signed contribution is scaled by total M5 volume so a small selected subset cannot claim a full-strength vote; if sizes do not distinguish larger prints from ordinary ones, the judge is excluded. |
 | `footprint_levels` | Breadth family | Keep, modest influence | Measures whether the imbalance is spread across levels rather than concentrated in one. Normalize with a valid M5 sample and keep its entire family weight capped. |
 | `sweep` | Not a v2 force vote | Remove from POWER for now; retain for later review | The repository's current sweep is a candle-based stop-hunt/reversal label (high taken then rejected = bearish; low taken then rejected = bullish), not an aggressive order sweeping the book. More seriously, the current caller supplies synthetic high/low values based on close ± 0.3 ATR and constant volume. That is not reliable evidence for a force score. Reintroduce only after it uses real timestamped OHLCV or MBO/trades, has an explicit semantic (continuation sweep vs stop-run reversal), direction, and tests. |
 

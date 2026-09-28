@@ -20,7 +20,7 @@ class PowerM5AdapterTests(unittest.TestCase):
             ts = self.now - timedelta(minutes=4, seconds=45) + timedelta(seconds=i * 7)
             self.rows.append({
                 "timestamp": ts.isoformat(), "price": 4151 + (i % 5) * 0.1,
-                "volume": 1.0, "side": "BUY", "is_direct": True,
+                "volume": 10.0 if i < 3 else 1.0, "side": "BUY", "is_direct": True,
             })
         # A recent timestamp keeps the feed-freshness guard satisfied.
         self.rows.append({
@@ -28,7 +28,7 @@ class PowerM5AdapterTests(unittest.TestCase):
             "price": 4152.0, "volume": 2.0, "side": "BUY", "is_direct": True,
         })
 
-    def test_builds_timestamp_bounded_inputs_and_can_choose_up(self):
+    def test_builds_timestamp_bounded_inputs_and_requires_regime_before_side(self):
         built = build_m5_inputs(self.rows, now=self.now, tick_size=0.1, min_trades=20)
         self.assertFalse(built["context"]["feed_stale"])
         self.assertTrue(built["context"]["data_quality_ok"])
@@ -36,9 +36,25 @@ class PowerM5AdapterTests(unittest.TestCase):
         self.assertIn("big_prints", built["judges"])
         self.assertIn("footprint_levels", built["judges"])
         self.assertNotIn("sweep", built["judges"])
+        self.assertGreater(built["diagnostics"]["big_print_volume_share"], 0.0)
+        self.assertLessEqual(built["judges"]["big_prints"]["value"],
+                             built["diagnostics"]["big_print_volume_share"] + 1e-9)
+        # The adapter cannot classify TREND/RANGE, so it must fail closed.
         answer = decide(built["judges"], context=built["context"])
+        self.assertEqual(answer["direction"], "NEITHER")
+        self.assertEqual(answer["reason_code"], "REGIME_UNKNOWN_OR_UNCONFIRMED")
+        # A separately confirmed regime allows the pure scoring logic to be tested.
+        answer = decide(built["judges"],
+                        context={**built["context"], "market_regime": "TREND"})
         self.assertEqual(answer["direction"], "UP")
         self.assertAlmostEqual(answer["up_power_pct"] + answer["down_power_pct"], 100.0)
+
+    def test_uniform_trade_sizes_do_not_create_a_fake_big_print_judge(self):
+        rows = [dict(row, volume=1.0) for row in self.rows]
+        built = build_m5_inputs(rows, now=self.now, tick_size=0.1, min_trades=20)
+        self.assertNotIn("big_prints", built["judges"])
+        self.assertEqual(built["diagnostics"]["big_print_count"], 0)
+        self.assertEqual(built["diagnostics"]["big_print_volume_share"], 0.0)
 
     def test_untrusted_side_labels_fail_closed_by_default(self):
         rows = [dict(row, is_direct=False) for row in self.rows]

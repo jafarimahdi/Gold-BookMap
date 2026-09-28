@@ -162,18 +162,29 @@ def build_m5_inputs(
     cvd_momentum = max(-1.0, min(1.0,
                          (current_imbalance - previous_imbalance) / 2.0))
 
-    # Large-print direction: top 2% of the current direct-side prints, with a
-    # configurable minimum lot size. It is a neutral valid observation if no
-    # print crosses the cutoff; it is not a fabricated vote.
+    # Large-print direction: top 2% of current prints, but only when the
+    # cutoff is genuinely above the sample median. Scale its signed contribution
+    # by ALL M5 volume, not only the selected prints; otherwise one print could
+    # create an exaggerated +/-1 family score regardless of its market share.
     volumes = sorted(volume for _, volume, _ in current)
     big_value = 0.0
-    if volumes:
+    big_cutoff = None
+    big_count = 0
+    big_volume_share = 0.0
+    big_quality = 0.0
+    total_current_volume = sum(volume for _, volume, _ in current)
+    if volumes and len(volumes) >= min_trades:
         idx = min(len(volumes) - 1, max(0, math.ceil(0.98 * len(volumes)) - 1))
-        cutoff = max(float(min_big_print_size), volumes[idx])
-        big = [(v, side) for _, v, side in current if v >= cutoff]
-        big_total = sum(v for v, _ in big)
-        if big_total > 0:
-            big_value = sum(v * side for v, side in big) / big_total
+        median = volumes[len(volumes) // 2]
+        big_cutoff = max(float(min_big_print_size), volumes[idx])
+        if big_cutoff > median:
+            big = [(volume, side) for _, volume, side in current if volume >= big_cutoff]
+            big_count = len(big)
+            big_total = sum(volume for volume, _ in big)
+            if big_total > 0 and total_current_volume > 0:
+                big_value = sum(volume * side for volume, side in big) / total_current_volume
+                big_volume_share = big_total / total_current_volume
+                big_quality = current_quality
 
     # Breadth: average signed imbalance at each instrument-tick price bin.
     by_level: Dict[int, List[float]] = {}
@@ -208,10 +219,11 @@ def build_m5_inputs(
             "value": current_imbalance,
             "quality": current_quality,
         }
-        judges["big_prints"] = {
-            "value": max(-1.0, min(1.0, big_value)),
-            "quality": current_quality,
-        }
+        if big_quality > 0:
+            judges["big_prints"] = {
+                "value": max(-1.0, min(1.0, big_value)),
+                "quality": big_quality,
+            }
         if breadth_quality > 0:
             judges["footprint_levels"] = {
                 "value": max(-1.0, min(1.0, breadth)),
@@ -228,6 +240,9 @@ def build_m5_inputs(
         "context": {
             "feed_stale": feed_stale,
             "data_quality_ok": data_quality_ok,
+            # The adapter deliberately cannot decide whether a market is trending
+            # or ranging. Missing regime must make Power return NEITHER.
+            "market_regime": "UNKNOWN",
         },
         "diagnostics": {
             "timeframe": "M5",
@@ -240,6 +255,10 @@ def build_m5_inputs(
             "timestamp_coverage": round(timestamp_quality, 4),
             "latest_tick_age_seconds": round(tick_age, 3) if tick_age is not None else None,
             "price_levels": len(level_imbalances),
+            "big_print_cutoff": big_cutoff,
+            "big_print_count": big_count,
+            "big_print_volume_share": round(big_volume_share, 4),
+            "big_print_signed_share_of_total_volume": round(big_value, 4),
             "current_delta_imbalance": round(current_imbalance, 4),
             "previous_delta_imbalance": round(previous_imbalance, 4),
             "note": "No M5 range/breakout judgement or L3 resting-book vote is inferred here.",
