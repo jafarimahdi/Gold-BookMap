@@ -150,8 +150,14 @@ def plan_shot(signal_map: Dict[str, Any], power: Dict[str, Any],
     min_rr = _f(getattr(config, "SHOOT_MIN_RR", 1.2), 1.2)
     min_conf = _f(getattr(config, "SHOOT_MIN_CONF", 0.30), 0.30)
 
+    # the same floor the scout uses, applied to the ACTUAL reward of this plan
+    min_usd = _f(getattr(config, "SHOOT_MIN_REWARD_USD", 0.0), 0.0)
     if reward <= spread * 3.0:
         return _no("NO_GO", why + [f"reward {reward:.2f} is barely the spread - not a trade"],
+                   price, tp, sl, rr, first_stop, shelter, target)
+    if min_usd > 0 and reward < min_usd:
+        return _no("NO_GO", why + [f"reward {reward:.2f} is below your floor of "
+                                   f"{min_usd:.2f} - too small to bother with"],
                    price, tp, sl, rr, first_stop, shelter, target)
     if rr < min_rr:
         return _no("NO_GO", why + [f"R:R {rr:.2f} below {min_rr:.2f} - the shelter is too far "

@@ -1943,6 +1943,17 @@ class SignalEngine:
         """Return (signal_strength 0-100, direction, confidence 0-100, notes)."""
         votes: List[Tuple[float, float]] = []
         macro_pairs: List[Tuple[float, float]] = []   # macro votes, for the opposition rule
+        # 24u: one gate for every retired judge. Returns True if this judge may vote.
+        _retired = getattr(config, "RETIRED_JUDGES", set()) or set()
+        def _may_vote(judge_name):
+            return judge_name not in _retired
+        notes: List[str] = []
+
+        # 26j/D6 (position fixed 2026-09-28): decide ONCE, and do it AFTER `notes`
+        # exists. The original placement sat six lines above `notes: List[str] = []`
+        # and raised UnboundLocalError the first time a HIGH-impact event was far
+        # away - which is why it survived Friday (news was LOW all evening) and broke
+        # Monday morning at cycle 1. py_compile cannot see this; only running it can.
         # 26j/D6: decide ONCE, before anything reads it. "HIGH impact" only counts while
         # the event is genuinely near - the calendar always holds a HIGH event somewhere,
         # which kept the robot at permanent high alert (measured 70% of the day).
@@ -1955,11 +1966,6 @@ class SignalEngine:
         if getattr(news, "impact_level", "LOW") == "HIGH" and not _high_now:
             notes.append(f"HIGH event is {_mins:.0f} min away (> {_hi_win:.0f} window) "
                          f"-> treated as a normal day, no boost")
-        # 24u: one gate for every retired judge. Returns True if this judge may vote.
-        _retired = getattr(config, "RETIRED_JUDGES", set()) or set()
-        def _may_vote(judge_name):
-            return judge_name not in _retired
-        notes: List[str] = []
 
         # ---- 0) NEWS-TIME GATE ----------------------------------------------
         # v7.0 P0 #2: Block entries until 60 M1 bars (bank never trades estimated vol)
@@ -3982,6 +3988,14 @@ def analyze_market(market_data: Dict[str, Any],
         _hist = []
         if getattr(vp, "poc", 0):
             _hist.append({"price": float(vp.poc), "kind": "poc_day"})
+        # the VWAP line is the day's "fair price" - the market remembers it and reacts
+        # there, which makes it a memory door like the POC
+        if getattr(vp, "vwap", 0):
+            _hist.append({"price": float(vp.vwap), "kind": "vwap"})
+        for _va in ("value_area_high", "value_area_low"):
+            _vv = getattr(vp, _va, 0)
+            if _vv:
+                _hist.append({"price": float(_vv), "kind": "value_edge"})
         for _k, _v in (htf_poc or {}).items():
             if _v:
                 _hist.append({"price": float(_v), "kind": "htf_poc"})

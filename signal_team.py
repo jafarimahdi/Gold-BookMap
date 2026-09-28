@@ -83,8 +83,13 @@ SIGNAL_JUDGES = {
 # tape, only the top 1-2% are walls, so 0-8 qualify per side. Remember 8 - more
 # than the feed usually produces, so nothing real is lost - and report 3, because
 # you only ever trade toward the nearest reachable one.
-REMEMBER_PER_SIDE = 8
+REMEMBER_LIVE = 10      # doors with real orders. The feed gives 20 levels a side, and
+                        # only outliers qualify, so 10 is generous without being noise.
+REMEMBER_MEMORY = 6     # starred places (POC, VWAP, H1/H4, order blocks). They cost
+                        # nothing to keep and they must NEVER compete with live walls
+                        # for space - that bug evicted a 23-lot target on 2026-09-28.
 REPORT_PER_SIDE = 3
+REMEMBER_PER_SIDE = REMEMBER_LIVE        # kept for anything still reading the old name
 BAND_ATR = 4.0          # reach band in ATR...
 BAND_PCT = 0.0035       # ...or this much of price, whichever is WIDER. A pure ATR band
                         # goes blind when ATR collapses (seen 2026-09-25: 4 ATR shrank
@@ -175,6 +180,9 @@ class LevelBook:
         self.levels: Dict[float, Level] = {}
         self.last_ladder: List = []
         self.band_history: List[float] = []      # total lots in the band, per cycle
+        self.protected: set = set()              # prices a live trade depends on
+        self.cfg = None                          # last config seen, for _render
+        self.last_history = {}                   # what the stars offered, and why kept
         self.cycles = 0
 
     # -- one cycle -----------------------------------------------------------
@@ -200,6 +208,7 @@ class LevelBook:
         if atr_floored:
             atr = atr_floor
 
+        self.cfg = config
         g = (lambda k, d: _f(getattr(config, k, d), d)) if config is not None else (
             lambda k, d: d)
         whale_thr = g("L3_WHALE_THRESHOLD", 10.0)
@@ -390,11 +399,28 @@ class LevelBook:
                     del self.levels[p]
 
         # --- keep the notebook small -----------------------------------------
+        # Prune by IMPORTANCE, not by distance, and give live doors and memory marks
+        # separate budgets. Closest-wins threw away the only real target on 2026-09-28
+        # because ten empty memory marks sat nearer. A door is worth keeping for its
+        # size, its history and how long we have watched it - not merely for being near.
+        def keep_score(lv):
+            if lv.price in self.protected:
+                return 1e9                      # never evict a door a trade depends on
+            s = _saturate(lv.size_now, whale_thr) * 2.0
+            s += _saturate(lv.cycles_seen, 6.0)
+            s += 0.5 * len(lv.sources)
+            s -= 0.25 * (abs(lv.price - price) / max(atr, 1e-9))
+            return s
+
         for side in ("bid", "ask"):
-            same = sorted((lv for lv in self.levels.values() if lv.side == side),
-                          key=lambda l: abs(l.price - price))
-            for lv in same[REMEMBER_PER_SIDE:]:
-                self.levels.pop(lv.price, None)
+            live = [lv for lv in self.levels.values()
+                    if lv.side == side and lv.size_now > 0]
+            mem = [lv for lv in self.levels.values()
+                   if lv.side == side and lv.size_now <= 0]
+            for group, cap in ((live, REMEMBER_LIVE), (mem, REMEMBER_MEMORY)):
+                if len(group) > cap:
+                    for lv in sorted(group, key=keep_score, reverse=True)[cap:]:
+                        self.levels.pop(lv.price, None)
 
         out = self._render(price, atr, whale_thr, banned, level3, order_flow, spread)
         out["atr_raw"] = round(atr_raw, 3)
@@ -435,6 +461,11 @@ class LevelBook:
         # standing far above your neighbours is itself evidence of intent
         if lv.outlier_x >= OUTLIER_X:
             resistance = min(1.0, resistance + 0.10)
+        # A wall that appears exactly where the market reacted before is the strongest
+        # thing the scout can find: live orders AND a memory of the place.
+        if lv.size_now > 0 and any(s in ("poc_day", "htf_poc", "vwap", "supply", "demand")
+                                   for s in lv.sources):
+            resistance = min(1.0, resistance + 0.12)
 
         return {
             "price": lv.price, "side": lv.side, "size": round(lv.size_now, 1),
@@ -456,7 +487,17 @@ class LevelBook:
         # trip - from the owner's screenshot, 4415 was 3x the spread away and 4412.5 was
         # 5x, while the one real target was 47x. Too-close doors stay in the notebook
         # (their history still matters) but are never offered as a target.
-        min_gap = MIN_SPREADS * _f(spread)
+        # How far away a door must be before it is worth trading. Two ways to say it,
+        # and we take whichever is STRICTER:
+        #   SCOUT_MIN_SPREADS   - in spreads (scales with how expensive trading is now)
+        #   SCOUT_MIN_TARGET_USD- in plain dollars (a floor you can reason about)
+        # Both live in .env so they can be tuned without touching code.
+        _c = self.cfg
+        _cfg_sp = _f(getattr(_c, "SCOUT_MIN_SPREADS", MIN_SPREADS), MIN_SPREADS) \
+            if _c is not None else MIN_SPREADS
+        _cfg_usd = _f(getattr(_c, "SCOUT_MIN_TARGET_USD", 0.0), 0.0) \
+            if _c is not None else 0.0
+        min_gap = max(_cfg_sp * _f(spread), _cfg_usd)
         too_close = 0
         for r in rows:
             r["too_close"] = bool(min_gap > 0 and abs(r["price"] - price) < min_gap)
@@ -466,7 +507,22 @@ class LevelBook:
         # resting size it is not yet a door you can aim at. Keep it in the notebook - so
         # the moment real size appears there we already know its history - but never
         # offer a 0-lot level as a target.
+        # LIVE doors have orders waiting right now. MEMORY doors are places the market
+        # cared about before - the day's POC, the H1/H4 POC, old order blocks, the VWAP
+        # line. They hold no orders at this second, so they are NOT live targets - but
+        # they are absolutely worth knowing, because when price returns to them it often
+        # reacts again. Keeping them in a separate list is the honest way to say
+        # "important, but not the same kind of thing as a wall".
         usable = [r for r in rows if not r["too_close"] and r["size"] > 0]
+        # Memory doors are NOT subject to the profit filter. That filter asks "is this
+        # far enough away to be worth trading" - the wrong question for a starred place,
+        # whose job is to say WHERE TO WATCH, not where to trade. The POC and the VWAP
+        # sit within a dollar or two of price most of the day; filtering them for being
+        # close made every one of them invisible (memory doors read 0 all day 2026-09-28
+        # while they were being found and tracked correctly the whole time).
+        memory = [r for r in rows if r["size"] <= 0]
+        memory.sort(key=lambda r: r["dist_atr"])
+        memory = memory[:REPORT_PER_SIDE * 2]
         above = sorted([r for r in usable if r["above"]],
                        key=lambda r: -r["attraction"])[:REPORT_PER_SIDE]
         below = sorted([r for r in usable if not r["above"]],
@@ -491,6 +547,12 @@ class LevelBook:
             "n": len(usable), "tracked": len(self.levels), "cycles": self.cycles,
             "too_close": too_close, "min_gap": round(min_gap, 2),
             "road_vacuum": self.vacuum(),
+            "memory_doors": memory,
+            # every source currently in the notebook, including levels that are not
+            # reported. Without this, a tracked-but-unreported level is invisible.
+            "tracked_sources": sorted({s for lv in self.levels.values()
+                                       for s in lv.sources}),
+            "history_report": dict(self.last_history or {}),
             "banned_spoof": banned, "price": round(price, 2), "atr": round(atr, 3),
             "context": ctx,
         }
@@ -508,12 +570,22 @@ class LevelBook:
         """
         now = time.time()
         atr = max(_f(atr), 1e-9)
+        # the same ATR floor ingest() uses - without it a collapsed ATR shrinks the band
+        # and silently rejects every star
+        floor_pct = _f(getattr(self.cfg, "SCOUT_ATR_FLOOR_PCT", 0.0004), 0.0004) \
+            if self.cfg is not None else 0.0004
+        atr = max(atr, price * floor_pct)
         band = max(BAND_ATR * atr, price * BAND_PCT)
-        added = 0
+        added, refreshed = 0, 0
+        log = []
         for h in (hist or []):
             hp = round(_f(h.get("price")), 2)
             kind = str(h.get("kind") or "history")
-            if hp <= 0 or abs(hp - price) > band:
+            if hp <= 0:
+                log.append(f"{kind}:no-price")
+                continue
+            if abs(hp - price) > band:
+                log.append(f"{kind}:too-far({abs(hp-price):.1f}>{band:.1f})")
                 continue
             lv = self.levels.get(hp)
             if lv is None:
@@ -522,9 +594,16 @@ class LevelBook:
                 added += 1
             else:
                 lv.last_seen = now
+                refreshed += 1
+            # BUGFIX: a star refreshed every cycle must not age. Without this its
+            # "missing" counter climbed until FORGET_CYCLES deleted it, and its scores
+            # faded 15% per cycle while it was being re-offered the whole time.
+            lv.missing = 0
             if kind not in lv.sources:
                 lv.sources.append(kind)
-        return {"history_added": added}
+        self.last_history = {"offered": len(hist or []), "added": added,
+                             "refreshed": refreshed, "rejected": log}
+        return {"history_added": added, "detail": self.last_history}
 
     def road_to(self, price: float, target: float) -> Dict[str, Any]:
         """How crowded is the corridor between price and that door?
@@ -564,6 +643,18 @@ class LevelBook:
         best = max(near, key=lambda x: x[1])
         return {"price": best[0], "size": round(best[1], 1),
                 "distance": round(abs(best[0] - price), 2)}
+
+    def protect(self, prices) -> None:
+        """Mark prices that an open trade depends on - they can never be evicted.
+
+        If the escort is guarding a trade aimed at 4400 and the notebook quietly drops
+        4400, the escort loses the very door it is watching. Whoever owns a position
+        owns the right to keep its door alive.
+        """
+        try:
+            self.protected = {round(float(p), 2) for p in (prices or []) if p}
+        except Exception:
+            self.protected = set()
 
     def vacuum(self) -> Dict[str, Any]:
         """Is the corridor emptying or filling? -> the road_vacuum judge's reading."""
@@ -626,6 +717,10 @@ def describe(smap: Dict[str, Any]) -> str:
     elif vac.get("state") == "FILLING":
         tail += (f" | road filling {vac.get('was')} -> {vac.get('now')} lots "
                  f"({vac.get('change_pct'):+.0f}%) - getting harder")
+    mem = smap.get("memory_doors") or []
+    if mem:
+        tail += " | memory: " + ", ".join(
+            f"{m['price']:.2f}({'/'.join(m['sources'])})" for m in mem[:3])
     tail += f" | tracking {smap.get('tracked', 0)}"
     if smap.get("atr_floored"):
         tail += (f" | ATR {smap.get('atr_raw')} too small, floored to "

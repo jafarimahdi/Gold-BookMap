@@ -295,6 +295,12 @@ def _refresh() -> None:
     # Without this the calendar always contains a HIGH event somewhere and the robot
     # ran at "HIGH alert" 70% of the day. 99999 restores the old always-on behaviour.
     g["NEWS_HIGH_WINDOW_MINUTES"] = _ffloat("NEWS_HIGH_WINDOW_MINUTES", 120.0)
+    # --- how far away a target must be before it is worth trading ---------------
+    # The scout ignores doors closer than this; the shooter refuses plans that pay
+    # less. Two ways to express the same idea - the stricter one wins.
+    g["SCOUT_MIN_SPREADS"] = _ffloat("SCOUT_MIN_SPREADS", 10.0)
+    g["SCOUT_MIN_TARGET_USD"] = _ffloat("SCOUT_MIN_TARGET_USD", 0.0)
+    g["SHOOT_MIN_REWARD_USD"] = _ffloat("SHOOT_MIN_REWARD_USD", 0.0)
     # 24u: the 8 retired judges. They still write their note lines (so the audit can
     # keep grading them) but their vote is not counted. Blank the list to restore all.
     g["RETIRED_JUDGES"] = set(
