@@ -487,6 +487,8 @@ def run_step2(data):
             # 26r: the POWER team's pick - which door it expected price to reach
             # first. Stored so the tape can mark it afterwards, per judge.
             "power": (getattr(snapshot, "power", None) or {}),
+            # POWER v2 shadow-only result; separate from and never substitutes for legacy Power.
+            "power_v2": (getattr(snapshot, "power_v2", None) or {}),
             # 26z: the SHOOTING team's plan, so the tape can mark it afterwards
             "shot": (getattr(snapshot, "shot", None) or {}),
             # 27c: the ESCORT team - what it guarded and what it did about it

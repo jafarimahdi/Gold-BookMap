@@ -261,6 +261,8 @@ class MarketSnapshot:
     judge_votes: List[Dict[str, Any]] = field(default_factory=list)
     # 26r: the POWER team's answer - which door first, and how sure
     power: Dict[str, Any] = field(default_factory=dict)
+    # POWER v2 shadow output; never consumed by legacy decision logic.
+    power_v2: Dict[str, Any] = field(default_factory=dict)
     # 26z: the SHOOTING team's plan - GO/NO_GO/WAIT with target and stop from the book
     shot: Dict[str, Any] = field(default_factory=dict)
     # 27c: the ESCORT team - paper trades being guarded, and how they finished
@@ -4091,6 +4093,33 @@ def analyze_market(market_data: Dict[str, Any],
     except Exception as _pw_err:
         notes.append(f"power team unavailable: {type(_pw_err).__name__}: {_pw_err}")
 
+    # POWER v2 shadow: independently evaluates the completed M5 bar and writes
+    # only a separate snapshot field/diary value. It is not used by
+    # Shooting, Escort, Step 3 decision logic, or execution/risk decisions.
+    _power_v2 = {}
+    if bool(getattr(config, "POWER_V2_SHADOW_ENABLED", False)):
+        try:
+            from power_v2_shadow import run_power_v2_shadow
+            _memory_root = None
+            if bool(getattr(config, "POWER_V2_MEMORY_ENABLED", False)):
+                _memory_root = getattr(config, "DATA_DIR", "data") / "power_v2_memory"
+            _power_v2 = run_power_v2_shadow(
+                tick_data, now=now, symbol=symbol,
+                tick_size=float(getattr(config, "POWER_M5_TICK_SIZE", 0.0) or 0.0),
+                memory_root=_memory_root)
+            notes.append(
+                "POWER v2 SHADOW | "
+                f"{_power_v2.get('direction', 'NEITHER')} "
+                f"up={_power_v2.get('up_power_pct', 0):.1f}% "
+                f"down={_power_v2.get('down_power_pct', 0):.1f}% "
+                f"reason={_power_v2.get('reason_code', _power_v2.get('reason', 'UNAVAILABLE'))}"
+            )
+        except Exception as _pw2_err:
+            # Shadow failures must not interrupt existing analysis.
+            _power_v2 = {"shadow_only": True, "direction": "NEITHER",
+                         "reason": f"SHADOW_ERROR:{type(_pw2_err).__name__}"}
+            notes.append(f"POWER v2 shadow unavailable: {type(_pw2_err).__name__}")
+
     # ---- 26z: THE SHOOTING TEAM ("the shooter") -------------------------------
     # Checks the FRONT doors (the corridor to the target) and the BACK doors (shelter
     # to lean on), then writes a full plan: GO / NO_GO / WAIT, with target and stop
@@ -4127,7 +4156,8 @@ def analyze_market(market_data: Dict[str, Any],
         timestamp=now, price=price, bid=bid, ask=ask, volume=volume,
         order_flow=order_flow, footprint=footprint, level3=level3,
         volatility=volatility, trend=trend, volume_profile=vp, macro=macro,
-        signal_map=_signal_map, power=_power, shot=_shot, escort=_escort,
+        signal_map=_signal_map, power=_power, power_v2=_power_v2,
+        shot=_shot, escort=_escort,
         news=news, signal_strength=strength, signal_direction=direction,
         confidence=confidence, regime=regime, divergence=divergence,
         macro_bias=macro_bias_now,

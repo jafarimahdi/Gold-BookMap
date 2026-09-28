@@ -132,6 +132,11 @@ def _refresh() -> None:
     g["SYMBOL"] = _fget("TRADING_SYMBOL", "XAUUSD")
     g["MT5_SYMBOL"] = _fget("MT5_SYMBOL", g["SYMBOL"])
     g["TIMEFRAME"] = _fget("TIMEFRAME", "M5")
+    # POWER v2 starts as a side-by-side shadow only. It cannot affect the legacy
+    # Power -> Shooting -> Escort path. A nonzero source tick size is required.
+    g["POWER_V2_SHADOW_ENABLED"] = _fget("POWER_V2_SHADOW_ENABLED", "0") == "1"
+    g["POWER_M5_TICK_SIZE"] = _ffloat("POWER_M5_TICK_SIZE", 0.0)
+    g["POWER_V2_MEMORY_ENABLED"] = _fget("POWER_V2_MEMORY_ENABLED", "0") == "1"
     g["DATA_SOURCE"] = _fget("DATA_SOURCE", "demo").lower()
     # Normalize legacy name: ninjabridge -> bookmapbridge (still supported)
     if g["DATA_SOURCE"] == "ninjabridge":
