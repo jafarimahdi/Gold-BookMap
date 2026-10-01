@@ -132,8 +132,8 @@ def _refresh() -> None:
     g["SYMBOL"] = _fget("TRADING_SYMBOL", "XAUUSD")
     g["MT5_SYMBOL"] = _fget("MT5_SYMBOL", g["SYMBOL"])
     g["TIMEFRAME"] = _fget("TIMEFRAME", "M5")
-    # POWER v2 starts as a side-by-side shadow only. It cannot affect the legacy
-    # Power -> Shooting -> Escort path. A nonzero source tick size is required.
+    # Deprecated compatibility setting: active POWER v2 now runs in Step 2
+    # regardless of this legacy shadow flag. A nonzero source tick size is required.
     g["POWER_V2_SHADOW_ENABLED"] = _fget("POWER_V2_SHADOW_ENABLED", "0") == "1"
     g["POWER_M5_TICK_SIZE"] = _ffloat("POWER_M5_TICK_SIZE", 0.0)
     g["POWER_V2_MEMORY_ENABLED"] = _fget("POWER_V2_MEMORY_ENABLED", "0") == "1"
@@ -306,6 +306,12 @@ def _refresh() -> None:
     g["SCOUT_MIN_SPREADS"] = _ffloat("SCOUT_MIN_SPREADS", 10.0)
     g["SCOUT_MIN_TARGET_USD"] = _ffloat("SCOUT_MIN_TARGET_USD", 0.0)
     g["SHOOT_MIN_REWARD_USD"] = _ffloat("SHOOT_MIN_REWARD_USD", 0.0)
+    # Shooting operates on explicit Power-v2 direction; force shares are never confidence.
+    g["SHOOT_MIN_RR"] = _ffloat("SHOOT_MIN_RR", 1.2)
+    g["SHOOT_ROAD_RATIO"] = _ffloat("SHOOT_ROAD_RATIO", 6.0)
+    g["SHOOT_QUEUE_MIN_FILL_PROB"] = _ffloat("SHOOT_QUEUE_MIN_FILL_PROB", 0.70)
+    g["POWER_MAX_TICK_AGE_SECONDS"] = _ffloat("POWER_MAX_TICK_AGE_SECONDS", 60.0)
+    g["SHOOT_PAPER_LIMIT_TTL_SECONDS"] = _ffloat("SHOOT_PAPER_LIMIT_TTL_SECONDS", 300.0)
     # what counts as ONE BIG ORDER (not a wall). Measured on GC: p99.9 of a single
     # order is 9 lots, max 46. The whale threshold (total size at a price) is a
     # different measurement and must not be reused here.
@@ -620,3 +626,4 @@ def credentials_configured() -> dict:
         "mt5": bool((MT5_LOGIN == 0 and MT5_SYMBOL) or (MT5_LOGIN and MT5_PASSWORD and MT5_SERVER)),
         "bookmap": True,  # file-based, no key needed — BookMap itself holds the Rithmic login
     }
+

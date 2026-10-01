@@ -115,12 +115,14 @@ def decide(
 ) -> Dict[str, Any]:
     """Return UP, DOWN, or NEITHER from normalized signed M5 readings.
 
-    Hard blockers in ``context``: ``feed_stale``, ``data_quality_ok=False``,
-    ``high_impact_news``, ``major_contradiction``, ``force_unreliable`` or
-    ``out_of_session``. Caller must explicitly provide ``market_regime`` as
-    TREND or RANGE. Missing/unknown regime returns NEITHER. RANGE yields NEITHER
-    unless ``breakout_confirmed`` is independently established; confirmed range
-    breakouts face stricter thresholds and require all evidence families to agree.
+    Hard blockers in ``context``: ``feed_stale``, ``data_quality_ok=False``
+    (also used for ``force_unreliable``), and ``high_impact_news``. A
+    ``major_contradiction`` does not independently veto: family agreement handles
+    opposing force evidence. ``out_of_session`` is context only. Caller must
+    explicitly provide ``market_regime`` as TREND or RANGE. Missing/unknown
+    regime returns NEITHER. RANGE yields NEITHER unless ``breakout_confirmed``
+    is independently established; confirmed range breakouts face stricter
+    thresholds and require all evidence families to agree.
     """
     judges = judges if isinstance(judges, Mapping) else {}
     context = context if isinstance(context, Mapping) else {}
@@ -199,17 +201,61 @@ def decide(
     breakout_confirmed = bool(context.get("breakout_confirmed", False))
     in_range = regime == "RANGE"
 
+    # Diagnostic only: report ordinary TREND force checks without bypassing the
+    # separate regime gate or changing the actionable direction.
+    trend_force_checks = {
+        "valid_judges": {
+            "value": len(used), "minimum": int(params["min_valid_judges"]),
+            "pass": len(used) >= int(params["min_valid_judges"]),
+        },
+        "valid_families": {
+            "value": valid_family_count, "minimum": int(params["min_valid_families"]),
+            "pass": valid_family_count >= int(params["min_valid_families"]),
+        },
+        "coverage": {
+            "value": round(coverage, 4), "minimum": params["min_coverage"],
+            "pass": coverage >= params["min_coverage"],
+        },
+        "activity": {
+            "value": round(activity, 4), "minimum": params["min_activity"],
+            "pass": activity >= params["min_activity"] and total_force > 1e-12,
+        },
+        "dominance": {
+            "value": round(dominant_share, 4), "minimum": params["min_dominance"],
+            "pass": dominant_share >= params["min_dominance"],
+        },
+        "family_agreement": {
+            "up_supporting": supporting_up,
+            "down_supporting": supporting_down,
+            "minimum": int(params["min_agreeing_families"]),
+            "up_pass": supporting_up >= int(params["min_agreeing_families"]),
+            "down_pass": supporting_down >= int(params["min_agreeing_families"]),
+        },
+    }
+    common_force_pass = all(
+        trend_force_checks[key]["pass"]
+        for key in ("valid_judges", "valid_families", "coverage", "activity", "dominance")
+    )
+    trend_force_checks["up_force_checks_pass"] = bool(
+        common_force_pass and up_pct > down_pct
+        and trend_force_checks["family_agreement"]["up_pass"])
+    trend_force_checks["down_force_checks_pass"] = bool(
+        common_force_pass and down_pct > up_pct
+        and trend_force_checks["family_agreement"]["down_pass"])
+    trend_force_checks["diagnostic_only"] = True
+    trend_force_checks["note"] = (
+        "Force-only checklist under normal TREND thresholds; does not bypass regime/safety gates"
+    )
+
     blockers = (
         ("feed_stale", "STALE_FEED"),
         ("data_quality_ok", "BAD_DATA_QUALITY"),
         ("high_impact_news", "HIGH_IMPACT_EVENT"),
-        ("major_contradiction", "MAJOR_CONTRADICTION"),
-        ("force_unreliable", "FORCE_UNRELIABLE"),
-        ("out_of_session", "OUT_OF_SESSION"),
     )
     direction, reason = "NEITHER", "UNKNOWN"
     for flag, code in blockers:
-        if (flag == "data_quality_ok" and context.get(flag) is False) or (
+        if (flag == "data_quality_ok" and (
+                context.get(flag) is False or bool(context.get("force_unreliable")))) or (
                 flag != "data_quality_ok" and bool(context.get(flag))):
             direction, reason = "NEITHER", code
             break
@@ -246,6 +292,13 @@ def decide(
                 else:
                     direction, reason = "NEITHER", "FORCE_TOO_BALANCED"
 
+    active_blockers = []
+    for flag, code in blockers:
+        if (flag == "data_quality_ok" and (
+                context.get(flag) is False or bool(context.get("force_unreliable")))) or (
+                flag != "data_quality_ok" and bool(context.get(flag))):
+            active_blockers.append(code)
+
     context_keys = (
         "market_regime", "breakout_confirmed", "high_impact_news", "feed_stale",
         "data_quality_ok", "major_contradiction", "force_unreliable",
@@ -272,6 +325,16 @@ def decide(
         "judge_readings": used,
         "excluded_judges": excluded,
         "context": {key: context.get(key) for key in context_keys if key in context},
+        "decision_gate_diagnostics": {
+            "market_regime": regime,
+            "regime_confirmed": regime in {"TREND", "RANGE"},
+            "breakout_confirmed": breakout_confirmed,
+            "range_direction_authorized": bool(in_range and breakout_confirmed),
+            "active_hard_blockers": active_blockers,
+            "actionable_direction_allowed": direction in {"UP", "DOWN"},
+            "reason_code": reason,
+        },
+        "trend_force_diagnostics": trend_force_checks,
         "reason_code": reason,
         "meaning": "force share, not probability; NEITHER means do not pass a side",
     }

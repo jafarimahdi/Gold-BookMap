@@ -113,7 +113,7 @@ def build_m5_inputs(
     trust_explicit_side: bool = False,
     min_big_print_size: float = 1.0,
 ) -> Dict[str, Any]:
-    """Return ``{judges, context, diagnostics}`` for ``power_team_v2.decide``.
+    """Return judges, per-judge availability, context, and diagnostics for Power v2.
 
     ``now`` must be timezone-aware. Ticks are split into the active rolling
     window [now-5m, now] and the preceding five minutes, which is used only for
@@ -235,8 +235,51 @@ def build_m5_inputs(
                 "quality": momentum_quality,
             }
 
+    judge_availability: Dict[str, Dict[str, Any]] = {}
+    for name in ("footprint_delta", "l3_aggr_limit", "cvd_momentum",
+                 "big_prints", "footprint_levels"):
+        reading = judges.get(name)
+        if isinstance(reading, Mapping) and _number(reading.get("quality")) is not None \
+                and float(reading.get("quality", 0.0)) > 0:
+            judge_availability[name] = {"status": "VALID", "reason": "usable M5 input"}
+        elif name == "l3_aggr_limit":
+            judge_availability[name] = {
+                "status": "NOT_EMITTED",
+                "reason": "current M5 adapter does not map a validated L3 executed-flow field",
+            }
+        elif name == "cvd_momentum" and len(previous) < min_trades:
+            judge_availability[name] = {
+                "status": "MISSING",
+                "reason": f"previous M5 window has {len(previous)} usable direct trades; {min_trades} required",
+            }
+        elif name == "big_prints" and len(current) < min_trades:
+            judge_availability[name] = {
+                "status": "MISSING",
+                "reason": f"current M5 window has {len(current)} usable direct trades; {min_trades} required",
+            }
+        elif name == "big_prints":
+            judge_availability[name] = {
+                "status": "MISSING",
+                "reason": "no distinct qualifying large-print tail in this M5 window",
+            }
+        elif name == "footprint_levels" and len(level_imbalances) < 2:
+            judge_availability[name] = {
+                "status": "MISSING",
+                "reason": f"only {len(level_imbalances)} usable price bins; at least 2 required",
+            }
+        elif name == "footprint_delta" and not current:
+            judge_availability[name] = {
+                "status": "MISSING", "reason": "no usable direct trades in current M5 window",
+            }
+        else:
+            judge_availability[name] = {
+                "status": "INVALID_OR_LOW_QUALITY",
+                "reason": "input did not meet adapter freshness/side/timestamp quality requirements",
+            }
+
     return {
         "judges": judges,
+        "judge_availability": judge_availability,
         "context": {
             "feed_stale": feed_stale,
             "data_quality_ok": data_quality_ok,
@@ -248,6 +291,12 @@ def build_m5_inputs(
             "timeframe": "M5",
             "window_start_utc": current_start.isoformat().replace("+00:00", "Z"),
             "window_end_utc": current_time.isoformat().replace("+00:00", "Z"),
+            "tick_size": step,
+            "minimum_current_trades": min_trades,
+            "maximum_tick_age_seconds": max_tick_age_seconds,
+            "minimum_direct_side_ratio": min_direct_side_ratio,
+            "minimum_timestamp_coverage": 0.80,
+            "data_quality_ok": data_quality_ok,
             "previous_window_direct_trades": len(previous),
             "current_window_direct_trades": len(current),
             "current_window_raw_trades": current_raw_n,

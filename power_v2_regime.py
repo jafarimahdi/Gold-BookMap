@@ -87,6 +87,19 @@ def _completed_bars(
     return bars, latest_ts
 
 
+def _latest_valid_tick(tick_data: List[Dict[str, Any]], as_of: datetime) -> Optional[datetime]:
+    """Latest valid incoming tick, including the unfinished M5 bar, for freshness only."""
+    latest: Optional[datetime] = None
+    for row in tick_data or []:
+        if not isinstance(row, Mapping):
+            continue
+        ts = _utc(row.get("timestamp", row.get("ts", row.get("time"))))
+        if ts is None or ts > as_of or _finite_positive(row.get("price")) is None:
+            continue
+        if latest is None or ts > latest:
+            latest = ts
+    return latest
+
 def wilder_adx(bars: List[Mapping[str, float]], period: int = PERIOD) -> Optional[float]:
     """Compute Wilder ADX; needs at least 2*period contiguous OHLC bars."""
     if period < 2 or len(bars) < 2 * period:
@@ -170,14 +183,51 @@ def classify_m5_regime(
         raise ValueError("ADX thresholds must satisfy 0 <= range < trend <= 100")
 
     boundary = last_completed_m5_end(current, grace_seconds=grace_seconds)
-    bars, latest_tick = _completed_bars(tick_data or [], boundary)
+    bars, _latest_completed_tick = _completed_bars(tick_data or [], boundary)
+    latest_tick = _latest_valid_tick(tick_data or [], current)
+    needed = 2 * period
+    recent = bars[-needed:]
+
+    def bar_end_text(bar: Mapping[str, float]) -> str:
+        return datetime.fromtimestamp(
+            int(bar["start"]) + BAR_SECONDS, tz=timezone.utc
+        ).isoformat().replace("+00:00", "Z")
+
+    recent_gaps = []
+    for previous, following in zip(recent, recent[1:]):
+        delta_seconds = int(following["start"] - previous["start"])
+        if delta_seconds != BAR_SECONDS:
+            recent_gaps.append({
+                "previous_bar_end_utc": bar_end_text(previous),
+                "next_bar_start_utc": datetime.fromtimestamp(
+                    int(following["start"]), tz=timezone.utc
+                ).isoformat().replace("+00:00", "Z"),
+                "missing_m5_intervals": max(0, delta_seconds // BAR_SECONDS - 1),
+            })
+
+    latest_contiguous_bars = 0
+    if recent:
+        latest_contiguous_bars = 1
+        for previous, following in zip(reversed(recent[:-1]), reversed(recent[1:])):
+            if int(following["start"] - previous["start"]) != BAR_SECONDS:
+                break
+            latest_contiguous_bars += 1
+
     result: Dict[str, Any] = {
         "market_regime": "UNKNOWN",
         "breakout_confirmed": False,
         "adx": None,
         "period": period,
-        "bars_used": 0,
+        "bars_used": len(recent),
+        "bars_available": len(bars),
+        "bars_required": needed,
         "bar_end_utc": boundary.isoformat().replace("+00:00", "Z"),
+        "history_first_bar_end_utc": bar_end_text(recent[0]) if recent else None,
+        "history_last_bar_end_utc": bar_end_text(recent[-1]) if recent else None,
+        "recent_gap_count": len(recent_gaps),
+        "recent_gaps": recent_gaps,
+        "latest_contiguous_bars": latest_contiguous_bars,
+        "recent_history_contiguous": bool(recent) and not recent_gaps,
         "latest_tick_age_seconds": None,
         "reason": "UNKNOWN",
     }
@@ -195,13 +245,11 @@ def classify_m5_regime(
     if not bars or int(bars[-1]["start"]) + BAR_SECONDS != int(boundary.timestamp()):
         result["reason"] = "NO_TRADE_IN_LATEST_COMPLETED_M5_BAR"
         return result
-    needed = 2 * period
-    recent = bars[-needed:]
     if len(recent) < needed:
         result["bars_used"] = len(recent)
         result["reason"] = "INSUFFICIENT_COMPLETED_M5_HISTORY"
         return result
-    if any(int(b["start"] - a["start"]) != BAR_SECONDS for a, b in zip(recent, recent[1:])):
+    if recent_gaps:
         result["bars_used"] = len(recent)
         result["reason"] = "GAP_IN_COMPLETED_M5_HISTORY"
         return result

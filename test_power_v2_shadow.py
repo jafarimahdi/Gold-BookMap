@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from power_memory_book import read_day
-from power_v2_shadow import last_completed_m5_end, run_power_v2_shadow
+from power_v2_shadow import last_completed_m5_end, run_power_v2, run_power_v2_shadow
 
 
 class PowerV2ShadowTests(unittest.TestCase):
@@ -54,6 +54,15 @@ class PowerV2ShadowTests(unittest.TestCase):
         self.assertTrue(result["shadow_only"])
         self.assertEqual(result["direction"], "UP")
         self.assertEqual(result["power_total_pct"], 100.0)
+
+    def test_active_runner_is_not_shadow_and_keeps_power_shares_non_probability(self):
+        result = run_power_v2(
+            self.ticks, now=self.now, symbol="GCZ6.COMEX@RITHMIC",
+            tick_size=.1, market_regime="TREND")
+        self.assertFalse(result["shadow_only"])
+        self.assertEqual(result["direction"], "UP")
+        self.assertAlmostEqual(result["up_power_pct"] + result["down_power_pct"], 100.0)
+        self.assertIn("not probability", result["meaning"])
 
     def test_invalid_tick_size_is_rejected(self):
         with self.assertRaises(ValueError):

@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Mapping, Optional
 from power_m5_adapter import build_m5_inputs
 from power_team_v2 import decide
 
-__all__ = ["run_power_v2_shadow", "last_completed_m5_end"]
+__all__ = ["run_power_v2", "run_power_v2_shadow", "last_completed_m5_end"]
 
 
 def _utc(value: Any) -> datetime:
@@ -55,7 +55,7 @@ def _bar_close_price(ticks: List[Dict[str, Any]], end: datetime) -> Optional[flo
     return best_price
 
 
-def run_power_v2_shadow(
+def run_power_v2(
     tick_data: List[Dict[str, Any]],
     *,
     now: Any,
@@ -64,16 +64,16 @@ def run_power_v2_shadow(
     memory_root: Any = None,
     market_regime: str = "UNKNOWN",
     breakout_confirmed: bool = False,
+    high_impact_news: bool = False,
     regime_diagnostics: Optional[Mapping[str, Any]] = None,
     grace_seconds: float = 5.0,
 ) -> Dict[str, Any]:
-    """Evaluate v2 without affecting the legacy Power/Shooting path.
+    """Evaluate the active v2 Power contract from Step 2 market data.
 
-    Calling this repeatedly in the same loop is safe: the memory writer uses a
-    stable per-symbol/per-M5-bar event ID. `market_regime` defaults to UNKNOWN,
-    which makes v2 return NEITHER until a separately validated M5 classifier is
-    connected. A memory error is reported in the result but never interrupts the
-    old Step-2 loop.
+    Repeated calls use a stable per-symbol/per-M5-bar memory event ID. The regime
+    defaults to UNKNOWN and fails closed to NEITHER until separately confirmed.
+    Memory errors are reported but do not alter the Power decision; no orders are
+    executed or submitted here.
     """
     if not isinstance(symbol, str) or not symbol.strip():
         raise ValueError("symbol is required")
@@ -85,11 +85,22 @@ def run_power_v2_shadow(
     context = dict(built["context"])
     context["market_regime"] = str(market_regime or "UNKNOWN").upper()
     context["breakout_confirmed"] = bool(breakout_confirmed)
+    # Only an explicit calendar BLACKOUT is a Power veto; WARNING/QUIET do not
+    # become force votes. Other context flags stay unset until their semantics
+    # are defined and wired by the caller.
+    context["high_impact_news"] = bool(high_impact_news)
     answer = decide(built["judges"], context=context)
+    availability = built.get("judge_availability") or {}
+    excluded = answer.get("excluded_judges") or {}
+    for judge_name, status in availability.items():
+        if judge_name in excluded and isinstance(status, Mapping):
+            excluded[judge_name] = str(status.get("reason") or excluded[judge_name])
+    answer["excluded_judges"] = excluded
     answer.update({
-        "shadow_only": True,
+        "shadow_only": False,
         "bar_end_utc": bar_end.isoformat().replace("+00:00", "Z"),
         "input_judges": built["judges"],
+        "judge_availability": availability,
         "adapter_diagnostics": built["diagnostics"],
         "regime_diagnostics": dict(regime_diagnostics or {}),
     })
@@ -119,4 +130,11 @@ def run_power_v2_shadow(
             }
     else:
         answer["memory_status"] = {"appended": False, "reason": "memory disabled"}
+    return answer
+
+
+def run_power_v2_shadow(*args: Any, **kwargs: Any) -> Dict[str, Any]:
+    """Backward-compatible research wrapper; the main app uses run_power_v2."""
+    answer = run_power_v2(*args, **kwargs)
+    answer["shadow_only"] = True
     return answer

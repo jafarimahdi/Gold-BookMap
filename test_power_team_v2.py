@@ -100,10 +100,9 @@ class PowerTeamV2Tests(unittest.TestCase):
 
     def test_hard_quality_flags_block_direction(self):
         for context, code in [
-            ({"feed_stale": True}, "STALE_FEED"),
-            ({"data_quality_ok": False}, "BAD_DATA_QUALITY"),
-            ({"high_impact_news": True}, "HIGH_IMPACT_EVENT"),
-            ({"major_contradiction": True}, "MAJOR_CONTRADICTION"),
+            ({'feed_stale': True}, 'STALE_FEED'),
+            ({'data_quality_ok': False}, 'BAD_DATA_QUALITY'),
+            ({'high_impact_news': True}, 'HIGH_IMPACT_EVENT'),
         ]:
             result = decide(ALL, context=context)
             self.assertEqual(result["direction"], "NEITHER")

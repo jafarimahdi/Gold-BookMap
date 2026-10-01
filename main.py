@@ -484,14 +484,16 @@ def run_step2(data):
             # sentence. signal_map.py had to parse note strings to find wall prices;
             # from here the prices, sizes, distances and trust scores are first-class.
             "signal_map": (getattr(snapshot, "signal_map", None) or {}),
-            # 26r: the POWER team's pick - which door it expected price to reach
-            # first. Stored so the tape can mark it afterwards, per judge.
+            # Canonical POWER-v2 result. Force shares are not probabilities.
             "power": (getattr(snapshot, "power", None) or {}),
-            # POWER v2 shadow-only result; separate from and never substitutes for legacy Power.
+            # Backward-compatible alias; contains the same v2 result.
             "power_v2": (getattr(snapshot, "power_v2", None) or {}),
-            # 26z: the SHOOTING team's plan, so the tape can mark it afterwards
+            # Deprecated schema key kept empty for old readers; legacy Power is inactive.
+            "power_legacy": {},
+            # Shooting's pre-entry plan and separate paper fill simulation.
             "shot": (getattr(snapshot, "shot", None) or {}),
-            # 27c: the ESCORT team - what it guarded and what it did about it
+            "entry_simulation": (getattr(snapshot, "entry_simulation", None) or {}),
+            # Escort only receives filled paper positions to manage.
             "escort": (getattr(snapshot, "escort", None) or {}),
             "notes": _notes_for_diary(getattr(snapshot, "notes", []) or []),
         }
@@ -620,12 +622,47 @@ def run_step3(snapshot):
     return decision
 
 
+def _shooting_execution_gate(decision, snapshot):
+    """Fail closed: actionable Step-3 decisions need a broker-ready Shooting plan.
+
+    Current Shooting plans are analysis/paper-only and Step 4 has no adapter that
+    consumes the chosen entry style with attached TP/SL. No data field can turn this
+    gate on; enabling execution requires a separately reviewed code change.
+    """
+    action = str(getattr(decision, "action", "HOLD") or "HOLD").upper()
+    if action in {"HOLD", "WAIT", "NONE", "NO_TRADE", "NEUTRAL"}:
+        return True, "no new-entry action"
+    if action not in {"BUY", "SELL"}:
+        return False, f"unrecognized Step-3 action {action!r}"
+    if snapshot is None:
+        return False, "no market snapshot"
+    plan = getattr(snapshot, "shot", None) or {}
+    power = getattr(snapshot, "power", None) or {}
+    expected_power = "UP" if action == "BUY" else "DOWN"
+    if str(power.get("direction", "NEITHER")).upper() != expected_power:
+        return False, "AI side does not agree with canonical POWER v2"
+    if plan.get("shot") != "GO" or str(plan.get("side", "")).upper() != action:
+        return False, "Shooting did not approve this side"
+    if plan.get("entry_style") not in {"PASSIVE_LIMIT", "AGGRESSIVE_MARKET"}:
+        return False, "Shooting entry style is missing or unsupported"
+    if plan.get("execution_status") != "BROKER_READY":
+        return False, "Shooting plan is analysis-only; no broker-ready entry adapter exists"
+    return False, "no reviewed Step-4/EA adapter consumes the Shooting plan and attached TP/SL"
+
+
 def run_step4(decision, snapshot):
-    """Route execution to exactly one owner: none, Python, or EA."""
+    """Route execution to exactly one owner, after the Shooting/Power-v2 gate."""
     from step4_mt5_execution import ExecutionResult, MT5Executor
 
     mode = getattr(config, "EXECUTION_MODE", "none")
-    if not config.TRADING_ENABLED:
+    allowed, gate_reason = _shooting_execution_gate(decision, snapshot)
+    if not allowed:
+        result = ExecutionResult(
+            status="SKIPPED",
+            reason=f"Shooting/POWER v2 veto: {gate_reason}",
+            symbol=config.MT5_SYMBOL,
+            timestamp=datetime.now().astimezone())
+    elif not config.TRADING_ENABLED:
         result = ExecutionResult(
             status="SKIPPED",
             reason="trading disabled (TRADING_ENABLED=0)",
@@ -672,7 +709,13 @@ def run_signal_bridge(snapshot, decision) -> None:
     from step3_ai_decision import Decision
 
     mode = getattr(config, "EXECUTION_MODE", "none")
-    if mode != "ea":
+    allowed, gate_reason = _shooting_execution_gate(decision, snapshot)
+    action = str(getattr(decision, "action", "HOLD") or "HOLD").upper()
+    if not allowed:
+        decision = Decision(
+            action="HOLD", confidence=0.0,
+            rationale=f"signal neutralised by Shooting/POWER v2: {gate_reason}")
+    elif mode != "ea":
         # Clear any old actionable EA signal when Python or no execution owns
         # the run. This prevents a previously attached EA from acting on stale
         # instructions after the mode is changed.
@@ -1486,3 +1529,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+

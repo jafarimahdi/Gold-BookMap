@@ -259,13 +259,17 @@ class MarketSnapshot:
     # which note). Written from `notes` so the daily audit can score each judge
     # instead of only the 4 team aggregates. Empty for non-BookMap providers.
     judge_votes: List[Dict[str, Any]] = field(default_factory=list)
-    # 26r: the POWER team's answer - which door first, and how sure
+    # Canonical Power answer: POWER v2 M5 direction and force shares.
     power: Dict[str, Any] = field(default_factory=dict)
-    # POWER v2 shadow output; never consumed by legacy decision logic.
+    # Compatibility alias for readers of older snapshots; same v2 result.
     power_v2: Dict[str, Any] = field(default_factory=dict)
-    # 26z: the SHOOTING team's plan - GO/NO_GO/WAIT with target and stop from the book
+    # Deprecated compatibility field. The old Power team is not evaluated.
+    power_legacy: Dict[str, Any] = field(default_factory=dict)
+    # Shooting's analysis-only pre-entry plan.
     shot: Dict[str, Any] = field(default_factory=dict)
-    # 27c: the ESCORT team - paper trades being guarded, and how they finished
+    # Separate paper fill simulation; no broker/order calls.
+    entry_simulation: Dict[str, Any] = field(default_factory=dict)
+    # Escort's already-filled paper positions and protective actions.
     escort: Dict[str, Any] = field(default_factory=dict)
     # 26o: the SIGNAL team's liquidity map - where the targets are, not an opinion.
     # Empty dict when the module is absent, so the robot runs unchanged without it.
@@ -4075,94 +4079,185 @@ def analyze_market(market_data: Dict[str, Any],
     except Exception as _h_err:
         notes.append(f"history doors unavailable: {type(_h_err).__name__}")
 
-    # ---- 26r: THE POWER TEAM ("the legs") ------------------------------------
-    # Answers one question about the scout's map: which door does price touch first?
-    # Writes its pick so it can be marked later. Casts no vote, sends no order.
-    _power = {}
+    # The legacy Power team is no longer evaluated. Keep only an empty compatibility
+    # value for old diary readers; POWER v2 is the sole active Power result.
+    _power_legacy = {}
+
+    # Active POWER v2 uses timestamped M5 prints and completed-bar ADX. The
+    # Scout map remains separate; its levels are not blended into force shares.
+    _regime_v2 = {
+        "market_regime": "UNKNOWN",
+        "breakout_confirmed": False,
+        "reason": "REGIME_CLASSIFIER_UNAVAILABLE",
+    }
     try:
-        _pw_candles = [{"high": float(h), "low": float(l), "close": float(c)}
-                       for h, l, c in zip(high, low, close)] if len(close) else []
-        from power_team import decide as _power_decide, describe as _power_say
-        _power = _power_decide(_signal_map, order_flow, footprint, level3,
-                               vp, trend, volatility, news, macro,
-                               price=price, divergence=divergence,
-                               mtf=mtf_trends, config=config,
-                               tick_data=tick_data, candles=_pw_candles,
-                               atr=getattr(volatility, "atr", 0.0) or 0.0)
-        notes.append(_power_say(_power))
-    except Exception as _pw_err:
-        notes.append(f"power team unavailable: {type(_pw_err).__name__}: {_pw_err}")
+        from power_v2_regime import classify_m5_regime
+        _regime_v2 = classify_m5_regime(tick_data, now=now)
+    except Exception as _rg2_err:
+        notes.append(f"POWER v2 regime unavailable: {type(_rg2_err).__name__}")
 
-    # POWER v2 shadow: independently evaluates the completed M5 bar and writes
-    # only a separate snapshot field/diary value. It is not used by
-    # Shooting, Escort, Step 3 decision logic, or execution/risk decisions.
     _power_v2 = {}
-    if bool(getattr(config, "POWER_V2_SHADOW_ENABLED", False)):
-        _regime_v2 = {
-            "market_regime": "UNKNOWN",
-            "breakout_confirmed": False,
-            "reason": "REGIME_CLASSIFIER_UNAVAILABLE",
+    _memory_root = None
+    try:
+        from power_v2_shadow import run_power_v2
+        if bool(getattr(config, "POWER_V2_MEMORY_ENABLED", False)):
+            _memory_root = getattr(config, "DATA_DIR", "data") / "power_v2_memory"
+        _power_v2 = run_power_v2(
+            tick_data, now=now, symbol=symbol,
+            tick_size=float(getattr(config, "POWER_M5_TICK_SIZE", 0.0) or 0.0),
+            memory_root=_memory_root,
+            market_regime=_regime_v2.get("market_regime", "UNKNOWN"),
+            breakout_confirmed=bool(_regime_v2.get("breakout_confirmed", False)),
+            high_impact_news=(str(getattr(news, "news_state", "QUIET") or "QUIET").upper()
+                              == "BLACKOUT"),
+            regime_diagnostics=_regime_v2)
+    except Exception as _pw2_err:
+        # Active Power errors fail closed; never fall back to a legacy direction.
+        _power_v2 = {
+            "team": "POWER", "version": "2.2.0", "timeframe": "M5",
+            "direction": "NEITHER", "up_power_pct": 50.0,
+            "down_power_pct": 50.0, "power_total_pct": 100.0,
+            "activity": 0.0, "coverage": 0.0,
+            "reason_code": f"POWER_V2_RUNTIME_ERROR:{type(_pw2_err).__name__}",
+            "shadow_only": False,
+            "regime_diagnostics": _regime_v2,
+            "memory_status": {"appended": False, "reason": "Power runtime error"},
         }
-        try:
-            from power_v2_regime import classify_m5_regime
-            _regime_v2 = classify_m5_regime(tick_data, now=now)
-        except Exception as _rg2_err:
-            notes.append(f"POWER v2 regime unavailable: {type(_rg2_err).__name__}")
-        try:
-            from power_v2_shadow import run_power_v2_shadow
-            _memory_root = None
-            if bool(getattr(config, "POWER_V2_MEMORY_ENABLED", False)):
-                _memory_root = getattr(config, "DATA_DIR", "data") / "power_v2_memory"
-            _power_v2 = run_power_v2_shadow(
-                tick_data, now=now, symbol=symbol,
-                tick_size=float(getattr(config, "POWER_M5_TICK_SIZE", 0.0) or 0.0),
-                memory_root=_memory_root,
-                market_regime=_regime_v2.get("market_regime", "UNKNOWN"),
-                breakout_confirmed=bool(_regime_v2.get("breakout_confirmed", False)),
-                regime_diagnostics=_regime_v2)
-            notes.append(
-                "POWER v2 SHADOW | "
-                f"{_power_v2.get('direction', 'NEITHER')} "
-                f"up={_power_v2.get('up_power_pct', 0):.1f}% "
-                f"down={_power_v2.get('down_power_pct', 0):.1f}% "
-                f"regime={_regime_v2.get('market_regime', 'UNKNOWN')} "
-                f"adx={_regime_v2.get('adx')} "
-                f"reason={_power_v2.get('reason_code', _power_v2.get('reason', 'UNAVAILABLE'))}"
-            )
-        except Exception as _pw2_err:
-            # Shadow failures must never interrupt existing analysis.
-            _power_v2 = {"shadow_only": True, "direction": "NEITHER",
-                         "reason": f"SHADOW_ERROR:{type(_pw2_err).__name__}",
-                         "regime_diagnostics": _regime_v2}
-            notes.append(f"POWER v2 shadow unavailable: {type(_pw2_err).__name__}")
+        notes.append(f"POWER v2 failed closed: {type(_pw2_err).__name__}")
 
-    # ---- 26z: THE SHOOTING TEAM ("the shooter") -------------------------------
-    # Checks the FRONT doors (the corridor to the target) and the BACK doors (shelter
-    # to lean on), then writes a full plan: GO / NO_GO / WAIT, with target and stop
-    # taken from the book instead of from an ATR multiple. It sends NOTHING.
+    _power = _power_v2
+    _force_diag = _power.get("trend_force_diagnostics") or {}
+    _rg_diag = _power.get("regime_diagnostics") or _regime_v2
+    _judge_gate = _force_diag.get("valid_judges") or {}
+    _family_gate = _force_diag.get("valid_families") or {}
+    _coverage_gate = _force_diag.get("coverage") or {}
+    _activity_gate = _force_diag.get("activity") or {}
+    _dominance_gate = _force_diag.get("dominance") or {}
+    _agreement_gate = _force_diag.get("family_agreement") or {}
+    _up_gate = bool(_force_diag.get("up_force_checks_pass", False))
+    _down_gate = bool(_force_diag.get("down_force_checks_pass", False))
+    _decision_diag = _power.get("decision_gate_diagnostics") or {}
+    _regime_gate_pass = (
+        _decision_diag.get("market_regime") == "TREND"
+        or bool(_decision_diag.get("range_direction_authorized"))
+    )
+    _safety_gate_pass = bool(_decision_diag) and not bool(
+        _decision_diag.get("active_hard_blockers"))
+    _availability = _power.get("judge_availability") or {}
+    _excluded = _power.get("excluded_judges") or {}
+    _missing_details = "; ".join(
+        f"{_name}[{(_availability.get(_name) or {}).get('status', 'EXCLUDED')}]:"
+        f"{(_availability.get(_name) or {}).get('reason', _why)}"
+        for _name, _why in _excluded.items()
+    ) or "none"
+    _gate_status = lambda _gate: "PASS" if _gate.get("pass", False) else "FAIL"
+    notes.append(
+        "POWER M5 | "
+        f"decision={_power.get('direction', 'NEITHER')} "
+        f"force={_power.get('up_power_pct', 50.0):.1f}/{_power.get('down_power_pct', 50.0):.1f} "
+        f"activity={_power.get('activity', 0.0):.3f} coverage={_power.get('coverage', 0.0):.2f} | "
+        f"regime={_rg_diag.get('market_regime', 'UNKNOWN')} "
+        f"regime_gate={'PASS' if _regime_gate_pass else 'FAIL'} "
+        f"safety_gate={'PASS' if _safety_gate_pass else 'FAIL'} "
+        f"ADX={_rg_diag.get('adx')} "
+        f"bars={_rg_diag.get('bars_used', 0)}/{_rg_diag.get('bars_required', 28)} "
+        f"latest_run={_rg_diag.get('latest_contiguous_bars', 0)} "
+        f"gaps={_rg_diag.get('recent_gap_count', 0)} "
+        f"tick_age={_rg_diag.get('latest_tick_age_seconds')}s | "
+        f"TREND force checks: judges={_gate_status(_judge_gate)} "
+        f"({_judge_gate.get('value', 0)}/{_judge_gate.get('minimum', 3)}) "
+        f"families={_gate_status(_family_gate)} "
+        f"({_family_gate.get('value', 0)}/{_family_gate.get('minimum', 2)}) "
+        f"coverage={_gate_status(_coverage_gate)} "
+        f"({_coverage_gate.get('value', 0.0):.2f}/{_coverage_gate.get('minimum', 0.55):.2f}) "
+        f"activity={_gate_status(_activity_gate)} "
+        f"({_activity_gate.get('value', 0.0):.3f}/{_activity_gate.get('minimum', 0.18):.2f}) "
+        f"dominance={_gate_status(_dominance_gate)} "
+        f"({_dominance_gate.get('value', 0.0):.2f}/{_dominance_gate.get('minimum', 0.60):.2f}) "
+        f"agreement UP={_agreement_gate.get('up_supporting', 0)}/"
+        f"{_agreement_gate.get('minimum', 2)} "
+        f"({'PASS' if _agreement_gate.get('up_pass', False) else 'FAIL'}) "
+        f"DOWN={_agreement_gate.get('down_supporting', 0)}/"
+        f"{_agreement_gate.get('minimum', 2)} "
+        f"({'PASS' if _agreement_gate.get('down_pass', False) else 'FAIL'}); "
+        f"force-only UP/DOWN={_up_gate}/{_down_gate} (diagnostic only) | "
+        f"excluded={_missing_details} reason={_power.get('reason_code', 'UNAVAILABLE')}"
+    )
+
+    # ---- Shooting: pre-entry plan using the canonical POWER-v2 contract ------
+    # Signal's map stays separate from Power force shares. Aggressive market entry is
+    # deliberately unavailable until a separately reviewed impulse trigger is wired.
     _shot = {}
     try:
         from shooting_team import plan_shot as _plan, describe as _shot_say
         from signal_team import get_book as _get_book
-        _shot = _plan(_signal_map, _power, price,
+        _raw_bid = float(market_data.get("bid") or 0.0)
+        _raw_ask = float(market_data.get("ask") or 0.0)
+        _queue_estimate = None
+        if _raw_bid > 0 and _raw_ask > _raw_bid:
+            _limit_price = _raw_bid if _power_v2.get("direction") == "UP" else _raw_ask
+            _queue_side = "BUY" if _power_v2.get("direction") == "UP" else "SELL"
+            try:
+                _candidate_queue = l3.estimate_queue_position(
+                    _limit_price, _queue_side, order_size=float(getattr(config, "LOT_SIZE", 1.0)))
+                # An empty/unavailable level is UNKNOWN, not a 100% fill estimate.
+                if (_candidate_queue and "error" not in _candidate_queue
+                        and float(_candidate_queue.get("queue_total_vol", 0.0) or 0.0) > 0):
+                    _queue_estimate = _candidate_queue
+            except Exception:
+                _queue_estimate = None
+        _power_context = _power_v2.get("context") or {}
+        _shot_has_data = market_data.get("has_data")
+        if _shot_has_data is None:
+            _shot_has_data = bool(tick_data)
+        _shot_data_age = market_data.get("last_data_age_seconds")
+        if _shot_data_age is None:
+            _shot_data_age = _regime_v2.get("latest_tick_age_seconds")
+        _shot_quality = market_data.get("data_quality_ok")
+        if _shot_quality is None:
+            _shot_quality = _power_context.get("data_quality_ok", False)
+        _shot_context = {
+            "bid": _raw_bid,
+            "ask": _raw_ask,
+            "news_state": news.news_state,
+            "has_data": _shot_has_data,
+            "last_data_age_seconds": _shot_data_age,
+            "data_quality_ok": _shot_quality,
+            "queue_estimate": _queue_estimate,
+            "queue_enabled": bool(getattr(config, "QUEUE_POS_ENABLED", True)),
+            # No empirically reviewed aggressive trigger is available in this build.
+            "aggressive_trigger_confirmed": False,
+            "aggressive_trigger_reason": "",
+        }
+        _shot = _plan(_signal_map, _power_v2, price,
                       getattr(volatility, "atr", 0.0) or 0.0,
-                      spread=_spread_now, config=config, book=_get_book())
+                      spread=_spread_now, config=config, book=_get_book(),
+                      entry_context=_shot_context)
         notes.append(_shot_say(_shot))
     except Exception as _sh_err:
         notes.append(f"shooter unavailable: {type(_sh_err).__name__}: {_sh_err}")
 
-    # ---- 27c: THE ESCORT TEAM ("the friends") ---------------------------------
-    # Opens a PAPER trade whenever the shooter says GO, then guards it: five jobs, one
-    # voice each, and it may only ever make the trade safer. No order, no broker - the
-    # tape marks both the shooter's plan and the escort's interventions.
+    # The paper fill simulator owns pending/filled entry state. Escort remains asleep
+    # until it receives a confirmed paper fill; it never manages a merely pending limit.
+    _entry_simulation = {}
+    try:
+        from paper_entry_simulator import simulate_entry
+        _entry_simulation = simulate_entry(_shot, price, config=config, now=now)
+        notes.append("PAPER ENTRY: " + str(_entry_simulation.get("status", "UNKNOWN"))
+                     + " - " + str(_entry_simulation.get("reason", "")))
+    except Exception as _sim_err:
+        notes.append(f"paper entry simulator unavailable: {type(_sim_err).__name__}: {_sim_err}")
+    _escort_plan = _entry_simulation.get("filled_plan") or {}
+
+    # ---- ESCORT: five post-entry protection jobs ----------------------------
     _escort = {}
     try:
         from escort_team import escort_cycle as _esc, describe as _esc_say
         from signal_team import get_book as _get_book2
-        _escort = _esc(_shot, _signal_map, price,
+        _escort = _esc(_escort_plan, _signal_map, price,
                        getattr(volatility, "atr", 0.0) or 0.0, _spread_now,
                        order_flow, footprint, level3, news, divergence,
-                       _get_book2(), config)
+                       _get_book2(), config, bid=bid, ask=ask)
         notes.append(_esc_say(_escort))
     except Exception as _ec_err:
         notes.append(f"escort unavailable: {type(_ec_err).__name__}: {_ec_err}")
@@ -4172,8 +4267,9 @@ def analyze_market(market_data: Dict[str, Any],
         timestamp=now, price=price, bid=bid, ask=ask, volume=volume,
         order_flow=order_flow, footprint=footprint, level3=level3,
         volatility=volatility, trend=trend, volume_profile=vp, macro=macro,
-        signal_map=_signal_map, power=_power, power_v2=_power_v2,
-        shot=_shot, escort=_escort,
+        signal_map=_signal_map, power=_power_v2, power_v2=_power_v2,
+        power_legacy={},
+        shot=_shot, entry_simulation=_entry_simulation, escort=_escort,
         news=news, signal_strength=strength, signal_direction=direction,
         confidence=confidence, regime=regime, divergence=divergence,
         macro_bias=macro_bias_now,
@@ -4498,3 +4594,4 @@ if __name__ == "__main__":
     out_path.parent.mkdir(exist_ok=True)
     out_path.write_text(json_out)
     print(f"\nFull snapshot written to: {out_path}  ({len(json_out)} bytes)")
+

@@ -29,11 +29,10 @@ THE FIVE JOBS - one recommendation each, at most, per cycle
     time with an open position and real money in it.
 
 WHY IT GUARDS PAPER TRADES TODAY
-    Nothing is allowed to trade until its homework has been marked (Law 7). A real escort
-    would therefore sleep forever and never be graded. So when the SHOOTER says GO, a
-    PAPER position is opened here - no order, no broker, pure bookkeeping - and the escort
-    guards it exactly as it would guard a real one. The tape then marks two things at once:
-    was the shooter's plan any good, and did the escort's interventions help or hurt?
+    Nothing is allowed to trade until its homework has been marked (Law 7). A separate
+    paper-entry simulator stages passive limits and estimates aggressive fills. Escort
+    receives only a confirmed simulated fill - never a pending order - and then guards it.
+    No order, broker, signal file, or MT5 call is made here.
 
     Every paper trade is scored twice: what actually happened, and what WOULD have
     happened if the escort had done nothing. That comparison is the only honest way to
@@ -66,7 +65,8 @@ class PaperTrade:
 
     __slots__ = ("side", "entry", "target", "stop", "opened", "opened_price",
                  "orig_target", "orig_stop", "door_price", "actions", "peak", "trough",
-                 "closed", "close_reason", "close_price", "cycles")
+                 "closed", "close_reason", "close_price", "cycles",
+                 "entry_style", "paper_fill_model")
 
     def __init__(self, plan: Dict[str, Any], price: float):
         self.side = plan.get("side")
@@ -77,7 +77,9 @@ class PaperTrade:
         self.orig_stop = self.stop
         self.door_price = _f((plan.get("door") or {}).get("price"))
         self.opened = time.time()
-        self.opened_price = price
+        self.opened_price = self.entry
+        self.entry_style = str(plan.get("entry_style") or "UNKNOWN")
+        self.paper_fill_model = str(plan.get("paper_fill_model") or "UNKNOWN")
         self.actions: List[Dict[str, Any]] = []
         self.peak = price          # best price seen in our favour
         self.trough = price        # worst price seen against us
@@ -108,16 +110,29 @@ class EscortBook:
         self.open: List[PaperTrade] = []
         self.done: List[Dict[str, Any]] = []
 
-    # -- open on a shooter GO ------------------------------------------------
+    # -- open only on a confirmed paper fill ---------------------------------
     def maybe_open(self, plan: Dict[str, Any], price: float) -> Optional[PaperTrade]:
-        if not plan or plan.get("shot") != "GO" or not plan.get("side"):
+        if (not plan or plan.get("shot") != "GO" or not plan.get("side")
+                or plan.get("entry_filled") is not True
+                or plan.get("execution_status") != "PAPER_ONLY"):
+            return None
+        style = plan.get("entry_style")
+        fill_model = plan.get("paper_fill_model")
+        if style == "PASSIVE_LIMIT" and fill_model != "trade_through_one_tick":
+            return None
+        if style == "AGGRESSIVE_MARKET":
+            option = (plan.get("entry_options") or {}).get("AGGRESSIVE_MARKET") or {}
+            if (fill_model != "aggressive_quote_estimate" or option.get("eligible") is not True
+                    or not str(option.get("trigger_reason") or "").strip()):
+                return None
+        if style not in {"PASSIVE_LIMIT", "AGGRESSIVE_MARKET"}:
             return None
         if len(self.open) >= MAX_PAPER:
             return None
+        door_price = _f((plan.get("door") or {}).get("price"))
         # never two paper trades on the same door in the same direction
         for t in self.open:
-            if t.side == plan.get("side") and abs(t.door_price -
-                                                  _f((plan.get("door") or {}).get("price"))) < 0.01:
+            if t.side == plan.get("side") and abs(t.door_price - door_price) < 0.01:
                 return None
         pt = PaperTrade(plan, price)
         self.open.append(pt)
@@ -248,37 +263,41 @@ def escort_cycle(shot_plan: Dict[str, Any], signal_map: Dict[str, Any],
                  price: float, atr: float, spread: float = 0.0,
                  order_flow: Any = None, footprint: Any = None, level3: Any = None,
                  news: Any = None, divergence: float = 0.0, book=None,
-                 config: Any = None) -> Dict[str, Any]:
-    """Open paper trades on a shooter GO, then guard every open one."""
+                 config: Any = None, bid: float = 0.0, ask: float = 0.0) -> Dict[str, Any]:
+    """Guard only paper positions that the entry simulator has marked FILLED."""
     esc = get_escort()
     price, atr = _f(price), max(_f(atr), 1e-9)
+    bid, ask = _f(bid), _f(ask)
     opened = esc.maybe_open(shot_plan, price)
 
     reports: List[Dict[str, Any]] = []
     for t in list(esc.open):
         t.cycles += 1
-        # track how far it went for and against us
+        # Mark exits at the executable side of the quote: bid to close a long,
+        # ask to close a short. Fall back to last price only when quotes are absent.
+        mark = (bid if t.is_buy and bid > 0 else
+                ask if not t.is_buy and ask > 0 else price)
         if t.is_buy:
-            t.peak, t.trough = max(t.peak, price), min(t.trough, price)
+            t.peak, t.trough = max(t.peak, mark), min(t.trough, mark)
         else:
-            t.peak, t.trough = min(t.peak, price), max(t.trough, price)
+            t.peak, t.trough = min(t.peak, mark), max(t.trough, mark)
 
         # did it finish on its own?
-        hit_tp = (price >= t.target) if t.is_buy else (price <= t.target)
-        hit_sl = (price <= t.stop) if t.is_buy else (price >= t.stop)
+        hit_tp = (mark >= t.target) if t.is_buy else (mark <= t.target)
+        hit_sl = (mark <= t.stop) if t.is_buy else (mark >= t.stop)
         if hit_tp or hit_sl:
-            _close(esc, t, price, "TARGET" if hit_tp else "STOP")
+            _close(esc, t, mark, "TARGET" if hit_tp else "STOP")
             continue
         if (time.time() - t.opened) / 60.0 > TIME_STOP_MIN:
-            _close(esc, t, price, "TIME")
+            _close(esc, t, mark, "TIME")
             continue
 
         # ---- the five jobs, one voice each ----------------------------------
         acts = [a for a in (
             _job1_exit_clear(t, signal_map, price),
             _job2_crowd_turning(t, order_flow, level3, price),
-            _job3_push_dying(t, order_flow, footprint, divergence, price),
-            _job4_move_stop(t, book, price, atr, spread),
+            _job3_push_dying(t, order_flow, footprint, divergence, mark),
+            _job4_move_stop(t, book, mark, atr, spread),
             _job5_bomb(t, news, config),
         ) if a]
 
@@ -292,7 +311,9 @@ def escort_cycle(shot_plan: Dict[str, Any], signal_map: Dict[str, Any],
             continue
         reports.append({"side": t.side, "entry": round(t.entry, 2),
                         "target": round(t.target, 2), "stop": round(t.stop, 2),
-                        "r": round(t.r_now(price), 2), "cycles": t.cycles,
+                        "r": round(t.r_now(mark), 2), "cycles": t.cycles,
+                        "entry_style": t.entry_style,
+                        "paper_fill_model": t.paper_fill_model,
                         "actions": applied})
 
     return {"watching": len(esc.open), "opened_now": bool(opened),
@@ -343,6 +364,7 @@ def _close(esc: EscortBook, t: PaperTrade, price: float, reason: str) -> None:
         -1.0 if naive_sl else move / risk)
     esc.done.append({
         "side": t.side, "entry": round(t.entry, 2), "exit": round(price, 2),
+        "entry_style": t.entry_style, "paper_fill_model": t.paper_fill_model,
         "reason": reason, "r": round(move / risk, 2), "r_if_left_alone": round(naive_r, 2),
         "escort_helped": round(move / risk - naive_r, 2),
         "actions": len(t.actions), "cycles": t.cycles,
@@ -364,6 +386,8 @@ def describe(out: Dict[str, Any]) -> str:
     bits = []
     for r in out.get("reports", []):
         acts = ", ".join(f"J{a['job']} {a['action']}" for a in r["actions"]) or "holding"
-        bits.append(f"{r['side']} @{r['entry']:.2f} tgt {r['target']:.2f} stop {r['stop']:.2f} "
-                    f"({r['r']:+.2f}R) -> {acts}")
+        style = r.get("entry_style", "paper")
+        bits.append(f"{r['side']} {style} @{r['entry']:.2f} tgt {r['target']:.2f} "
+                    f"stop {r['stop']:.2f} ({r['r']:+.2f}R) -> {acts}")
     return f"ESCORT: guarding {out['watching']} | " + " | ".join(bits)
+
