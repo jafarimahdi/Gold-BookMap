@@ -59,6 +59,53 @@ except ImportError:  # pragma: no cover
 
 logger = logging.getLogger("step2_market_analysis")
 
+
+# Probe history is cached once per process and used only to build regime bars.
+# It never replaces the original tick_data passed to run_power_v2.
+_POWER_PROBE_STARTUP_CACHE = {}
+
+
+def _power_probe_startup_history(symbol, now, live_ticks):
+    import os
+
+    symbol_key = str(symbol or "").strip()
+    directory_key = os.environ.get("POWER_HISTORY_PROBE_DIR", "").strip()
+    alias_key = os.environ.get("POWER_HISTORY_PROBE_ALIAS", "").strip()
+    runtime_alias_key = os.environ.get("POWER_HISTORY_PROBE_RUNTIME_SYMBOL", "").strip()
+    max_age_key = os.environ.get("POWER_HISTORY_PROBE_MAX_AGE_SECONDS", "21600").strip()
+    key = (symbol_key, directory_key, alias_key, runtime_alias_key, max_age_key)
+    cached = _POWER_PROBE_STARTUP_CACHE.get(key)
+    if cached is None:
+        try:
+            from power_history_probe_loader import load_probe_regime_prices
+            loaded = load_probe_regime_prices(
+                symbol=symbol_key, now=now, directory=directory_key or None,
+                max_age_seconds=float(max_age_key))
+            history = loaded.pop("ticks", [])
+            cached = {"diagnostics": loaded, "history_ticks": history}
+        except Exception as exc:
+            cached = {"diagnostics": {
+                "status": f"LOAD_ERROR:{type(exc).__name__}",
+                "path": directory_key or "<default>"}, "history_ticks": []}
+        _POWER_PROBE_STARTUP_CACHE[key] = cached
+
+    from power_history_probe_loader import merge_regime_price_ticks, m5_tail_diagnostics
+    history_ticks = cached.get("history_ticks", [])
+    regime_ticks = merge_regime_price_ticks(live_ticks or [], history_ticks)
+    diagnostics = dict(cached.get("diagnostics", {}))
+    probe_tail = m5_tail_diagnostics(
+        history_ticks, now, completion_cutoff_from_latest_tick=True)
+    regime_tail = m5_tail_diagnostics(regime_ticks, now)
+    diagnostics.update({
+        "probe_completed_m5_buckets": probe_tail["completed_m5_buckets"],
+        "probe_latest_contiguous_m5_bars": probe_tail["latest_contiguous_m5_bars"],
+        "probe_latest_completed_bar_end_utc": probe_tail["latest_completed_bar_end_utc"],
+        "regime_completed_m5_buckets": regime_tail["completed_m5_buckets"],
+        "regime_latest_contiguous_m5_bars": regime_tail["latest_contiguous_m5_bars"],
+        "regime_latest_expected_bar_present": regime_tail["latest_expected_bar_present"],
+    })
+    return regime_ticks, diagnostics
+
 __all__ = [
     "OrderFlowMetrics", "FootprintMetrics", "Level3Events", "VolatilityMetrics",
     "TrendMetrics", "VolumeProfileMetrics", "MacroMetrics", "NewsAndEvents",
@@ -4090,10 +4137,16 @@ def analyze_market(market_data: Dict[str, Any],
         "breakout_confirmed": False,
         "reason": "REGIME_CLASSIFIER_UNAVAILABLE",
     }
+    _probe_diagnostics = {"status": "NOT_CHECKED"}
     try:
         from power_v2_regime import classify_m5_regime
-        _regime_v2 = classify_m5_regime(tick_data, now=now)
+        _regime_ticks, _probe_diagnostics = _power_probe_startup_history(
+            symbol, now, tick_data)
+        _regime_v2 = classify_m5_regime(_regime_ticks, now=now)
+        _regime_v2["history_probe"] = _probe_diagnostics
     except Exception as _rg2_err:
+        _probe_diagnostics = {"status": f"INTEGRATION_ERROR:{type(_rg2_err).__name__}"}
+        _regime_v2["history_probe"] = _probe_diagnostics
         notes.append(f"POWER v2 regime unavailable: {type(_rg2_err).__name__}")
 
     _power_v2 = {}
@@ -4126,6 +4179,17 @@ def analyze_market(market_data: Dict[str, Any],
         notes.append(f"POWER v2 failed closed: {type(_pw2_err).__name__}")
 
     _power = _power_v2
+    _probe_diagnostics = (
+        (_power.get("regime_diagnostics") or {}).get("history_probe")
+        or _probe_diagnostics
+    )
+    notes.append(
+        "POWER HISTORY PROBE | "
+        f"status={_probe_diagnostics.get('status', 'NOT_CHECKED')} "
+        f"loaded_ticks={_probe_diagnostics.get('loaded_ticks', 0)} "
+        f"probe_tail={_probe_diagnostics.get('probe_latest_contiguous_m5_bars', 0)} "
+        f"regime_tail={_probe_diagnostics.get('regime_latest_contiguous_m5_bars', 0)}"
+    )
     _force_diag = _power.get("trend_force_diagnostics") or {}
     _rg_diag = _power.get("regime_diagnostics") or _regime_v2
     _judge_gate = _force_diag.get("valid_judges") or {}
