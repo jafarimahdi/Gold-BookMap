@@ -1,0 +1,33 @@
+plugins {
+    id 'java'
+}
+
+repositories {
+    mavenCentral()
+    maven { url 'https://maven.bookmap.com/maven2/releases/' }
+}
+
+def bookmapApiVersion = findProperty('bookmapApiVersion') ?: '7.4.0.21'
+
+group = 'powerhistoryprobe'
+version = '0.1.0-probe'
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_1_8
+    targetCompatibility = JavaVersion.VERSION_1_8
+}
+
+dependencies {
+    // BackfilledDataListener was introduced in the 7.2 API line.
+    // Before installation, use the API version matching the user's Bookmap build.
+    compileOnly "com.bookmap.api:api-core:${bookmapApiVersion}"
+    compileOnly "com.bookmap.api:api-simplified:${bookmapApiVersion}"
+}
+
+jar {
+    archiveBaseName = 'POWER-History-Backfill-Probe'
+    manifest {
+        attributes('Implementation-Title': 'POWER History Backfill Probe',
+                   'Implementation-Version': project.version)
+    }
+}
