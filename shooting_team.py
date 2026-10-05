@@ -8,6 +8,8 @@ and reviewed impulse trigger is supplied; Power direction alone is not that trig
 from __future__ import annotations
 
 import math
+import time
+from datetime import datetime
 from typing import Any, Dict, List, Mapping, Optional
 
 __all__ = ["plan_shot", "describe"]
@@ -36,6 +38,53 @@ def _wait(reason: str, price: Any = 0.0, extra: Optional[Dict[str, Any]] = None)
     return result
 
 
+def _epoch(value: Any) -> Optional[float]:
+    if isinstance(value, datetime):
+        try:
+            return value.timestamp()
+        except (OverflowError, OSError, ValueError):
+            return None
+    return _num(value)
+
+
+def _validate_queue(raw: Any, ctx: Mapping[str, Any], side: str,
+                    limit_price: float, config: Any) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """Trust a queue estimate only when it is fresh and matches this quote/order."""
+    if not isinstance(raw, Mapping):
+        return None, "queue estimate unavailable"
+    queue = dict(raw)
+    probability = _num(queue.get("fill_prob"))
+    ahead = _num(queue.get("queue_ahead_vol"))
+    total = _num(queue.get("queue_total_vol"))
+    stamp = _epoch(queue.get("timestamp"))
+    now = _epoch(ctx.get("now")) or time.time()
+    max_age = _cfg(config, "SHOOT_QUEUE_MAX_AGE_SECONDS", 5.0)
+    if probability is None or not 0.0 <= probability <= 1.0:
+        return None, "queue estimate has an invalid fill probability"
+    if ahead is None or ahead < 0 or total is None or total <= 0 or ahead > total + 1e-6:
+        return None, "queue estimate has invalid ahead/total volume"
+    if stamp is None or stamp > now + 1.0 or now - stamp > max_age:
+        return None, "queue estimate is missing a valid timestamp or is stale"
+    symbol = str(queue.get("symbol") or "").strip().upper()
+    expected_symbol = str(ctx.get("market_symbol") or "").strip().upper()
+    if not symbol or (expected_symbol and symbol != expected_symbol):
+        return None, "queue estimate symbol is missing or does not match the market"
+    queue_side = str(queue.get("side") or "").upper()
+    expected_side = "BUY" if side == "UP" else "SELL"
+    if queue_side not in {expected_side, "BID" if side == "UP" else "ASK"}:
+        return None, "queue estimate side does not match the planned limit order"
+    queue_price = _num(queue.get("price"))
+    bid, ask = _num(ctx.get("bid")), _num(ctx.get("ask"))
+    quote_bid, quote_ask = _num(queue.get("quote_bid")), _num(queue.get("quote_ask"))
+    tolerance = max(1e-6, _cfg(config, "LIMIT_TICK_SIZE", 0.1) * 0.25)
+    if queue_price is None or abs(queue_price - limit_price) > tolerance:
+        return None, "queue estimate price does not match the limit price"
+    if (bid is None or ask is None or quote_bid is None or quote_ask is None
+            or abs(quote_bid - bid) > tolerance or abs(quote_ask - ask) > tolerance):
+        return None, "queue estimate quote snapshot does not match current bid/ask"
+    return queue, None
+
+
 def _power_gate(power: Any, entry_context: Mapping[str, Any], config: Any) -> Optional[str]:
     if not isinstance(power, Mapping):
         return "POWER v2 result is missing; wait"
@@ -49,9 +98,20 @@ def _power_gate(power: Any, entry_context: Mapping[str, Any], config: Any) -> Op
     expected_reason = "UPWARD_FORCE_DOMINATES" if direction == "UP" else "DOWNWARD_FORCE_DOMINATES"
     if power.get("reason_code") not in (None, expected_reason):
         return "POWER v2 direction and reason code disagree; wait"
+    decision_diag = power.get("decision_gate_diagnostics")
+    if isinstance(decision_diag, Mapping):
+        if decision_diag.get("actionable_direction_allowed") is False:
+            return "POWER diagnostics do not authorize an actionable direction"
+        if decision_diag.get("active_hard_blockers"):
+            return "POWER reports active hard blockers; wait"
+        diag_reason = decision_diag.get("reason_code")
+        if diag_reason not in (None, expected_reason):
+            return "POWER direction and decision diagnostics disagree; wait"
 
     context = power.get("context") or {}
     diagnostics = power.get("regime_diagnostics") or {}
+    if not isinstance(context, Mapping) or not isinstance(diagnostics, Mapping):
+        return "POWER context/diagnostics are malformed; wait"
     regime = str(diagnostics.get("market_regime") or context.get("market_regime") or "UNKNOWN").upper()
     if regime != "TREND":
         return f"POWER regime is {regime}; this first pass only permits confirmed TREND"
@@ -72,8 +132,11 @@ def _power_gate(power: Any, entry_context: Mapping[str, Any], config: Any) -> Op
             or abs(up + down - 100.0) > 0.2):
         return "POWER force-share fields are malformed; wait"
 
-    if entry_context.get("news_state") == "BLACKOUT":
-        return "news blackout; Shooting will not plan an entry"
+    news_state = str(entry_context.get("news_state") or "UNKNOWN").strip().upper()
+    if news_state not in {"QUIET", "WARNING", "BLACKOUT"}:
+        return "news state is missing or unrecognized; fail closed"
+    if news_state in {"WARNING", "BLACKOUT"}:
+        return f"news state is {news_state}; Shooting will not plan an entry"
     if entry_context.get("data_quality_ok") is not True:
         return "market input quality is bad or unconfirmed"
     age_data = _num(entry_context.get("last_data_age_seconds"))
@@ -180,12 +243,14 @@ def plan_shot(signal_map: Dict[str, Any], power: Dict[str, Any],
     side = "BUY" if is_buy else "SELL"
     passive_entry = bid if is_buy else ask
     aggressive_entry = ask if is_buy else bid
-    queue = ctx.get("queue_estimate") if isinstance(ctx.get("queue_estimate"), Mapping) else None
+    raw_queue = ctx.get("queue_estimate")
+    queue, queue_validation_reason = _validate_queue(
+        raw_queue, ctx, direction, passive_entry, config)
     queue_prob = _num(queue.get("fill_prob")) if queue else None
-    queue_total = _num(queue.get("queue_total_vol")) if queue else None
-    queue_known = queue_prob is not None and queue_total is not None and queue_total > 0
+    queue_known = queue is not None and queue_prob is not None
     queue_floor = _cfg(config, "SHOOT_QUEUE_MIN_FILL_PROB", 0.70)
-    queue_blocks_limit = bool(ctx.get("queue_enabled", True) and queue_known and queue_prob < queue_floor)
+    queue_blocks_limit = bool(ctx.get("queue_enabled", True) and queue_known
+                              and queue_prob < queue_floor)
 
     passive_shelter = None
     aggressive_shelter = None
@@ -224,8 +289,8 @@ def plan_shot(signal_map: Dict[str, Any], power: Dict[str, Any],
     aggressive_reason = cost_check(aggressive)
     trigger = ctx.get("aggressive_trigger_confirmed") is True
     trigger_reason = str(ctx.get("aggressive_trigger_reason") or "").strip()
-    aggressive_allowed = (trigger and bool(trigger_reason) and aggressive_reason is None
-                          and route_clear)
+    aggressive_geometry_ok = aggressive_reason is None and route_clear
+    aggressive_allowed = (trigger and bool(trigger_reason) and aggressive_geometry_ok)
     if trigger and trigger_reason and aggressive_reason is None and not route_clear:
         aggressive_reason = "Scout has not confirmed a clear route for aggressive entry"
     passive_allowed = passive_reason is None and not queue_blocks_limit
@@ -245,8 +310,17 @@ def plan_shot(signal_map: Dict[str, Any], power: Dict[str, Any],
                 "target": None, "stop": None, "rr": 0.0, "door": dict(target_door),
                 "entry_style": None, "execution_status": "PLAN_ONLY",
                 "queue_estimate": dict(queue) if queue else None,
-                "entry_options": {"PASSIVE_LIMIT": {**passive, "reason": passive_reason},
-                                  "AGGRESSIVE_MARKET": {**aggressive, "reason": aggressive_reason}}}
+                "queue_validation": "VALID" if queue_known else (queue_validation_reason or "UNKNOWN"),
+                "entry_options": {
+                    "PASSIVE_LIMIT": {**passive, "order_type": "LIMIT",
+                                       "eligible": passive_allowed,
+                                       "planning_only": True, "reason": passive_reason},
+                    "AGGRESSIVE_MARKET": {**aggressive, "order_type": "MARKET",
+                                           "geometry_eligible": aggressive_geometry_ok,
+                                           "eligible": aggressive_allowed,
+                                           "planning_only": True,
+                                           "trigger_reason": trigger_reason or None,
+                                           "reason": aggressive_reason}}}
 
     # Patient limit is preferred whenever the queue is acceptable/unknown. Use market
     # entry only if independently triggered and the limit queue is demonstrably poor
@@ -264,13 +338,26 @@ def plan_shot(signal_map: Dict[str, Any], power: Dict[str, Any],
            f"{mode_label} entry; stop source {chosen['stop_source']}",
            f"reward {chosen['reward']:.2f} vs risk {chosen['risk']:.2f} -> R:R {chosen['rr']:.2f}"]
     if queue_known:
-        why.append(f"estimated passive fill probability {queue_prob:.2f}")
+        why.append(f"validated passive fill estimate {queue_prob:.2f}")
     else:
-        why.append("queue estimate unavailable; limit fill is not assumed")
+        why.append("queue estimate unknown/untrusted; limit fill is not assumed")
+        if queue_validation_reason:
+            why.append(queue_validation_reason)
     if chosen["stop_source"] == "ATR_FALLBACK":
         why.append("no shelter available; explicitly approved 2-ATR fallback used")
     if choose_aggressive:
         why.append(f"aggressive trigger: {trigger_reason}")
+    created_at = _epoch(ctx.get("now")) or time.time()
+    plan_ttl = max(1.0, _cfg(config, "SHOOT_PLAN_TTL_SECONDS", 30.0))
+    passive_option = {**passive, "order_type": "LIMIT", "reason": passive_reason,
+                      "eligible": passive_reason is None and not queue_blocks_limit,
+                      "planning_only": True}
+    aggressive_option = {**aggressive, "order_type": "MARKET",
+                         "geometry_eligible": aggressive_geometry_ok,
+                         "eligible": aggressive_allowed,
+                         "reason": aggressive_reason,
+                         "trigger_reason": trigger_reason or None,
+                         "planning_only": True}
     return {"shot": "GO", "side": side, "why": why,
             "entry": round(chosen["entry"], 6), "target": round(chosen["target"], 6),
             "stop": round(chosen["stop"], 6), "rr": round(chosen["rr"], 4),
@@ -279,13 +366,24 @@ def plan_shot(signal_map: Dict[str, Any], power: Dict[str, Any],
             "shelter": chosen["shelter"], "stop_source": chosen["stop_source"],
             "doors_between": road_count, "lots_between": road_lots,
             "road_ratio": round(road_ratio, 4), "entry_style": style,
-            "entry_options": {"PASSIVE_LIMIT": {**passive, "reason": passive_reason},
-                              "AGGRESSIVE_MARKET": {**aggressive,
-                                  "eligible": aggressive_allowed,
-                                  "reason": aggressive_reason,
-                                  "trigger_reason": trigger_reason or None}},
+            "order_type": "MARKET" if choose_aggressive else "LIMIT",
+            "entry_options": {"PASSIVE_LIMIT": passive_option,
+                              "AGGRESSIVE_MARKET": aggressive_option},
             "queue_estimate": dict(queue) if queue else None,
+            "queue_validation": "VALID" if queue_known else (queue_validation_reason or "UNKNOWN"),
             "power_force_shares": force_shares,
+            "power_evidence": {"activity": _num(power.get("activity")),
+                               "coverage": _num(power.get("coverage")),
+                               "valid_families": list(power.get("valid_families") or []),
+                               "reason_code": power.get("reason_code")},
+            "portfolio_risk_status": "NOT_ASSESSED",
+            "execution_blockers": ["position size/account exposure not supplied",
+                                    "margin and daily-loss limits not supplied",
+                                    "concurrent-position/correlation limits not supplied",
+                                    "plan must be revalidated at execution"],
+            "reference_price": round(p, 6), "atr": round(a, 6),
+            "spread": round(sp, 6), "created_at": created_at,
+            "valid_until": created_at + plan_ttl,
             "execution_status": "PLAN_ONLY"}
 
 

@@ -8,13 +8,17 @@ CFG = SimpleNamespace(SHOOT_PAPER_LIMIT_TTL_SECONDS=300.0, LIMIT_TICK_SIZE=0.1)
 
 def limit_plan():
     return {"shot": "GO", "side": "BUY", "entry": 99.9,
-            "entry_style": "PASSIVE_LIMIT", "door": {"price": 105.0},
+            "entry_style": "PASSIVE_LIMIT", "order_type": "LIMIT",
+            "execution_status": "PLAN_ONLY", "created_at": 1000.0,
+            "valid_until": 2000.0, "door": {"price": 105.0},
             "target": 104.8, "stop": 97.9}
 
 
 def aggressive_plan():
     return {"shot": "GO", "side": "BUY", "entry": 100.1,
-            "entry_style": "AGGRESSIVE_MARKET", "door": {"price": 105.0},
+            "entry_style": "AGGRESSIVE_MARKET", "order_type": "MARKET",
+            "execution_status": "PLAN_ONLY", "created_at": 1000.0,
+            "valid_until": 2000.0, "door": {"price": 105.0},
             "target": 104.8, "stop": 97.9,
             "entry_options": {"AGGRESSIVE_MARKET": {
                 "eligible": True, "trigger_reason": "independent confirmed impulse"}}}
@@ -81,6 +85,20 @@ def test_limit_expiry_cancels_without_fill():
     expired = simulate_entry(limit_plan(), 100.0, config=CFG, now=1300.0)
     assert expired["status"] == "CANCELLED"
     assert expired["filled_plan"] is None
+
+
+def test_expired_plan_and_market_drift_fail_closed():
+    expired = limit_plan()
+    expired["valid_until"] = 999.0
+    out = simulate_entry(expired, 100.0, config=CFG, now=1000.0)
+    assert out["status"] == "WAIT"
+    assert "expired" in out["reason"]
+
+    drifting = limit_plan()
+    drifting.update(reference_price=100.0, atr=1.0, spread=0.2)
+    out = simulate_entry(drifting, 101.0, config=CFG, now=1000.0)
+    assert out["status"] == "WAIT"
+    assert "revalidation" in out["reason"]
 
 
 def test_aggressive_requires_explicit_eligible_trigger():

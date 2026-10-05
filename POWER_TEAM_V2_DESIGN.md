@@ -121,8 +121,12 @@ I recommend four guardrails:
 3. **Control correlated votes.** Related order-flow judges should be grouped or capped by evidence family and checked with ablation tests.
 4. **Prove it before connecting it to orders.** Log the force split and all inputs in paper mode; grade the next fixed horizon (for example, next 1–3 M5 bars) against a neutral baseline; report precision, coverage, calibration, adverse excursion, and performance by range/trend/news regime. Avoid tuning on the same days used to report success.
 
-## Repository integration warning
+## Repository integration status (updated 2026-10-05)
 
-The current repository's `step2_market_analysis.py` calls the existing POWER function, and `shooting_team.py` expects its old `pick=above/below` and `confidence` fields. Replacing that function directly with this v2 contract without updating the downstream caller would break the handoff. This implementation is deliberately saved as `power_team_v2.py` and is not wired into the old pipeline. Before activation, update the new-version caller and shooting/permission interface to consume `direction`, explicitly handle `NEITHER`, and keep the legacy paper path isolated. This module itself cannot place orders.
+The prior warning above is obsolete. The active `step2_market_analysis.py` path now calls `power_team_v2.py` and passes `direction=UP/DOWN/NEITHER` to `shooting_team.py`; the active handoff explicitly waits on `NEITHER`. See `POWER_TEAM_V2_FLOW.md` for the current interfaces and safety limits.
 
-The repository's docs also disagree on roster membership and whether `absorption` belongs to POWER or SIGNAL. The roster above is the recommended v2 ownership, based on each judge's actual information source—not a claim that all old lists already match it.
+Shooting produces analysis-only passive LIMIT and aggressive MARKET alternatives. The aggressive alternative is not eligible without a separate independently reviewed trigger; Power direction by itself is insufficient. Plans remain `PLAN_ONLY`; there is no broker order submission in this integration. Synthetic tests prove handoff/schema behavior only.
+
+No captured raw trade replay was available in the workspace during this review. Do not describe the latest `NEITHER` as a volume effect, and do not lower Power's thresholds without a replay diagnosis. Queue data validation, explicit news-state rejection, plan expiry/revalidation, and `NOT_ASSESSED` portfolio risk blockers are implemented in Shooting/paper simulation. A real account-risk gate and empirical queue calibration remain required before any execution-readiness review.
+
+The roster prose above remains a design recommendation. It is not evidence that an additional independent direction vote exists inside Shooting. Shooting is a deterministic permission/planning layer.

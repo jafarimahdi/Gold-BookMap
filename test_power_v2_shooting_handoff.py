@@ -50,7 +50,7 @@ def test_power_v2_to_shooting_to_paper_fill_to_escort_end_to_end():
         "bid": 99.9, "ask": 100.1, "news_state": "QUIET",
         "has_data": True, "data_quality_ok": True,
         "last_data_age_seconds": 1.0, "queue_enabled": False,
-        "aggressive_trigger_confirmed": False,
+        "aggressive_trigger_confirmed": False, "now": 1000.0,
     }
     shot = plan_shot(signal_map, power, 100.0, atr=1.0, spread=0.2,
                      config=CFG, entry_context=entry_context)

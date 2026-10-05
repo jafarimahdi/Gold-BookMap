@@ -1,78 +1,26 @@
-# Safe local install — POWER Team v2 + memory book
+# POWER v2 integration — current status and safe update notes
 
-This adds the new files alongside the old code. It does **not** replace `power_team.py`, connect to the shooter, or enable broker trading. The memory book is an audit-only module and does not feed history back into the Power decision.
+**This replaces the original staged-install guide.** That guide's branch-switching and “not integrated” instructions are obsolete. The active checkout is already on the user's feature branch; do not branch-switch or extract an entire review snapshot over it.
 
-## 1. Make a feature branch and verify the working tree
+## Current state
 
-Open Git Bash and run:
+- `step2_market_analysis.py` calls POWER v2 and passes `UP` / `DOWN` / `NEITHER` to Shooting.
+- `shooting_team.py` returns both passive LIMIT and aggressive MARKET plan alternatives, but the aggressive option requires an independent reviewed trigger. No live order is submitted.
+- Plans are `PLAN_ONLY`. The paper simulator is only a model and Escort receives only paper-filled plans.
+- Power thresholds are unchanged. No captured raw trade replay was available in this workspace, so the latest `NEITHER` cannot be attributed to low volume or another specific cause.
 
-```bash
-cd /a/gitHub/Gold-BookMap
-git status --short
-```
+## Safe way to apply a future update
 
-If `git status --short` lists changes you care about, stop and commit or back them up first. If the tree is clean, make a separate branch:
+1. Review `git status --short` in the user's checkout. Stop if anything unexpected appears; preserve all existing work.
+2. Copy only the explicitly named changed files from the update package into the repository root, overwriting only those same named files after review.
+3. Do not extract a full repository snapshot, timestamped backups, temporary scripts, or unrelated files over the checkout.
+4. Run the listed tests locally. Tests prove code/control flow, not profitability, realistic fills, or permission to trade.
+5. The user reviews and uploads/pushes to GitHub themselves. Do not enable broker orders.
 
-```bash
-git switch -c feature/power-team-m5-v2
-```
+## Required before any future execution-readiness review
 
-If that branch already exists, use `git switch feature/power-team-m5-v2` instead.
-
-## 2. Download and extract the bundle
-
-Download `Power-Team-v2-M5.zip` from this conversation. In File Explorer, extract these six files into `A:\gitHub\Gold-BookMap` (the repository root):
-
-- `power_team_v2.py`
-- `power_memory_book.py`
-- `test_power_team_v2.py`
-- `test_power_memory_book.py`
-- `POWER_TEAM_V2_DESIGN.md`
-- `POWER_TEAM_V2_INSTALL.md`
-
-These names are new and should not overwrite existing project files. Do **not** rename `power_team_v2.py` to `power_team.py`.
-
-## 3. Run the isolated tests
-
-Back in Git Bash:
-
-```bash
-cd /a/gitHub/Gold-BookMap
-python -m unittest -v test_power_team_v2.py test_power_memory_book.py test_power_m5_adapter.py
-```
-
-Expected result: all 25 tests pass. These are code-behavior tests, not evidence of a trading edge or proof that the app's incoming data is M5-normalized.
-
-## 4. Review what changed
-
-```bash
-git status --short
-git diff --stat
-```
-
-At this stage the existing `power_team.py`, `step2_market_analysis.py`, `shooting_team.py`, Escort files, Scout files, `.env`, and credentials should remain untouched. Only the new v2 and test/design files should appear as untracked additions.
-
-## 5. Memory book behavior
-
-When later called by a paper/replay adapter, `power_memory_book.py` writes one UTC JSONL record per completed M5 bar under a directory such as `data/power_memory/`. It stores normalized judge inputs, context, result, reference price, and a hash-chain field. Do not log secrets, and do not let old records vote on new decisions during this first phase. The module is intended for a single writer; it does not yet provide cross-process locking or a regulated immutable archive.
-
-The module is not automatically connected to the app. Unit tests exercise the writer in a temporary folder and do not create project data files.
-
-## 6. Do not wire it into the existing live chain yet
-
-The current caller expects the legacy Power schema (`pick=above/below`, `confidence`). V2 returns `direction=UP/DOWN/NEITHER`, force shares, activity, coverage, and reason codes. A later integration must update the new-version caller and Shooting/permission interface to consume `direction` and explicitly handle `NEITHER`.
-
-Before activation, the adapter must calculate the directional values from a consistent rolling M5 window, validate freshness/side labels, and receive an explicit, trustworthy `market_regime=TREND/RANGE` plus breakout/data-quality flags. Missing/unknown regime now deliberately returns NEITHER. The current candle-sweep signal is excluded because its project caller uses synthetic high/low/volume inputs.
-
-Keep the existing trading configuration unchanged; do not launch the robot while experimenting. Test with historical/replay data first. Never enable live orders merely because unit tests pass.
-
-## 7. Optional commit after review
-
-Once the isolated files and tests are acceptable:
-
-```bash
-git add power_team_v2.py power_memory_book.py test_power_team_v2.py test_power_memory_book.py POWER_TEAM_V2_DESIGN.md POWER_TEAM_V2_INSTALL.md
-git commit -m "Add isolated M5 Power v2 and memory prototype"
-```
-
-Do not push to GitHub until you decide to publish the prototype and have reviewed the integration plan.
+- Replay timestamped real trades/quotes and record why each Power result was `NEITHER`; preserve feed/symbol/side-label semantics and do not weaken thresholds to manufacture more signals.
+- Validate and calibrate queue estimates against actual fills; current queue probability is heuristic.
+- Add and test an account-level risk/permission layer for position sizing, per-trade and aggregate risk, margin, daily loss, concurrent/correlated positions, and a kill switch.
+- Revalidate plan direction, quote, news, route, bracket, and expiry immediately before any future order proposal.
+- Keep broker submission disabled until independent out-of-sample and paper evidence plus all safety reviews pass and the user explicitly authorizes a separate execution change.

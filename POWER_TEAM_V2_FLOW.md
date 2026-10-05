@@ -1,85 +1,47 @@
-# How the teams fit together — staged v2 flow
+# POWER v2 → Shooting handoff (current implementation)
 
-This is the intended **data/decision handoff**, not yet a production integration. Keep the existing path untouched until every contract is tested.
+The repository integration is already active in `step2_market_analysis.py`. This page is the current code contract, not a future wiring proposal. All order execution remains disabled; Shooting returns `PLAN_ONLY` and the paper simulator is not a broker.
 
 ```text
-Bookmap trades with timestamps + validated aggressor sides
-                         │
-                         ▼
-              M5 ADAPTER (next step)
-    selects [bar start, bar end), checks freshness/quality,
-    creates normalized signed readings and diagnostics
-                         │
-              ┌──────────┴──────────┐
-              ▼                     ▼
-         POWER v2              MEMORY BOOK
-     UP / DOWN / NEITHER      one FINAL record per
-     force shares, activity,  completed M5 bar
-     coverage, reason         inputs + result + price
-              │
-              ├── NEITHER ──► SHOOTING: WAIT / NO_GO; no side
-              │
-              └── UP or DOWN ─► SHOOTING checks Scout map, route,
-                                reward/risk, spread, queue, permission
-                                             │
-                                    GO / WAIT / NO_GO plan
-                                             │
-                                             ▼
-                                   ESCORT manages that plan
-                                   using its unchanged contract
+Bookmap feed + trusted timestamps / aggressor-side labels
+       ↓
+M5 adapter and regime/freshness checks
+       ↓
+POWER v2: UP / DOWN / NEITHER + force shares, activity, coverage, blockers
+       ├─ NEITHER / stale / weak evidence → Shooting WAIT
+       └─ UP or DOWN → Shooting validates market/news/quotes/Scout route/geometry
+                         ├─ PASSIVE_LIMIT (LIMIT) plan, preferred by default
+                         └─ AGGRESSIVE_MARKET (MARKET) alternative, advisory unless
+                            an independent, audited trigger is confirmed
+       ↓
+Paper entry simulator: pending limit / simulated fill only
+       ↓
+Escort receives only a confirmed paper fill
 ```
 
-## Ownership boundaries
+## What is implemented
 
-- **Scout** supplies prices, doors, walls and map facts. POWER v2 does not need the map to measure force.
-- **POWER v2** uses executed-trade evidence from a five-minute window. It returns force shares, evidence coverage/activity, context blockers and a three-way direction.
-- **Memory book** records the POWER inputs/result once for each completed M5 bar. Historical records do not vote in the next decision.
-- **Shooting** is the first component that combines direction with Scout targets and execution/permission constraints. It must explicitly turn `NEITHER` into a non-trade plan.
-- **Escort** continues to consume the Shooter's plan. If that plan schema remains stable, Escort should not need a conceptual change, but it still needs regression tests after the Shooter interface changes.
-- **Execution** remains out of scope for the prototype. Do not connect v2 to broker order calls in this stage.
+- `step2_market_analysis.py` calls Power v2 and passes its canonical direction to `shooting_team.py`; legacy POWER is not the active authority for this handoff.
+- Power keeps the existing evidence thresholds. Its output includes direction, force-share split (not probability), activity, coverage, valid families, excluded evidence, and reason code. `NEITHER` is not converted into a guessed side.
+- Shooting independently checks regime, freshness, evidence-share schema, explicit news status, feed quality/age, bid/ask, Scout target/route, queue context, and target/stop/cost geometry.
+- Shooting returns both a patient `LIMIT` plan and an aggressive `MARKET` alternative when geometry can be assessed. The aggressive option stays ineligible without its own independent trigger and route clearance. Power direction alone is not a market-entry trigger.
+- Queue estimates are used only when probability, volumes, timestamp, symbol, order side/price, and the quote snapshot validate. Missing or invalid queue evidence is `UNKNOWN`; the plan never treats it as a guaranteed fill.
+- Plans expire and paper fills are cancelled when the plan expires or market price moves beyond its configured revalidation tolerance. Portfolio sizing/exposure is explicitly `NOT_ASSESSED`; this is an execution blocker, not a default approval.
+- Every Shooting plan remains `PLAN_ONLY`. The simulator can stage/fill only paper limits and Escort only manages paper-filled plans.
 
-## Current next-step adapter
+## Power evidence: diagnosis without weakening thresholds
 
-`power_m5_adapter.py` accepts timestamped trades and only trusts direct side labels by default (`is_direct` / `is_bookmap_direct`). It builds `footprint_delta`, `big_prints`, `footprint_levels`, and, when there is enough preceding data, short-window `cvd_momentum`. It deliberately does not fabricate `l3_aggr_limit`, a sweep, an absorption vote, or a range/breakout judgement.
+Power's gates are intentionally unchanged: missing/stale/invalid evidence is excluded; direction requires its configured judge/family minimums, coverage, activity, dominance, and family agreement; uncertain/unknown regime remains non-directional. Do not relax these gates just to increase trade count.
 
-The adapter needs the **data instrument's tick size**, not automatically the CFD's tick size. The checked feed label was `GCZ6.COMEX@RITHMIC`, and the observed minimum gap was 0.1; CME's GC contract specification also lists a $0.10 minimum fluctuation per troy ounce. This supports using 0.10 for that feed, not the CFD's 0.05 setting. Reconfirm if the Bookmap instrument changes.
+There is no raw timestamped trade replay artifact in this workspace: the referenced latest probe CSV lives on the user's Windows machine and was not included here. Therefore no honest claim can be made about whether Power's latest `NEITHER` was caused by low market volume, missing side-labelled trades, insufficient coverage, weak activity, regime uncertainty, or disagreement. The code now surfaces the evidence diagnostics in the Shooting plan, but the empirical diagnosis/replay is still blocked until the actual probe/Bookmap data is supplied.
 
-If timestamps or trusted side labels are absent, or the feed is stale, the adapter reports a blocker so POWER returns `NEITHER`. The adapter also leaves `market_regime=UNKNOWN`; Power v2.2 will return NEITHER until another component supplies a verified TREND/RANGE state. Do not switch `trust_explicit_side=True` until that source's side semantics are verified.
+Time of day alone does not prove low volume. On 5 October 2026, 20:30 Budapest time is 14:30 New York time (US daylight time), around the US cash-session open; that is not inherently a quiet period. Use observed feed activity, coverage, spread and freshness. If those are weak, the correct output is still `NEITHER`/`WAIT`.
 
-## Intended call sequence (illustrative only)
+## Required validation before any execution review
 
-```python
-built = build_m5_inputs(
-    tick_data,
-    now=now_utc,
-    tick_size=verified_bookmap_tick_size,
-)
-context = {
-    **built["context"],
-    "in_range": independently_verified_range_state,
-    "breakout_confirmed": independently_verified_breakout,
-}
-answer = decide(built["judges"], context=context)
-
-# Once, on the completed M5 bar only—not on every poll:
-append_snapshot(
-    "data/power_memory",
-    timestamp=m5_bar_end_utc,
-    symbol=symbol,
-    judges=built["judges"],
-    context={**context, "diagnostics": built["diagnostics"]},
-    result=answer,
-    reference_price=close_of_that_m5_bar,
-    phase="FINAL",
-)
-```
-
-Do not copy this into `step2_market_analysis.py` yet. `independently_verified_range_state`, `independently_verified_breakout`, the exact M5 close handling, and the futures tick-size configuration still need to be settled. The existing Shooting code expects legacy `pick=above/below`/`confidence`; it must be deliberately migrated to `direction=UP/DOWN/NEITHER` before the new module is called there.
-
-## Stages
-
-1. **Now:** add the adapter and its isolated tests to the existing feature branch; run the full unit suite. No app startup.
-2. **Next:** review a captured/replay window locally, verify timestamps, side labels, price increment, quality blockers, and output by hand.
-3. **Then:** design a separately tested bar-close coordinator plus memory call (one row per completed bar).
-4. **After that:** migrate Shooting to the new direction contract; test NEITHER and all existing shot outputs. Verify Escort still sees its expected plan shape.
-5. **Only after historical/paper validation:** consider live-chain integration. Unit tests alone never authorize live orders.
+1. Run the unit suite and the synthetic handoff test. These verify software contracts only, not edge or realistic fills.
+2. Replay captured timestamped trades and quotes through the adapter → Power → Shooting, preserving the original feed labels and symbol. Report why each `NEITHER` occurred; do not fabricate sweeps or directional evidence.
+3. Validate queue-model calibration against observed fills/cancellations. The current formula is only a heuristic.
+4. Add a separate account-risk gate covering sizing, max risk/trade, total open risk, margin, daily loss, correlated positions, and kill switch.
+5. Revalidate direction, quote, news, route, bracket and plan expiry immediately before any future order proposal.
+6. Keep broker submission disabled until independent historical/out-of-sample and paper evidence, controls, and user authorization are reviewed.

@@ -83,11 +83,26 @@ def simulate_entry(plan: Dict[str, Any], price: float, *, config: Any = None,
         return {**_LAST_STATUS, "pending": None, "filled_plan": None}
     if current is None or current <= 0:
         return _wait_or_cancel("invalid last price; any pending paper limit was cancelled")
+    expiry = _num(plan.get("valid_until"))
+    if expiry is not None and timestamp >= expiry:
+        return _wait_or_cancel("Shooting plan expired; replan before any paper fill")
+    if plan.get("execution_status") != "PLAN_ONLY":
+        return _wait_or_cancel("paper simulator accepts only an analysis-only Shooting plan")
+    reference = _num(plan.get("reference_price"))
+    plan_atr = _num(plan.get("atr"))
+    plan_spread = _num(plan.get("spread"))
+    if reference is not None and plan_atr is not None and plan_spread is not None:
+        max_drift = max(plan_spread * 2.0,
+                        plan_atr * max(0.0, _num(getattr(config, "SHOOT_MAX_PLAN_DRIFT_ATR", 0.5)) or 0.5))
+        if abs(current - reference) > max_drift:
+            return _wait_or_cancel("market moved beyond plan revalidation tolerance")
 
     style = plan.get("entry_style")
     side = str(plan.get("side", "")).upper()
     entry, target, stop = (_num(plan.get(k)) for k in ("entry", "target", "stop"))
+    expected_order_type = "LIMIT" if style == "PASSIVE_LIMIT" else "MARKET"
     if (style not in {"PASSIVE_LIMIT", "AGGRESSIVE_MARKET"} or side not in {"BUY", "SELL"}
+            or plan.get("order_type") not in (None, expected_order_type)
             or entry is None or target is None or stop is None or entry <= 0):
         return _wait_or_cancel("invalid entry style, side, or bracket prices")
     bracket_ok = target > entry > stop if side == "BUY" else target < entry < stop

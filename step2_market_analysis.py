@@ -4273,6 +4273,18 @@ def analyze_market(market_data: Dict[str, Any],
                 # An empty/unavailable level is UNKNOWN, not a 100% fill estimate.
                 if (_candidate_queue and "error" not in _candidate_queue
                         and float(_candidate_queue.get("queue_total_vol", 0.0) or 0.0) > 0):
+                    # Tag the estimate with the exact quote/time/symbol it describes.
+                    # Shooting treats an untagged or stale queue estimate as UNKNOWN.
+                    try:
+                        _queue_stamp = now.timestamp()
+                    except Exception:
+                        _queue_stamp = float(now)
+                    _candidate_queue.update({
+                        "timestamp": _queue_stamp,
+                        "symbol": market_data.get("symbol"),
+                        "quote_bid": _raw_bid,
+                        "quote_ask": _raw_ask,
+                    })
                     _queue_estimate = _candidate_queue
             except Exception:
                 _queue_estimate = None
@@ -4295,6 +4307,8 @@ def analyze_market(market_data: Dict[str, Any],
             "data_quality_ok": _shot_quality,
             "queue_estimate": _queue_estimate,
             "queue_enabled": bool(getattr(config, "QUEUE_POS_ENABLED", True)),
+            "market_symbol": market_data.get("symbol"),
+            "now": now,
             # No empirically reviewed aggressive trigger is available in this build.
             "aggressive_trigger_confirmed": False,
             "aggressive_trigger_reason": "",
