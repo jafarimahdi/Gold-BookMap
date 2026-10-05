@@ -10,7 +10,7 @@ repositories {
 def bookmapApiVersion = findProperty('bookmapApiVersion') ?: '7.4.0.21'
 
 group = 'powerhistoryprobe'
-version = '0.1.0-probe'
+version = '0.2.0-capped'
 
 java {
     sourceCompatibility = JavaVersion.VERSION_1_8
@@ -28,6 +28,7 @@ jar {
     archiveBaseName = 'POWER-History-Backfill-Probe'
     manifest {
         attributes('Implementation-Title': 'POWER History Backfill Probe',
-                   'Implementation-Version': project.version)
+                   'Implementation-Version': project.version,
+                   'Bookmap-API-Version': bookmapApiVersion)
     }
 }

@@ -74,7 +74,11 @@ def _has_realtime_marker(path: Path) -> bool:
 
 
 def _latest_probe_file(directory: Path) -> Optional[Path]:
+    # The bounded v2 add-on uses one fixed snapshot so files do not accumulate.
+    compact = directory / "power_history_probe_latest.csv"
     try:
+        if compact.is_file():
+            return compact
         candidates = [p for p in directory.glob(_PREFIX + "*" + _SUFFIX) if p.is_file()]
         candidates.sort(key=lambda p: p.stat().st_mtime_ns, reverse=True)
     except OSError:
@@ -306,6 +310,137 @@ def load_probe_regime_prices(
         "newest_utc": ticks[-1]["timestamp"] if ticks else None,
         "ticks": ticks,
         "side_data_used": False,
+    }
+
+
+def load_probe_regime_bars(
+    *,
+    symbol: str,
+    now: Any,
+    directory: Any = None,
+    max_age_seconds: float = 6 * 60 * 60,
+    required_bars: int = 28,
+) -> Dict[str, Any]:
+    """Load a bounded snapshot of completed PRE_REALTIME M5 OHLC bars.
+
+    The v2 probe file contains at most 28 bars. This loader is intentionally
+    separate from the legacy raw-trade loader and never reads or changes the
+    GoldBridge tick/MBO files. Any malformed, stale, gapped, wrong-symbol, or
+    incomplete snapshot returns no bars so the regime path fails closed.
+    """
+    current = _as_utc(now)
+    if current is None:
+        return {"status": "INVALID_NOW", "bars": [], "path": None}
+    active_symbol = str(symbol or "").strip()
+    if not active_symbol:
+        return {"status": "NO_ACTIVE_SYMBOL", "bars": [], "path": None}
+    try:
+        max_age = float(max_age_seconds)
+    except (TypeError, ValueError, OverflowError):
+        max_age = 6 * 60 * 60
+    if not math.isfinite(max_age) or max_age <= 0:
+        max_age = 6 * 60 * 60
+    if required_bars < 1 or required_bars > 28:
+        return {"status": "INVALID_REQUIRED_BARS", "bars": [], "path": None}
+
+    base = Path(directory).expanduser() if directory else _default_dir()
+    path = base / "power_history_probe_latest.csv"
+    try:
+        if not path.is_file():
+            return {"status": "NO_COMPACT_FILE", "bars": [], "path": str(path)}
+        if path.stat().st_size > 16 * 1024:
+            return {"status": "FILE_TOO_LARGE", "bars": [], "path": str(path)}
+    except OSError:
+        return {"status": "FILE_UNREADABLE", "bars": [], "path": str(path)}
+
+    bars: List[Dict[str, Any]] = []
+    aliases = set()
+    completion_status = ""
+    captured_at: Optional[datetime] = None
+    try:
+        with path.open("r", encoding="utf-8-sig", newline="") as stream:
+            reader = csv.DictReader(stream)
+            required_columns = {
+                "record_type", "phase", "bar_start_ns", "bar_end_ns", "alias",
+                "open", "high", "low", "close", "volume", "captured_at_utc", "status",
+            }
+            if not required_columns.issubset(set(reader.fieldnames or [])):
+                return {"status": "BAD_SCHEMA", "bars": [], "path": str(path)}
+            for row_number, row in enumerate(reader, start=2):
+                if row_number > 32:
+                    return {"status": "TOO_MANY_ROWS", "bars": [], "path": str(path)}
+                kind = str(row.get("record_type", "")).strip().upper()
+                if kind == "PROBE_COMPLETE":
+                    completion_status = str(row.get("status", "")).strip().upper()
+                    captured_at = _as_utc(row.get("captured_at_utc"))
+                    continue
+                if kind != "M5_BAR":
+                    continue
+                if str(row.get("phase", "")).strip().upper() != "PRE_REALTIME":
+                    return {"status": "BAD_PHASE", "bars": [], "path": str(path)}
+                alias = str(row.get("alias", "")).strip().strip('"')
+                if alias:
+                    aliases.add(alias.casefold())
+                start_dt = _to_timestamp_ns(row.get("bar_start_ns"))
+                end_dt = _to_timestamp_ns(row.get("bar_end_ns"))
+                if start_dt is None or end_dt is None:
+                    return {"status": "INVALID_BAR_TIME", "bars": [], "path": str(path)}
+                try:
+                    o, h, low, close = (float(row.get(k, "")) for k in ("open", "high", "low", "close"))
+                    volume = int(str(row.get("volume", "0")).strip())
+                except (TypeError, ValueError, OverflowError):
+                    return {"status": "INVALID_BAR_VALUE", "bars": [], "path": str(path)}
+                values = (o, h, low, close)
+                if (not all(math.isfinite(v) and v > 0 for v in values)
+                        or h < max(o, close, low) or low > min(o, close, h)
+                        or volume < 0):
+                    return {"status": "INVALID_BAR_VALUE", "bars": [], "path": str(path)}
+                if end_dt - start_dt != timedelta(seconds=_BAR_SECONDS):
+                    return {"status": "INVALID_BAR_WIDTH", "bars": [], "path": str(path)}
+                if end_dt > current:
+                    return {"status": "FUTURE_BAR", "bars": [], "path": str(path)}
+                bars.append({
+                    "start": start_dt.timestamp(),
+                    "start_utc": start_dt.isoformat().replace("+00:00", "Z"),
+                    "end_utc": end_dt.isoformat().replace("+00:00", "Z"),
+                    "open": o, "high": h, "low": low, "close": close,
+                    "volume": volume, "alias": alias,
+                })
+    except (OSError, UnicodeError, csv.Error):
+        return {"status": "FILE_READ_ERROR", "bars": [], "path": str(path)}
+
+    if not captured_at:
+        return {"status": "MISSING_COMPLETION_MARKER", "bars": [], "path": str(path)}
+    age = (current - captured_at).total_seconds()
+    if age < -5 or age > max_age:
+        return {"status": "STALE_SNAPSHOT", "bars": [], "path": str(path),
+                "snapshot_age_seconds": round(age, 3)}
+    if aliases != {active_symbol.casefold()}:
+        return {"status": "SYMBOL_MISMATCH", "bars": [], "path": str(path),
+                "runtime_symbol": active_symbol, "probe_aliases": sorted(aliases)}
+    if completion_status != "READY":
+        return {"status": completion_status or "INCOMPLETE", "bars": [], "path": str(path),
+                "available_bars": len(bars), "captured_at_utc": captured_at.isoformat()}
+    if len(bars) > required_bars:
+        return {"status": "TOO_MANY_BARS", "bars": [], "path": str(path),
+                "loaded_bars": len(bars), "maximum_bars": required_bars}
+
+    bars.sort(key=lambda bar: bar["start"])
+    for previous, following in zip(bars, bars[1:]):
+        if int(round(following["start"] - previous["start"])) != _BAR_SECONDS:
+            return {"status": "GAP_IN_HISTORY", "bars": [], "path": str(path),
+                    "loaded_bars": len(bars)}
+    if len(bars) != required_bars:
+        return {"status": "BAR_COUNT_MISMATCH", "bars": [], "path": str(path),
+                "loaded_bars": len(bars), "required_bars": required_bars}
+    latest_end = _as_utc(bars[-1]["end_utc"])
+    if latest_end is None or (current - latest_end).total_seconds() > max_age:
+        return {"status": "STALE_BARS", "bars": [], "path": str(path)}
+    return {
+        "status": "LOADED", "path": str(path), "alias": active_symbol,
+        "loaded_bars": len(bars), "latest_contiguous_m5_bars": len(bars),
+        "captured_at_utc": captured_at.isoformat().replace("+00:00", "Z"),
+        "latest_completed_bar_end_utc": bars[-1]["end_utc"], "bars": bars,
     }
 
 

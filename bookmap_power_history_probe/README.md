@@ -1,68 +1,50 @@
-# POWER History Backfill Probe — separate diagnostic add-on
+# POWER History Backfill Probe — bounded one-shot add-on
 
-## Purpose
+## Purpose and limits
 
-This is a standalone, read-only Bookmap add-on to test one question: **does the Bookmap indicator/add-on receive past market trades on startup, before it transitions to live data?**
+This standalone, read-only Bookmap add-on captures startup backfill for Power M5 regime classification. It is separate from GoldBridge and never reads or changes `ticks.csv` or `mbo.csv`.
 
-It is deliberately separate from the existing Gold-BookMap bridge. It does **not** open, edit, truncate, or write `ticks.csv`, `mbo.csv`, or any application/POWER files. It writes only a new timestamp-named probe CSV under:
+The bounded version stores **at most 28 completed five-minute OHLCV bars** in one fixed snapshot:
 
-`%USERPROFILE%\BookmapPowerHistoryProbe\power_history_probe_YYYYMMDD_HHMMSS.csv`
+`%USERPROFILE%\BookmapPowerHistoryProbe\power_history_probe_latest.csv`
 
-You may set `POWER_HISTORY_PROBE_DIR` before starting Bookmap to choose another output folder.
+Set `POWER_HISTORY_PROBE_DIR` before starting Bookmap to use a different output directory.
 
-The probe records the raw Bookmap event timestamp, alias, price, size, phase, and raw `TradeInfo.isBidAggressor` flag. It intentionally does **not** translate that flag into BUY/SELL, because its meaning must first be checked against the installed bridge and feed.
+The collector aggregates trades in a rolling in-memory window of at most 29 M5 buckets (the extra bucket permits exclusion of a partial final bar). At Bookmap's `REALTIME_START` transition it selects the latest 28 completed bars, validates continuity, writes a compact CSV through a temporary file and atomically replaces the fixed snapshot. It then clears its aggregation state and ignores all subsequent live trades. It does not create per-session timestamped files, rotate production files, or delete unrelated files.
 
-## What it tests
+The snapshot has a fixed small row count: a header, up to 28 `M5_BAR` records, and a completion-status record. `READY` is written only for exactly 28 contiguous complete bars. If Bookmap supplies fewer bars or there is a gap, the snapshot reports a non-ready status; the Python loader rejects it so the regime gate fails closed.
 
-- `BackfilledDataListener`: asks Bookmap to send available cloud backfill to this add-on.
-- `TradeDataListener` + `TimeListener`: records the timestamped trades that Bookmap actually delivers.
-- `HistoricalModeListener`: marks the transition to live data (`REALTIME_START`).
-- `analyze_probe.py`: counts completed five-minute buckets in pre-live history. It uses the latest PRE_REALTIME trade timestamp as the historical completion cutoff, so a later LIVE timestamp cannot promote a partial historical bar. A readiness label also requires the `REALTIME_START` marker and a single instrument alias.
+The previous legacy probe JAR wrote raw trade rows to timestamped CSVs. This new version does **not** clean those old files. Preserve or move any legacy CSVs yourself after review; do not assume this JAR deletes them.
 
-Bookmap can only send history actually available from its selected connection/provider. The add-on cannot manufacture missing provider history. Historical backfill may also differ from real-time data in depth/detail; this probe records trades only.
+## Data path
+
+1. Start Bookmap and enable both the existing GoldBridge add-on and this separate probe for the intended instrument.
+2. The probe collects only the initial historical/backfill phase. At `REALTIME_START`, it writes the compact snapshot and stops recording. It does not trigger on each `python main.py` run.
+3. Run `python main.py` after the snapshot is ready. The Python loader checks the fixed file, exact instrument alias, completion status, 28-bar count, continuity, and age.
+4. Probe OHLC is passed only to the Power regime classifier. Original `tick_data` remains the input to `run_power_v2`; the probe never maps aggressor flags or creates orders.
+
+If the Python app starts before a valid snapshot exists, if the latest bar is stale, or if fewer than 28 complete contiguous bars are present, the regime remains UNKNOWN/NEITHER. Do not bypass that gate.
 
 ## Build
 
-The source is compiled against Bookmap API `7.4.0.21`, matching your reported Bookmap `7.4.0 build 21`. The backfill listener is supported from Bookmap API 7.2 onward.
-
-From this directory, with Gradle installed:
+The source targets Bookmap API `7.4.0.21` and Java 8 bytecode. Build from this directory with Gradle installed:
 
 ```powershell
 gradle jar
 ```
 
-The JAR will be under `build\libs\POWER-History-Backfill-Probe-0.1.0-probe.jar`.
+The JAR is created under `build\libs\POWER-History-Backfill-Probe-0.2.0-capped.jar`.
 
-If the target Bookmap build is not compatible with 7.4.0.21, set the matching artifact version in Gradle, for example:
+If your Bookmap version needs a different API version, change `bookmapApiVersion` only to the matching supported API artifact and rebuild. Do not replace or edit GoldBridge.
 
-```powershell
-gradle -PbookmapApiVersion=<matching-version> jar
-```
+## Safe verification
 
-Do not replace or edit the existing BookMapBridge add-on.
+- Test that a valid snapshot contains exactly 28 `M5_BAR` rows, one alias, one `PROBE_COMPLETE,READY` record, and no `TRADE` rows.
+- Test that 27 bars, a gap, a stale snapshot, a malformed value, a future timestamp, or a different alias is rejected by the Python loader.
+- Keep `TRADING_ENABLED=0`, `EXECUTION_MODE=none`, and `ALLOW_LIVE_TRADING=0` during validation. This add-on itself is read-only; the application still has separate execution configuration.
 
-## Safe test steps
+The 28-bar snapshot satisfies the current ADX period-14 minimum for regime computation. It does not certify feed quality, aggressor-side semantics, a POWER direction, or trading readiness. The POWER force/activity/family gates continue to apply independently.
 
-1. Check the Bookmap version using **Help → About**. It must support the backfill listener (7.2+); use matching API artifacts to build.
-2. This is a standalone diagnostic and does not require the Python app loop. Do not start or stop the app loop specifically for this probe test.
-3. Build this separate JAR and add it in Bookmap using **Settings → API plugins configuration → Add**. Enable only **POWER History Backfill Probe (standalone)** for the test instrument.
-4. Leave the existing bridge and its files unchanged. The probe writes to its own folder/file only.
-5. Wait for the Bookmap log message `Bookmap entered real-time mode`, then run:
+## Existing legacy file
 
-   ```powershell
-   python analyze_probe.py "$env:USERPROFILE\BookmapPowerHistoryProbe\power_history_probe_YYYYMMDD_HHMMSS.csv"
-   ```
-
-6. Inspect the report:
-   - **Longest pre-realtime run ≥28**: a 28-bar sequence exists somewhere in the returned history, showing the source can deliver that much contiguous history.
-   - **Pre-realtime tail run ≥28**: the most recent contiguous historical sequence reaches 28; this is the stronger startup-history check.
-   - If the tail run is below 28, the longest run can still pass while immediate POWER readiness fails; the current Power gate needs the latest completed-bar run, plus freshness and regime checks.
-   - **Zero historical rows**: no evidence that this add-on received startup backfill. It may be unavailable for the connection, unsupported by the installed version, or not delivered in this add-on mode; do not infer the cause from zero rows alone.
-7. Keep POWER fail-closed. This diagnostic does not enable trading, alter thresholds, or authorize an order.
-
-## Limits of this first probe
-
-- The included JAR manifest identifies Bookmap API `7.4.0.21`, matching Bookmap `7.4.0 build 21`. It has **not yet been loaded inside the user's Bookmap/Rithmic installation**.
-- The exact Bookmap version and the installed indicator/bridge implementation have not yet been inspected, so provider-specific backfill behavior remains unverified.
-- The 28-bar report checks timestamp continuity only. It does not certify aggressor-side semantics, data quality, ADX regime, or POWER direction.
-- This is a collector/diagnostic add-on, not a finished visual chart indicator and not a production bridge replacement. The optional Power M5 startup integration is in the repository root: `step2_market_analysis.py` and `power_history_probe_loader.py`. It reads this probe CSV for M5 regime classification and keeps the original `tick_data` input to `run_power_v2` unchanged.
+The old JAR's timestamped raw-trade CSV is not removed by this version. Keep it outside the active probe folder if you want the folder to contain only the bounded snapshot; retain a separate backup if you need the earlier diagnostic evidence.

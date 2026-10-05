@@ -70,41 +70,40 @@ def _power_probe_startup_history(symbol, now, live_ticks):
 
     symbol_key = str(symbol or "").strip()
     directory_key = os.environ.get("POWER_HISTORY_PROBE_DIR", "").strip()
-    alias_key = os.environ.get("POWER_HISTORY_PROBE_ALIAS", "").strip()
-    runtime_alias_key = os.environ.get("POWER_HISTORY_PROBE_RUNTIME_SYMBOL", "").strip()
     max_age_key = os.environ.get("POWER_HISTORY_PROBE_MAX_AGE_SECONDS", "21600").strip()
-    key = (symbol_key, directory_key, alias_key, runtime_alias_key, max_age_key)
+    probe_dir = (os.path.expandvars(directory_key) if directory_key else
+                 os.path.join(os.path.expanduser("~"), "BookmapPowerHistoryProbe"))
+    try:
+        snapshot_mtime_ns = os.stat(os.path.join(
+            probe_dir, "power_history_probe_latest.csv")).st_mtime_ns
+    except OSError:
+        snapshot_mtime_ns = None
+    # A long-running analysis process notices a newly atomically replaced snapshot.
+    key = (symbol_key, directory_key, max_age_key, snapshot_mtime_ns)
     cached = _POWER_PROBE_STARTUP_CACHE.get(key)
     if cached is None:
         try:
-            from power_history_probe_loader import load_probe_regime_prices
-            loaded = load_probe_regime_prices(
+            from power_history_probe_loader import load_probe_regime_bars
+            loaded = load_probe_regime_bars(
                 symbol=symbol_key, now=now, directory=directory_key or None,
-                max_age_seconds=float(max_age_key))
-            history = loaded.pop("ticks", [])
-            cached = {"diagnostics": loaded, "history_ticks": history}
+                max_age_seconds=float(max_age_key), required_bars=28)
+            history_bars = loaded.pop("bars", [])
+            cached = {"diagnostics": loaded, "history_bars": history_bars}
         except Exception as exc:
             cached = {"diagnostics": {
                 "status": f"LOAD_ERROR:{type(exc).__name__}",
-                "path": directory_key or "<default>"}, "history_ticks": []}
+                "path": directory_key or "<default>"}, "history_bars": []}
         _POWER_PROBE_STARTUP_CACHE[key] = cached
 
-    from power_history_probe_loader import merge_regime_price_ticks, m5_tail_diagnostics
-    history_ticks = cached.get("history_ticks", [])
-    regime_ticks = merge_regime_price_ticks(live_ticks or [], history_ticks)
     diagnostics = dict(cached.get("diagnostics", {}))
-    probe_tail = m5_tail_diagnostics(
-        history_ticks, now, completion_cutoff_from_latest_tick=True)
-    regime_tail = m5_tail_diagnostics(regime_ticks, now)
-    diagnostics.update({
-        "probe_completed_m5_buckets": probe_tail["completed_m5_buckets"],
-        "probe_latest_contiguous_m5_bars": probe_tail["latest_contiguous_m5_bars"],
-        "probe_latest_completed_bar_end_utc": probe_tail["latest_completed_bar_end_utc"],
-        "regime_completed_m5_buckets": regime_tail["completed_m5_buckets"],
-        "regime_latest_contiguous_m5_bars": regime_tail["latest_contiguous_m5_bars"],
-        "regime_latest_expected_bar_present": regime_tail["latest_expected_bar_present"],
-    })
-    return regime_ticks, diagnostics
+    history_bars = cached.get("history_bars", [])
+    diagnostics["probe_completed_m5_buckets"] = len(history_bars)
+    diagnostics["probe_latest_contiguous_m5_bars"] = len(history_bars)
+    diagnostics["loaded_bars"] = len(history_bars)
+    # Return the original live tick list untouched. Probe OHLC is passed as a
+    # separate regime-only argument; run_power_v2 still receives original tick_data.
+    return live_ticks or [], diagnostics, history_bars
+
 
 __all__ = [
     "OrderFlowMetrics", "FootprintMetrics", "Level3Events", "VolatilityMetrics",
@@ -4140,9 +4139,16 @@ def analyze_market(market_data: Dict[str, Any],
     _probe_diagnostics = {"status": "NOT_CHECKED"}
     try:
         from power_v2_regime import classify_m5_regime
-        _regime_ticks, _probe_diagnostics = _power_probe_startup_history(
+        _regime_ticks, _probe_diagnostics, _probe_history_bars = _power_probe_startup_history(
             symbol, now, tick_data)
-        _regime_v2 = classify_m5_regime(_regime_ticks, now=now)
+        _regime_v2 = classify_m5_regime(
+            _regime_ticks, now=now, history_bars=_probe_history_bars)
+        _probe_diagnostics["regime_completed_m5_buckets"] = _regime_v2.get("bars_available", 0)
+        _probe_diagnostics["regime_latest_contiguous_m5_bars"] = _regime_v2.get(
+            "latest_contiguous_bars", 0)
+        _probe_diagnostics["regime_latest_expected_bar_present"] = (
+            _regime_v2.get("history_last_bar_end_utc") == _regime_v2.get("bar_end_utc")
+            and _regime_v2.get("bar_end_utc") is not None)
         _regime_v2["history_probe"] = _probe_diagnostics
     except Exception as _rg2_err:
         _probe_diagnostics = {"status": f"INTEGRATION_ERROR:{type(_rg2_err).__name__}"}
@@ -4186,7 +4192,7 @@ def analyze_market(market_data: Dict[str, Any],
     notes.append(
         "POWER HISTORY PROBE | "
         f"status={_probe_diagnostics.get('status', 'NOT_CHECKED')} "
-        f"loaded_ticks={_probe_diagnostics.get('loaded_ticks', 0)} "
+        f"loaded_bars={_probe_diagnostics.get('loaded_bars', 0)} "
         f"probe_tail={_probe_diagnostics.get('probe_latest_contiguous_m5_bars', 0)} "
         f"regime_tail={_probe_diagnostics.get('regime_latest_contiguous_m5_bars', 0)}"
     )

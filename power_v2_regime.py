@@ -163,6 +163,7 @@ def classify_m5_regime(
     tick_data: List[Dict[str, Any]],
     *,
     now: Any,
+    history_bars: Optional[List[Mapping[str, Any]]] = None,
     period: int = PERIOD,
     trend_adx_min: float = TREND_ADX_MIN,
     range_adx_max: float = RANGE_ADX_MAX,
@@ -183,7 +184,40 @@ def classify_m5_regime(
         raise ValueError("ADX thresholds must satisfy 0 <= range < trend <= 100")
 
     boundary = last_completed_m5_end(current, grace_seconds=grace_seconds)
-    bars, _latest_completed_tick = _completed_bars(tick_data or [], boundary)
+    live_bars, _latest_completed_tick = _completed_bars(tick_data or [], boundary)
+    # The bounded probe supplies verified historical OHLC bars directly. Merge
+    # these only into regime classification; live tick_data remains independently
+    # responsible for freshness and is still passed unchanged to run_power_v2.
+    bars_by_start: Dict[int, Dict[str, float]] = {}
+    for raw in history_bars or []:
+        if not isinstance(raw, Mapping):
+            continue
+        try:
+            start = int(float(raw.get("start")))
+            high = float(raw.get("high"))
+            low = float(raw.get("low"))
+            close = float(raw.get("close"))
+            open_price = float(raw.get("open", close))
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if (start % BAR_SECONDS != 0 or start + BAR_SECONDS > int(boundary.timestamp())
+                or not all(math.isfinite(v) and v > 0
+                           for v in (open_price, high, low, close))
+                or high < max(open_price, close, low) or low > min(open_price, close, high)):
+            continue
+        bars_by_start[start] = {"start": float(start), "open": open_price,
+                                "high": high, "low": low, "close": close}
+    for live in live_bars:
+        start = int(live["start"])
+        existing = bars_by_start.get(start)
+        if existing is None:
+            bars_by_start[start] = live
+        else:
+            existing["high"] = max(existing["high"], live["high"])
+            existing["low"] = min(existing["low"], live["low"])
+            # The live stream is later than startup backfill for an overlapping bar.
+            existing["close"] = live["close"]
+    bars = [bars_by_start[key] for key in sorted(bars_by_start)]
     latest_tick = _latest_valid_tick(tick_data or [], current)
     needed = 2 * period
     recent = bars[-needed:]

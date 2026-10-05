@@ -6,10 +6,15 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
 import java.time.Instant;
-import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
+import java.util.Map;
+import java.util.TreeMap;
 
 import velox.api.layer1.annotations.Layer1ApiVersion;
 import velox.api.layer1.annotations.Layer1ApiVersionValue;
@@ -27,95 +32,117 @@ import velox.api.layer1.data.InstrumentInfo;
 import velox.api.layer1.data.TradeInfo;
 
 /**
- * Standalone, read-only diagnostic add-on. It writes to a NEW probe CSV and
- * never reads or changes the production ticks.csv/mbo.csv bridge files.
+ * One-shot, bounded Bookmap startup-history collector.
  *
- * BackfilledDataListener asks Bookmap to provide available cloud backfill.
- * HistoricalModeListener marks the transition into real-time data.
+ * It aggregates pre-realtime trades in memory into a rolling set of at most
+ * 29 M5 buckets (28 desired complete bars plus one possible unfinished tail).
+ * At REALTIME_START it atomically writes at most the latest 28 completed M5
+ * OHLCV bars to one fixed CSV, then ignores all later live trades. It never
+ * reads or writes the production ticks.csv or mbo.csv bridge files.
  */
 @Layer1SimpleAttachable
-@Layer1StrategyName("POWER History Backfill Probe (standalone)")
+@Layer1StrategyName("POWER History Backfill Probe (bounded 28 M5 bars)")
 @Layer1ApiVersion(Layer1ApiVersionValue.VERSION1)
 public final class PowerHistoryProbe implements CustomModuleAdapter,
         TradeDataListener, TimeListener, BackfilledDataListener, HistoricalModeListener {
 
+    private static final long BAR_NS = 300L * 1_000_000_000L;
+    private static final int REQUIRED_BARS = 28;
+    private static final int KEEP_BUCKETS = REQUIRED_BARS + 1;
+    private static final String OUTPUT_NAME = "power_history_probe_latest.csv";
+    private static final String TEMP_NAME = OUTPUT_NAME + ".tmp";
     private static final String HEADER =
-            "record_type,phase,event_time_ns,alias,price,size,bid_aggressor_flag";
-    private static final DateTimeFormatter FILE_STAMP =
-            DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss").withZone(ZoneId.systemDefault());
+            "record_type,phase,bar_start_ns,bar_end_ns,alias,open,high,low,close,volume,captured_at_utc,status";
+    private static final DateTimeFormatter CAPTURE_TIME =
+            DateTimeFormatter.ISO_INSTANT.withZone(ZoneOffset.UTC);
 
     private final Object lock = new Object();
-    private BufferedWriter writer;
-    private Path outputPath;
+    private final TreeMap<Long, Bar> bars = new TreeMap<Long, Bar>();
+    private Path outputDirectory;
     private String alias = "";
-    private String phase = "PRE_REALTIME";
     private long eventTimeNs = -1L;
-    private long historicalTrades;
-    private long realtimeTrades;
-    private long totalTrades;
-    private long firstEventTimeNs = -1L;
-    private long lastEventTimeNs = -1L;
+    private long latestHistoricalEventNs = -1L;
+    private boolean realtimeStarted;
+    private boolean snapshotWritten;
+
+    private static final class Bar {
+        final long startNs;
+        long firstTradeNs;
+        long lastTradeNs;
+        double open;
+        double high;
+        double low;
+        double close;
+        long volume;
+
+        Bar(long startNs, long timestampNs, double price, int size) {
+            this.startNs = startNs;
+            this.firstTradeNs = timestampNs;
+            this.lastTradeNs = timestampNs;
+            this.open = this.high = this.low = this.close = price;
+            this.volume = Math.max(0, size);
+        }
+
+        void add(long timestampNs, double price, int size) {
+            high = Math.max(high, price);
+            low = Math.min(low, price);
+            if (timestampNs < firstTradeNs) {
+                firstTradeNs = timestampNs;
+                open = price;
+            }
+            if (timestampNs >= lastTradeNs) {
+                lastTradeNs = timestampNs;
+                close = price;
+            }
+            if (size > 0 && volume <= Long.MAX_VALUE - size) {
+                volume += size;
+            }
+        }
+    }
 
     @Override
     public void initialize(String alias, InstrumentInfo info, Api api, InitialState initialState) {
-        this.alias = csv(alias == null ? "" : alias);
+        this.alias = alias == null ? "" : alias.trim();
         try {
             String configuredDir = System.getenv("POWER_HISTORY_PROBE_DIR");
-            Path directory = (configuredDir == null || configuredDir.trim().isEmpty())
+            outputDirectory = (configuredDir == null || configuredDir.trim().isEmpty())
                     ? Paths.get(System.getProperty("user.home"), "BookmapPowerHistoryProbe")
-                    : Paths.get(configuredDir.trim());
-            Files.createDirectories(directory);
-            String filename = "power_history_probe_" + FILE_STAMP.format(Instant.now()) + ".csv";
-            outputPath = directory.resolve(filename);
-            writer = Files.newBufferedWriter(outputPath, StandardCharsets.UTF_8);
-            writer.write(HEADER);
-            writer.newLine();
-            writeStatus("PROBE_STARTED", "");
-            writer.flush();
-            Log.info("POWER History Probe: writing separate diagnostic file: " + outputPath);
-            Log.info("POWER History Probe: instrument=" + alias + "; waiting for historical/backfill events");
+                    : Paths.get(configuredDir.trim()).toAbsolutePath().normalize();
+            Files.createDirectories(outputDirectory);
+            Log.info("POWER History Probe bounded v2: instrument=" + this.alias
+                    + "; output=" + outputDirectory.resolve(OUTPUT_NAME)
+                    + "; collecting startup backfill only");
         } catch (IOException ex) {
-            Log.error("POWER History Probe: cannot create diagnostic output: " + ex.getMessage());
-            writer = null;
+            outputDirectory = null;
+            Log.error("POWER History Probe bounded v2: cannot prepare output directory: "
+                    + ex.getMessage());
         }
     }
 
     @Override
     public void onTimestamp(long nanoseconds) {
-        eventTimeNs = nanoseconds;
+        synchronized (lock) {
+            eventTimeNs = nanoseconds;
+        }
     }
 
     @Override
     public void onTrade(double price, int size, TradeInfo tradeInfo) {
         synchronized (lock) {
-            if (writer == null || eventTimeNs < 0L) {
+            if (realtimeStarted || outputDirectory == null || eventTimeNs <= 0L
+                    || !Double.isFinite(price) || price <= 0.0) {
                 return;
             }
-            String aggressorFlag = tradeInfo == null
-                    ? "UNKNOWN" : Boolean.toString(tradeInfo.isBidAggressor);
-            try {
-                writer.write("TRADE," + phase + "," + eventTimeNs + "," + alias + ","
-                        + String.format(Locale.US, "%.10f", price) + "," + size + "," + aggressorFlag);
-                writer.newLine();
-                totalTrades++;
-                if ("LIVE".equals(phase)) {
-                    realtimeTrades++;
-                } else {
-                    historicalTrades++;
+            latestHistoricalEventNs = Math.max(latestHistoricalEventNs, eventTimeNs);
+            long bucketStartNs = Math.floorDiv(eventTimeNs, BAR_NS) * BAR_NS;
+            Bar bar = bars.get(bucketStartNs);
+            if (bar == null) {
+                bars.put(bucketStartNs, new Bar(bucketStartNs, eventTimeNs, price, size));
+                while (bars.size() > KEEP_BUCKETS) {
+                    bars.pollFirstEntry();
                 }
-                if (firstEventTimeNs < 0L || eventTimeNs < firstEventTimeNs) {
-                    firstEventTimeNs = eventTimeNs;
-                }
-                if (eventTimeNs > lastEventTimeNs) {
-                    lastEventTimeNs = eventTimeNs;
-                }
-                // Keep the diagnostic durable without flushing every single market event.
-                if ((totalTrades & 255L) == 0L) {
-                    writer.flush();
-                }
-            } catch (IOException ex) {
-                Log.error("POWER History Probe: CSV write failed: " + ex.getMessage());
-                closeWriter();
+            } else {
+                bar.add(eventTimeNs, price, size);
             }
         }
     }
@@ -123,67 +150,118 @@ public final class PowerHistoryProbe implements CustomModuleAdapter,
     @Override
     public void onRealtimeStart() {
         synchronized (lock) {
-            phase = "LIVE";
-            writeStatus("REALTIME_START", "historical_trades=" + historicalTrades);
-            flushWriter();
-            Log.info("POWER History Probe: Bookmap entered real-time mode; historical trades="
-                    + historicalTrades + "; output=" + outputPath);
+            if (snapshotWritten) {
+                return;
+            }
+            realtimeStarted = true;
+            List<Bar> completed = latestCompletedBars();
+            String status = validate(completed);
+            writeSnapshot(completed, status);
+            bars.clear();
+            snapshotWritten = true;
+            Log.info("POWER History Probe bounded v2: snapshot status=" + status
+                    + "; completed_m5_bars=" + completed.size() + "/" + REQUIRED_BARS
+                    + "; path=" + outputDirectory.resolve(OUTPUT_NAME)
+                    + "; live trades will not be recorded");
         }
     }
 
     @Override
     public void stop() {
         synchronized (lock) {
-            writeStatus("PROBE_STOPPED", "historical_trades=" + historicalTrades
-                    + "; realtime_trades=" + realtimeTrades
-                    + "; total_trades=" + totalTrades
-                    + "; first_event_ns=" + firstEventTimeNs
-                    + "; last_event_ns=" + lastEventTimeNs);
-            flushWriter();
-            closeWriter();
-            Log.info("POWER History Probe: stopped; historical trades=" + historicalTrades
-                    + "; live trades=" + realtimeTrades + "; output=" + outputPath);
+            if (!snapshotWritten && outputDirectory != null) {
+                realtimeStarted = true;
+                List<Bar> completed = latestCompletedBars();
+                writeSnapshot(completed, "STOPPED_BEFORE_REALTIME");
+                bars.clear();
+                snapshotWritten = true;
+            }
+            Log.info("POWER History Probe bounded v2: stopped; no live trade file was maintained");
         }
     }
 
-    private void writeStatus(String type, String details) {
-        if (writer == null) {
+    private List<Bar> latestCompletedBars() {
+        List<Bar> complete = new ArrayList<Bar>();
+        if (latestHistoricalEventNs <= 0L) {
+            return complete;
+        }
+        for (Map.Entry<Long, Bar> entry : bars.entrySet()) {
+            long start = entry.getKey();
+            if (start <= Long.MAX_VALUE - BAR_NS && start + BAR_NS <= latestHistoricalEventNs) {
+                complete.add(entry.getValue());
+            }
+        }
+        if (complete.size() > REQUIRED_BARS) {
+            return new ArrayList<Bar>(complete.subList(complete.size() - REQUIRED_BARS, complete.size()));
+        }
+        return complete;
+    }
+
+    private static String validate(List<Bar> complete) {
+        if (complete.size() < REQUIRED_BARS) {
+            return "INSUFFICIENT_BARS";
+        }
+        for (int i = 1; i < complete.size(); i++) {
+            if (complete.get(i).startNs - complete.get(i - 1).startNs != BAR_NS) {
+                return "GAP_IN_HISTORY";
+            }
+        }
+        return "READY";
+    }
+
+    private void writeSnapshot(List<Bar> complete, String status) {
+        if (outputDirectory == null) {
             return;
         }
+        Path target = outputDirectory.resolve(OUTPUT_NAME);
+        Path temp = outputDirectory.resolve(TEMP_NAME);
+        String capturedAt = CAPTURE_TIME.format(Instant.now());
         try {
-            // event_time_ns is blank for wall-clock status markers. Raw market timestamps
-            // are retained in TRADE rows exactly as Bookmap supplied them.
-            writer.write(type + "," + phase + ",," + alias + ",,," + csv(details));
-            writer.newLine();
+            try (BufferedWriter writer = Files.newBufferedWriter(temp, StandardCharsets.UTF_8)) {
+                writer.write(HEADER);
+                writer.newLine();
+                for (Bar bar : complete) {
+                    writer.write("M5_BAR,PRE_REALTIME," + bar.startNs + ","
+                            + (bar.startNs + BAR_NS) + "," + csv(alias) + ","
+                            + number(bar.open) + "," + number(bar.high) + ","
+                            + number(bar.low) + "," + number(bar.close) + ","
+                            + bar.volume + "," + csv(capturedAt) + ",");
+                    writer.newLine();
+                }
+                writer.write("PROBE_COMPLETE,PRE_REALTIME,,,,,,,,,"
+                        + csv(capturedAt) + "," + status);
+                writer.newLine();
+            }
+            try {
+                Files.move(temp, target, StandardCopyOption.REPLACE_EXISTING,
+                        StandardCopyOption.ATOMIC_MOVE);
+            } catch (IOException atomicMoveFailure) {
+                // Some filesystems do not support atomic replacement of an existing file.
+                // Fall back to same-directory replacement; if it also fails, report both.
+                try {
+                    Files.move(temp, target, StandardCopyOption.REPLACE_EXISTING);
+                } catch (IOException fallbackFailure) {
+                    fallbackFailure.addSuppressed(atomicMoveFailure);
+                    throw fallbackFailure;
+                }
+            }
         } catch (IOException ex) {
-            Log.error("POWER History Probe: status write failed: " + ex.getMessage());
-        }
-    }
-
-    private void flushWriter() {
-        if (writer != null) {
             try {
-                writer.flush();
-            } catch (IOException ex) {
-                Log.error("POWER History Probe: flush failed: " + ex.getMessage());
-            }
-        }
-    }
-
-    private void closeWriter() {
-        if (writer != null) {
-            try {
-                writer.close();
+                Files.deleteIfExists(temp);
             } catch (IOException ignored) {
-                // Best-effort close during add-on shutdown.
+                // Best effort; never touch unrelated files.
             }
-            writer = null;
+            Log.error("POWER History Probe bounded v2: snapshot write failed: " + ex.getMessage());
         }
+    }
+
+    private static String number(double value) {
+        return String.format(Locale.US, "%.10f", value);
     }
 
     private static String csv(String value) {
         if (value == null) {
-            return "";
+            return "\"\"";
         }
         return "\"" + value.replace("\"", "\"\"") + "\"";
     }
