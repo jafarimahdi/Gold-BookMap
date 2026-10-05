@@ -4149,6 +4149,11 @@ def analyze_market(market_data: Dict[str, Any],
         _probe_diagnostics["regime_latest_expected_bar_present"] = (
             _regime_v2.get("history_last_bar_end_utc") == _regime_v2.get("bar_end_utc")
             and _regime_v2.get("bar_end_utc") is not None)
+        # Surface the history/live price-scale verdict so a probe snapshot with
+        # wrong price units is visible here and never silently merged.
+        _probe_diagnostics["price_scale_check"] = _regime_v2.get("price_scale_check")
+        _probe_diagnostics["history_bars_refused"] = bool(
+            _regime_v2.get("history_bars_refused", False))
         _regime_v2["history_probe"] = _probe_diagnostics
     except Exception as _rg2_err:
         _probe_diagnostics = {"status": f"INTEGRATION_ERROR:{type(_rg2_err).__name__}"}
@@ -4194,7 +4199,9 @@ def analyze_market(market_data: Dict[str, Any],
         f"status={_probe_diagnostics.get('status', 'NOT_CHECKED')} "
         f"loaded_bars={_probe_diagnostics.get('loaded_bars', 0)} "
         f"probe_tail={_probe_diagnostics.get('probe_latest_contiguous_m5_bars', 0)} "
-        f"regime_tail={_probe_diagnostics.get('regime_latest_contiguous_m5_bars', 0)}"
+        f"regime_tail={_probe_diagnostics.get('regime_latest_contiguous_m5_bars', 0)} "
+        f"scale={(_probe_diagnostics.get('price_scale_check') or {}).get('status', 'NOT_CHECKED')} "
+        f"history_refused={bool(_probe_diagnostics.get('history_bars_refused', False))}"
     )
     _force_diag = _power.get("trend_force_diagnostics") or {}
     _rg_diag = _power.get("regime_diagnostics") or _regime_v2

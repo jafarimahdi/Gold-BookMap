@@ -55,6 +55,14 @@ def _price_key(row: Mapping[str, Any]) -> Optional[float]:
     return value if math.isfinite(value) and value > 0 else None
 
 
+def _positive_price(value: Any) -> Optional[float]:
+    try:
+        result = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return result if math.isfinite(result) and result > 0 else None
+
+
 def _default_dir() -> Path:
     override = os.environ.get("POWER_HISTORY_PROBE_DIR", "").strip()
     if override:
@@ -107,6 +115,72 @@ def _to_timestamp_ns(raw: Any) -> Optional[datetime]:
             microsecond=remainder // 1_000)
     except (OverflowError, OSError, ValueError):
         return None
+
+
+# Price-scale compatibility band between probe history prices and live tick
+# prices. Both sides must quote the same instrument in the same price units
+# before their bars may be combined into one OHLC series. A median-price ratio
+# outside this band means the units differ (for example one side is 10x the
+# other) and the history must be refused. The band is far wider than any
+# realistic short-window price move so ordinary market movement never trips it.
+PRICE_SCALE_RATIO_MIN = 0.8
+PRICE_SCALE_RATIO_MAX = 1.25
+
+
+def _median(values: List[float]) -> Optional[float]:
+    if not values:
+        return None
+    ordered = sorted(values)
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[middle]
+    return (ordered[middle - 1] + ordered[middle]) / 2.0
+
+
+def check_price_scale_compatibility(
+    history_prices: Optional[Iterable[Any]],
+    live_prices: Optional[Iterable[Any]],
+) -> Dict[str, Any]:
+    """Compare probe-history price level against live tick price level.
+
+    The two sources must quote the same instrument in the same price units
+    before their bars may be combined into one OHLC series. The median price of
+    each side is compared; a ratio outside PRICE_SCALE_RATIO_MIN..MAX means the
+    units differ (for example one side is 10x the other). This check NEVER
+    rescales either side. Status values:
+
+    - ``OK``: same scale, history may be used.
+    - ``MISMATCH``: scales differ, the caller must refuse the history.
+    - ``NO_HISTORY``: nothing to check.
+    - ``NO_LIVE_PRICES``: history cannot be verified against live data; the
+      caller must refuse the history (fail closed).
+    """
+    history_values = [p for p in (_positive_price(v) for v in (history_prices or []))
+                      if p is not None]
+    live_values = [p for p in (_positive_price(v) for v in (live_prices or []))
+                   if p is not None]
+    history_median = _median(history_values)
+    live_median = _median(live_values)
+    base = {
+        "history_prices": len(history_values),
+        "live_prices": len(live_values),
+        "history_median_price": history_median,
+        "live_median_price": live_median,
+        "ratio": None,
+        "min_ratio": PRICE_SCALE_RATIO_MIN,
+        "max_ratio": PRICE_SCALE_RATIO_MAX,
+    }
+    if history_median is None:
+        base["status"] = "NO_HISTORY"
+        return base
+    if live_median is None:
+        base["status"] = "NO_LIVE_PRICES"
+        return base
+    ratio = history_median / live_median
+    base["ratio"] = round(ratio, 6)
+    base["status"] = ("OK" if PRICE_SCALE_RATIO_MIN <= ratio <= PRICE_SCALE_RATIO_MAX
+                      else "MISMATCH")
+    return base
 
 
 def m5_tail_diagnostics(
@@ -448,13 +522,23 @@ def merge_regime_price_ticks(
     live_ticks: Iterable[Mapping[str, Any]],
     history_ticks: Iterable[Mapping[str, Any]],
 ) -> List[Dict[str, Any]]:
-    """Merge history prices with live ticks; dedupe price/time for OHLC only."""
+    """Merge history prices with live ticks; dedupe price/time for OHLC only.
+
+    Fail closed on price-scale disagreement: history rows are dropped (never
+    rescaled) unless their price level is verified compatible with the live
+    prices. With no live prices to verify against, history is refused too.
+    """
+    live_rows = [row for row in (live_ticks or []) if isinstance(row, Mapping)]
+    history_rows = [row for row in (history_ticks or []) if isinstance(row, Mapping)]
+    scale_check = check_price_scale_compatibility(
+        (_price_key(row) for row in history_rows),
+        (_price_key(row) for row in live_rows))
+    if scale_check["status"] != "OK":
+        history_rows = []
     output: List[Dict[str, Any]] = []
     seen = set()
-    for source_rows in (history_ticks or [], live_ticks or []):
+    for source_rows in (history_rows, live_rows):
         for row in source_rows:
-            if not isinstance(row, Mapping):
-                continue
             ts = _as_utc(row.get("timestamp", row.get("ts", row.get("time"))))
             price = _price_key(row)
             if ts is None or price is None:

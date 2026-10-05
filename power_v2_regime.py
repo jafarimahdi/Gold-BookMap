@@ -2,9 +2,10 @@
 
 The classifier consumes completed 5-minute OHLC bars built from print prices.
 It does not read legacy POWER/Shooting/Escort decisions or infer bars from MBO
-and depth updates. Missing history, gaps, a stale tape, or the ADX gray zone all
-return UNKNOWN. Range breakouts are intentionally not authorized in this first
-pass: breakout_confirmed is always False, so RANGE fails closed to NEITHER.
+and depth updates. Missing history, gaps, a stale tape, a history/live price
+scale mismatch, or the ADX gray zone all return UNKNOWN. Range breakouts are
+intentionally not authorized in this first pass: breakout_confirmed is always
+False, so RANGE fails closed to NEITHER.
 """
 from __future__ import annotations
 
@@ -12,9 +13,11 @@ from datetime import datetime, timedelta, timezone
 import math
 from typing import Any, Dict, List, Mapping, Optional
 
+from power_history_probe_loader import check_price_scale_compatibility
 from power_v2_shadow import last_completed_m5_end
 
-__all__ = ["classify_m5_regime", "wilder_adx", "PERIOD", "TREND_ADX_MIN", "RANGE_ADX_MAX"]
+__all__ = ["classify_m5_regime", "wilder_adx", "check_price_scale_compatibility",
+           "PERIOD", "TREND_ADX_MIN", "RANGE_ADX_MAX"]
 
 PERIOD = 14
 TREND_ADX_MIN = 25.0
@@ -174,6 +177,10 @@ def classify_m5_regime(
 
     Labels: ADX >= 25 => TREND; ADX < 20 => RANGE; 20..25 => UNKNOWN.
     No side direction is produced here. RANGE breakout authorization is disabled.
+    Before any history bar is merged with live bars, the two price levels are
+    compared (check_price_scale_compatibility); if they are not the same scale
+    the history is refused and the call fails closed with reason
+    HISTORY_PRICE_SCALE_MISMATCH (market_regime stays UNKNOWN).
     """
     current = _utc(now)
     if current is None:
@@ -185,11 +192,32 @@ def classify_m5_regime(
 
     boundary = last_completed_m5_end(current, grace_seconds=grace_seconds)
     live_bars, _latest_completed_tick = _completed_bars(tick_data or [], boundary)
+    # Fail closed on history/live price-scale disagreement. Probe bars and live
+    # prints must quote the same price units before they may share one OHLC
+    # series. The check NEVER rescales either side; a mismatch (for example the
+    # probe writing 10x units) refuses the history and returns UNKNOWN so a
+    # human must resolve the feed configuration before regime can resume.
+    live_prices: List[float] = []
+    for row in tick_data or []:
+        if not isinstance(row, Mapping):
+            continue
+        ts = _utc(row.get("timestamp", row.get("ts", row.get("time"))))
+        price = _finite_positive(row.get("price"))
+        if ts is not None and price is not None and ts <= current:
+            live_prices.append(price)
+    history_price_pool = [v for raw in (history_bars or []) if isinstance(raw, Mapping)
+                          for v in (raw.get("open"), raw.get("high"),
+                                    raw.get("low"), raw.get("close"))]
+    scale_check = check_price_scale_compatibility(history_price_pool, live_prices)
+    use_history = scale_check["status"] == "OK"
+    history_bars_refused = bool(history_price_pool) and not use_history
     # The bounded probe supplies verified historical OHLC bars directly. Merge
-    # these only into regime classification; live tick_data remains independently
-    # responsible for freshness and is still passed unchanged to run_power_v2.
+    # these only into regime classification, only after the scale gate passes;
+    # live tick_data remains independently responsible for freshness and is
+    # still passed unchanged to run_power_v2.
+    accepted_history = history_bars if use_history else []
     bars_by_start: Dict[int, Dict[str, float]] = {}
-    for raw in history_bars or []:
+    for raw in accepted_history:
         if not isinstance(raw, Mapping):
             continue
         try:
@@ -264,7 +292,16 @@ def classify_m5_regime(
         "recent_history_contiguous": bool(recent) and not recent_gaps,
         "latest_tick_age_seconds": None,
         "reason": "UNKNOWN",
+        "price_scale_check": scale_check,
+        "history_bars_refused": history_bars_refused,
     }
+    if scale_check["status"] == "MISMATCH":
+        # Data-integrity incident: probe history and live ticks disagree about
+        # price units (e.g. one side is 10x the other). Refusing the history is
+        # not enough -- produce no regime at all until a human resolves which
+        # side is mis-scaled. Never auto-rescale either side.
+        result["reason"] = "HISTORY_PRICE_SCALE_MISMATCH"
+        return result
     if latest_tick is None:
         result["reason"] = "NO_TIMESTAMPED_PRICE_TICKS"
         return result
