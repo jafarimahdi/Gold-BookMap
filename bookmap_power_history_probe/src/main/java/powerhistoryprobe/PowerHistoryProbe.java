@@ -32,13 +32,14 @@ import velox.api.layer1.data.InstrumentInfo;
 import velox.api.layer1.data.TradeInfo;
 
 /**
- * One-shot, bounded Bookmap startup-history collector.
+ * Bounded Bookmap M5 history collector with continuous refresh (v0.3.2).
  *
- * It aggregates pre-realtime trades in memory into a rolling set of at most
- * 29 M5 buckets (28 desired complete bars plus one possible unfinished tail).
- * At REALTIME_START it atomically writes at most the latest 28 completed M5
- * OHLCV bars to one fixed CSV, then ignores all later live trades. It never
- * reads or writes the production ticks.csv or mbo.csv bridge files.
+ * It aggregates trades in memory into a rolling set of at most 29 M5 buckets
+ * (28 desired complete bars plus one possible unfinished tail). At
+ * REALTIME_START, and again whenever a new M5 bar completes, it atomically
+ * rewrites one fixed CSV with the latest 28 completed M5 OHLCV bars, so the
+ * file is always ready whenever the downstream robot starts. It never reads
+ * or writes the production ticks.csv or mbo.csv bridge files.
  *
  * Prices are written in the instrument's display price units. For some feeds
  * Bookmap delivers add-on trade prices as whole tick counts (one tick is
@@ -66,6 +67,7 @@ public final class PowerHistoryProbe implements CustomModuleAdapter,
     private static final DateTimeFormatter CAPTURE_TIME =
             DateTimeFormatter.ISO_INSTANT.withZone(ZoneOffset.UTC);
     private static final double REFERENCE_TOLERANCE = 0.02;
+    private static final long REFRESH_MIN_NS = 1_000_000_000L;
 
     private final Object lock = new Object();
     private final TreeMap<Long, Bar> bars = new TreeMap<Long, Bar>();
@@ -75,6 +77,9 @@ public final class PowerHistoryProbe implements CustomModuleAdapter,
     private long latestHistoricalEventNs = -1L;
     private boolean realtimeStarted;
     private boolean snapshotWritten;
+    private long lastWrittenTailStartNs = -1L;
+    private String lastWrittenStatus = "";
+    private long lastRefreshAttemptNs = -1L;
     private double instrumentPips = Double.NaN;
     private double instrumentMultiplier = Double.NaN;
     private String instrumentFullName = "";
@@ -143,7 +148,7 @@ public final class PowerHistoryProbe implements CustomModuleAdapter,
             Files.createDirectories(outputDirectory);
             Log.info("POWER History Probe bounded v2: instrument=" + this.alias
                     + "; output=" + outputDirectory.resolve(OUTPUT_NAME)
-                    + "; collecting startup backfill only");
+                    + "; startup backfill + continuous refresh of the same file");
             Log.info("POWER History Probe bounded v2: UNITS-META fullName=" + csv(instrumentFullName)
                     + " pips=" + instrumentPips + " multiplier=" + instrumentMultiplier
                     + " referenceLastTradePrice=" + referencePrice);
@@ -158,13 +163,19 @@ public final class PowerHistoryProbe implements CustomModuleAdapter,
     public void onTimestamp(long nanoseconds) {
         synchronized (lock) {
             eventTimeNs = nanoseconds;
+            if (realtimeStarted && outputDirectory != null
+                    && (nanoseconds < lastRefreshAttemptNs
+                        || nanoseconds - lastRefreshAttemptNs >= REFRESH_MIN_NS)) {
+                lastRefreshAttemptNs = nanoseconds;
+                refreshSnapshot("BAR_CLOCK");
+            }
         }
     }
 
     @Override
     public void onTrade(double price, int size, TradeInfo tradeInfo) {
         synchronized (lock) {
-            if (realtimeStarted || outputDirectory == null || eventTimeNs <= 0L
+            if (outputDirectory == null || eventTimeNs <= 0L
                     || !Double.isFinite(price) || price <= 0.0) {
                 return;
             }
@@ -185,44 +196,65 @@ public final class PowerHistoryProbe implements CustomModuleAdapter,
     @Override
     public void onRealtimeStart() {
         synchronized (lock) {
-            if (snapshotWritten) {
-                return;
-            }
             realtimeStarted = true;
-            List<Bar> completed = latestCompletedBars();
-            String status = validate(completed);
-            writeSnapshot(completed, status);
-            bars.clear();
-            snapshotWritten = true;
-            Log.info("POWER History Probe bounded v2: snapshot status=" + status
-                    + "; completed_m5_bars=" + completed.size() + "/" + REQUIRED_BARS
-                    + "; path=" + outputDirectory.resolve(OUTPUT_NAME)
-                    + "; live trades will not be recorded");
+            refreshSnapshot("REALTIME_START");
+            if (outputDirectory != null) {
+                Log.info("POWER History Probe bounded v2: realtime started; the same file stays"
+                        + " fresh: " + outputDirectory.resolve(OUTPUT_NAME));
+            }
         }
     }
 
     @Override
     public void stop() {
         synchronized (lock) {
-            if (!snapshotWritten && outputDirectory != null) {
-                realtimeStarted = true;
+            if (outputDirectory != null) {
                 List<Bar> completed = latestCompletedBars();
-                writeSnapshot(completed, "STOPPED_BEFORE_REALTIME");
-                bars.clear();
+                String status = realtimeStarted
+                        ? validate(completed) : "STOPPED_BEFORE_REALTIME";
+                writeSnapshot(completed, status);
                 snapshotWritten = true;
+                lastWrittenTailStartNs = completed.isEmpty() ? -1L
+                        : completed.get(completed.size() - 1).startNs;
+                lastWrittenStatus = status;
             }
-            Log.info("POWER History Probe bounded v2: stopped; no live trade file was maintained");
+            Log.info("POWER History Probe bounded v2: stopped; final refresh written");
         }
+    }
+
+    /**
+     * Rewrites the snapshot only when the completed-bar tail or the status
+     * changed, so the same file is always current without log or disk spam.
+     */
+    private void refreshSnapshot(String trigger) {
+        if (outputDirectory == null) {
+            return;
+        }
+        List<Bar> completed = latestCompletedBars();
+        String status = validate(completed);
+        long tailStart = completed.isEmpty() ? -1L : completed.get(completed.size() - 1).startNs;
+        if (snapshotWritten && tailStart == lastWrittenTailStartNs
+                && status.equals(lastWrittenStatus)) {
+            return;
+        }
+        writeSnapshot(completed, status);
+        snapshotWritten = true;
+        lastWrittenTailStartNs = tailStart;
+        lastWrittenStatus = status;
+        Log.info("POWER History Probe bounded v2: refresh trigger=" + trigger
+                + "; status=" + status
+                + "; completed_m5_bars=" + completed.size() + "/" + REQUIRED_BARS);
     }
 
     private List<Bar> latestCompletedBars() {
         List<Bar> complete = new ArrayList<Bar>();
-        if (latestHistoricalEventNs <= 0L) {
+        long clockNs = Math.max(latestHistoricalEventNs, eventTimeNs);
+        if (clockNs <= 0L) {
             return complete;
         }
         for (Map.Entry<Long, Bar> entry : bars.entrySet()) {
             long start = entry.getKey();
-            if (start <= Long.MAX_VALUE - BAR_NS && start + BAR_NS <= latestHistoricalEventNs) {
+            if (start <= Long.MAX_VALUE - BAR_NS && start + BAR_NS <= clockNs) {
                 complete.add(entry.getValue());
             }
         }

@@ -4194,6 +4194,17 @@ def analyze_market(market_data: Dict[str, Any],
         (_power.get("regime_diagnostics") or {}).get("history_probe")
         or _probe_diagnostics
     )
+    _probe_loaded = int(_probe_diagnostics.get("loaded_bars", 0) or 0)
+    _probe_available = int(_probe_diagnostics.get("available_bars", 0) or 0)
+    _probe_count = max(_probe_loaded, _probe_available)
+    _warmup_text = ""
+    if 0 < _probe_count < 28:
+        try:
+            _eta = now + timedelta(seconds=(28 - _probe_count) * 300)
+            _warmup_text = (f" | WARM-UP {_probe_count}/28 bars"
+                            f" eta_fill_utc={_eta.strftime('%H:%M')}Z")
+        except Exception:
+            _warmup_text = f" | WARM-UP {_probe_count}/28 bars"
     notes.append(
         "POWER HISTORY PROBE | "
         f"status={_probe_diagnostics.get('status', 'NOT_CHECKED')} "
@@ -4202,7 +4213,17 @@ def analyze_market(market_data: Dict[str, Any],
         f"regime_tail={_probe_diagnostics.get('regime_latest_contiguous_m5_bars', 0)} "
         f"scale={(_probe_diagnostics.get('price_scale_check') or {}).get('status', 'NOT_CHECKED')} "
         f"history_refused={bool(_probe_diagnostics.get('history_bars_refused', False))}"
+        f"{_warmup_text}"
     )
+    _prov = (_regime_v2.get("provisional") or {}) if isinstance(_regime_v2, dict) else {}
+    if _prov.get("informational_only") and int(_prov.get("bars", 0) or 0) > 0:
+        notes.append(
+            "POWER WARM-UP (info only, no decision weight) | "
+            f"bars={_prov.get('bars')} last_close={_prov.get('last_close')} "
+            f"window={_prov.get('window_low')}-{_prov.get('window_high')} | "
+            f"need {28 - int(_prov.get('bars', 0) or 0)} more completed M5 bars "
+            "before POWER may answer UP/DOWN"
+        )
     _force_diag = _power.get("trend_force_diagnostics") or {}
     _rg_diag = _power.get("regime_diagnostics") or _regime_v2
     _judge_gate = _force_diag.get("valid_judges") or {}

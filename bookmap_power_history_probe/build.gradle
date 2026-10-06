@@ -10,7 +10,7 @@ repositories {
 def bookmapApiVersion = findProperty('bookmapApiVersion') ?: '7.4.0.21'
 
 group = 'powerhistoryprobe'
-version = '0.3.1-override'
+version = '0.3.2-refresh'
 
 java {
     sourceCompatibility = JavaVersion.VERSION_1_8

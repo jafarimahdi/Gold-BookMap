@@ -318,6 +318,14 @@ def classify_m5_regime(
         return result
     if len(recent) < needed:
         result["bars_used"] = len(recent)
+        try:
+            _prev = {"informational_only": True, "bars": len(recent)}
+            _prev["window_high"] = round(max(float(b["high"]) for b in recent), 2)
+            _prev["window_low"] = round(min(float(b["low"]) for b in recent), 2)
+            _prev["last_close"] = round(float(recent[-1]["close"]), 2)
+        except Exception:
+            _prev = {"informational_only": True, "bars": len(recent)}
+        result["provisional"] = _prev
         result["reason"] = "INSUFFICIENT_COMPLETED_M5_HISTORY"
         return result
     if recent_gaps:
