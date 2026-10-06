@@ -294,6 +294,10 @@ def plan_shot(signal_map: Dict[str, Any], power: Dict[str, Any],
     if trigger and trigger_reason and aggressive_reason is None and not route_clear:
         aggressive_reason = "Scout has not confirmed a clear route for aggressive entry"
     passive_allowed = passive_reason is None and not queue_blocks_limit
+    if not bool(getattr(config, "LIMIT_ORDER_ENABLED", False)):
+        passive_allowed = False
+        passive_reason = ("passive limit entries disabled "
+                          "(LIMIT_ORDER_ENABLED=0, aggressive-only mode)")
 
     if queue_blocks_limit:
         passive_reason = f"estimated limit fill probability {queue_prob:.2f} is below {queue_floor:.2f}"

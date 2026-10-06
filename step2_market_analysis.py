@@ -4326,6 +4326,24 @@ def analyze_market(market_data: Dict[str, Any],
         _shot_quality = market_data.get("data_quality_ok")
         if _shot_quality is None:
             _shot_quality = _power_context.get("data_quality_ok", False)
+        try:
+            from aggressive_trigger import evaluate_aggressive_trigger as _aggr_eval
+            _aggr = _aggr_eval(
+                power=_power_v2,
+                shot_context={
+                    "bid": _raw_bid, "ask": _raw_ask,
+                    "news_state": news.news_state,
+                    "has_data": _shot_has_data,
+                    "last_data_age_seconds": _shot_data_age,
+                    "data_quality_ok": _shot_quality,
+                },
+                config=config, price=price,
+                atr=getattr(volatility, "atr", 0.0) or 0.0,
+                order_flow=order_flow, level3=level3, signal_map=_signal_map)
+        except Exception as _ag_err:
+            _aggr = {"confirmed": False,
+                     "reason": "aggressive trigger error (fail-closed): "
+                               + type(_ag_err).__name__}
         _shot_context = {
             "bid": _raw_bid,
             "ask": _raw_ask,
@@ -4337,9 +4355,10 @@ def analyze_market(market_data: Dict[str, Any],
             "queue_enabled": bool(getattr(config, "QUEUE_POS_ENABLED", True)),
             "market_symbol": market_data.get("symbol"),
             "now": now,
-            # No empirically reviewed aggressive trigger is available in this build.
-            "aggressive_trigger_confirmed": False,
-            "aggressive_trigger_reason": "",
+            # Aggressive impulse trigger (aggressive_trigger.py) - reviewed
+            # 2026-10-06, fail-closed: fires only with AGGRESSIVE_ENTRY_ENABLED=1.
+            "aggressive_trigger_confirmed": bool(_aggr.get("confirmed")),
+            "aggressive_trigger_reason": str(_aggr.get("reason") or ""),
         }
         _shot = _plan(_signal_map, _power_v2, price,
                       getattr(volatility, "atr", 0.0) or 0.0,
