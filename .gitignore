@@ -35,3 +35,4 @@ day_report_*.txt
 # ===== any env dump that is not the real .env and not the example =====
 # ===== the audit kit FOLDER is a build copy; the sources are committed at the root =====
 Gold-BookMap-AUDIT-KIT/
+*.pre_*
