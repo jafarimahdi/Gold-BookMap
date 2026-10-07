@@ -48,7 +48,7 @@ def build_fake_day(dst: Path, n_prints=54000, n_decisions=200, n_diary=120, n_cy
         if (ROOT / rel).exists():
             shutil.copy(ROOT / rel, dst / rel)
     (dst / ".env").write_text(
-        "BOOKMAP_WINDOW_SECONDS=10800\nBOOKMAP_MAX_DEPTH_LEVELS=20\n"
+        "BOOKMAP_WINDOW_SECONDS=10800\nBOOKMAP_MAX_DEPTH_LEVELS=250\n"
         "AI_MIN_SIGNAL_STRENGTH=6\nCONFIDENCE_THRESHOLD=50\n"
         "V6_CFD_SPREAD_MAX=0.50\nTRADING_ENABLED=1\n", encoding="utf-8")
 
@@ -196,8 +196,14 @@ import main
 # auditor reads, and the contract check fails for a reason that has nothing to do with
 # the robot. Midday is the one hour where every calendar agrees.
 class _FrozenDT(datetime):
-    _BASE = datetime.now(timezone.utc).replace(hour=12, minute=0, second=0,
-                                               microsecond=0)
+    # 24u-b: the date comes from the CASE (BM_CONTRACT_DAY), so the writer's
+    # day-files and the auditor's --date can never disagree, even if the run
+    # straddles midnight or the machine clock is off.
+    _BASE = datetime.strptime(
+        __import__("os").environ.get("BM_CONTRACT_DAY")
+        or datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        "%Y-%m-%d").replace(tzinfo=timezone.utc, hour=12, minute=0, second=0,
+                            microsecond=0)
 
     @classmethod
     def now(cls, tz=None):
@@ -215,6 +221,16 @@ main._POSITION_IDS_FILE = Path("data/tracked_bot_positions.json")
 main._OUTCOME_KEYS_FILE = Path("data/logged_outcome_deals.json")
 main._PLUMBING_DEALS_FILE = Path("data/plumbing_test_deals.json")
 main.setup_logging()
+
+# 24u-b: the log LINES still carried the real wall clock (logging asctime)
+# while the case grades by the UTC calendar - after local midnight the two
+# disagree by one day, test 1 drops every line and the contract died with
+# "session story missing". Freeze the line stamps too. ("Never let a test
+# depend on the locale.")
+import logging as _logging
+_logging.Formatter.formatTime = (
+    lambda self, record, datefmt=None:
+    _FrozenDT.now().strftime("%Y-%m-%d %H:%M:%S") + ",000")
 
 main._write_run_config()
 main._log_session_start("once")
@@ -262,7 +278,7 @@ def _copy_project(dst: Path) -> bool:
     if (ROOT / "dashboard.py").exists():
         shutil.copy2(ROOT / "dashboard.py", dst / "dashboard.py")
     (dst / ".env").write_text(
-        "BOOKMAP_WINDOW_SECONDS=10800\nBOOKMAP_MAX_DEPTH_LEVELS=20\n"
+        "BOOKMAP_WINDOW_SECONDS=10800\nBOOKMAP_MAX_DEPTH_LEVELS=250\n"
         "AI_MIN_SIGNAL_STRENGTH=6\nCONFIDENCE_THRESHOLD=50\nV6_CFD_SPREAD_MAX=0.50\n"
         "TRADING_ENABLED=1\nGEMINI_API_KEY=dummy_key_only_for_this_test\n"
         "EXECUTION_MODE=none\n", encoding="utf-8")
@@ -300,24 +316,18 @@ def case_writer_reader(fails: list) -> None:
                   "(run this from your project folder)")
             return
         (proj / "_write.py").write_text(WRITER_SCRIPT, encoding="utf-8")
-        w = subprocess.run([sys.executable, "_write.py"], env=_child_env(), cwd=proj,
+        _wenv = _child_env()
+        _now = datetime.now(timezone.utc)
+        day, ymd = _now.strftime("%Y-%m-%d"), _now.strftime("%Y%m%d")
+        _wenv["BM_CONTRACT_DAY"] = day   # 24u-b: one calendar for writer AND reader
+        w = subprocess.run([sys.executable, "_write.py"], env=_wenv, cwd=proj,
                            capture_output=True, text=True, encoding="utf-8",
                            errors="replace", timeout=300)
         if w.returncode != 0 or "WROTE-OK" not in w.stdout:
             fails.append("contract: the robot's writers failed: " + (w.stderr or w.stdout)[-300:])
             return
-        # 24u: TWO calendars are in play here and they are not the same one.
-        #   - the robot STAMPS every row with datetime.now(timezone.utc) and names its
-        #     per-day files from the UTC date  -> that is the writers' calendar
-        #   - audit_day BUCKETS rows into days by Budapest local time
-        #     -> that is the readers' calendar
-        # Between 22:00 and 24:00 UTC (00:00-02:00 Budapest in summer) they disagree by
-        # one day. A naive datetime.now() matched neither and the contract check failed
-        # every night after midnight. Ask each side in its own calendar.
-        # the fixture's clock is frozen at 12:00 UTC (see _FrozenDT in the writer),
-        # so the UTC date and the Budapest date are the same day by construction.
-        _now = datetime.now(timezone.utc)
-        day, ymd = _now.strftime("%Y-%m-%d"), _now.strftime("%Y%m%d")
+        # 24u/b: day + ymd are computed ONCE above and shared with the writer via
+        # BM_CONTRACT_DAY - see the 24u-b notes in WRITER_SCRIPT.
         for want in (f"run_config_{ymd}.json", f"diary_{ymd}.jsonl", "decisions_log.csv",
                      "snapshots_history.jsonl", "tracked_bot_positions.json"):
             if not (proj / "data" / want).exists():
@@ -333,6 +343,18 @@ def case_writer_reader(fails: list) -> None:
                          ("verdict", r"VERDICT \d{4}-\d{2}-\d{2}")):
             if not re.search(pat, out):
                 fails.append(f"contract: {tag} missing from the report")
+        if any("session story" in f for f in fails):
+            lg = sorted((proj / "logs").glob("trading_*.log"))
+            if lg and lg[0].stat().st_size:
+                first = lg[0].read_text(encoding="utf-8", errors="replace")
+                print("[diag] session story missing ->", lg[0].name,
+                      "first line:", first.splitlines()[0][:80] if first else "EMPTY")
+            else:
+                print("[diag] session story missing -> no/empty logs/trading_*.log "
+                      "in the fixture (the writers did not reach the log file)")
+            m1 = re.search(r"no log lines dated[^\n]*", out)
+            if m1:
+                print("[diag] test 1 said:", m1.group(0)[:100])
         if not fails:
             print("[contract] robot writers -> auditor readers, end to end: OK")
     finally:
