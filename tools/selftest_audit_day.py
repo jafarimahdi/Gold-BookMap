@@ -30,7 +30,7 @@ EXPECTED_TESTS = [
     ("1", "ALIVE"), ("2", "FEED"), ("3", "PIPELINE"), ("4", "DATA QUALITY"),
     ("5", "GUARD"), ("6", "SIGNAL"), ("7", "WHAT-IF"), ("8", "TEAM/JUDGE"),
     ("9", "JUDGE PANEL"), ("10", "DIARY COVERAGE"), ("11", "VERSION"),
-    ("12", "SPEED"), ("13", "MONEY"), ("14", "EVIDENCE"), ("15", "HOUR"),
+    ("12", "SPEED"), ("13", "MONEY"), ("14", "EVIDENCE"), ("15", "HOUR"), ("16", "TEAM CYCLE"),
 ]
 
 
@@ -371,7 +371,7 @@ def case_odd_shapes(dst: Path, fails: list) -> None:
     if not re.search(r"VERDICT \d{4}-\d{2}-\d{2}", out):
         fails.append("odd shapes: no verdict line")
     if not fails:
-        print("[case] odd file shapes: all 15 tests still graded, no crash")
+        print("[case] odd file shapes: all 16 tests still graded, no crash")
 
 
 def case_then_now(dst: Path, fails: list) -> None:
@@ -755,7 +755,7 @@ def main() -> int:
                          ("judge weights json", r"judge_weight_suggestions\.json"),
                          ("coverage test", r"DIARY COVERAGE"),
                          ("scoreboard", r" SCOREBOARD"),
-                         ("15-test header", r"DAY AUDIT - .* - 15 tests"),
+                         ("16-test header", r"DAY AUDIT - .* - 16 tests"),
                          ("manual checklist", r"BY HAND, IN THIS ORDER")):
             if not re.search(pat, out):
                 fails.append(f"missing: {tag}")
@@ -797,7 +797,7 @@ def main() -> int:
             for f in fails:
                 print("  -", f)
             return 1
-        print("\nSELFTEST PASSED: all 15 tests produced real grades on a full day of data.")
+        print("\nSELFTEST PASSED: all 16 tests produced real grades on a full day of data.")
         return 0
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

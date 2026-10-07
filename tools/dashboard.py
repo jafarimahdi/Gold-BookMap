@@ -194,7 +194,7 @@ def _grade_counts(metrics, rows):
 def day_dashboard(day, reports, metrics, full_text, history_html=""):
     """The one-page result a user double-clicks: verdict, KPIs, tests, judges, hours, raw text."""
     order = ("alive", "feed", "pipe", "dq", "guards", "sig", "whatif", "teams", "judges",
-             "cov", "ver", "lat", "money", "files", "hour")
+             "cov", "ver", "lat", "money", "files", "hour", "cycle")
     rows = [(g, n, h, w) for k in order for g, n, h, w in reports[k].rows]
     ct, n_tests, health = _grade_counts(metrics, rows)
     wi = metrics.get("whatif") or {}
@@ -216,7 +216,7 @@ def day_dashboard(day, reports, metrics, full_text, history_html=""):
                               "read test 7 (what-if) and test 9 (judges) for what the strategy would have done.")
     else:
         state, banner, msg = ("CLEAN DAY", "b-GOOD",
-                              "All 15 tests graded with real data and no warnings. Test 7 and 9 are trustworthy as-is.")
+                              "All 16 tests graded with real data and no warnings. Test 7 and 9 are trustworthy as-is.")
 
     para = (metrics.get("paragraph") or "").strip()
     head = f"<h2>Why</h2><div class=card style=font-size:13.5px>{_esc(para)}</div>" if para else ""
@@ -370,7 +370,7 @@ def day_dashboard(day, reports, metrics, full_text, history_html=""):
             + head +
             '<h2>The day in numbers</h2>'
             f'<div class=kpis>{kpi_html}</div>'
-            f'<div class="sec on" id=sec-score><h2>All 15 tests - click a card for the details</h2>'
+            f'<div class="sec on" id=sec-score><h2>All 16 tests - click a card for the details</h2>'
             f'<div class=grid>{cards}</div></div>'
             f'<div class=sec id=sec-jud><h2>Judge panel</h2>{judges_html}</div>'
             f'<div class=sec id=sec-hand><h2>By hand</h2>{check_html}</div>'

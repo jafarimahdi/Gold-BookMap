@@ -125,7 +125,7 @@ else
 fi
 
 hr
-[ -n "$QUIET" ] || echo "== 2/4 day audit (15 tests) =="
+[ -n "$QUIET" ] || echo "== 2/4 day audit (16 tests) =="
 GBM_NO_BROWSER=1 "$PY" audit_day.py --date "$DAY" --out "day_report_$DAY.txt" ${WINDOW:-} ${NOB:-}
 [ "$WINDOW" = "--window" ] && echo "[info] --window: this run grades only the trading hours; the default grades the whole day"
 
