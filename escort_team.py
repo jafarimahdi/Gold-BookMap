@@ -246,6 +246,46 @@ def _job4_move_stop(t: PaperTrade, book, price: float, atr: float,
     return None
 
 
+def _profit_lock(t: PaperTrade, price: float, atr: float, spread: float,
+                 config: Any) -> Optional[Dict]:
+    """Mechanical profit ratchet (NOT one of the five voices).
+
+    User decision 2026-10-07: once the trade is PROVEN in profit, the stop
+    follows it so any reversal closes POSITIVE. One-Law compatible: it may
+    only ever move the stop safer. Config (all .env-editable):
+    ESCORT_PROFIT_LOCK_ENABLE (1), ESCORT_LOCK_TRIGGER_R (1.0),
+    ESCORT_LOCK_GIVEBACK_ATR (0.5).
+    """
+    if not bool(getattr(config, "ESCORT_PROFIT_LOCK_ENABLE", True)):
+        return None
+    entry = _f(getattr(t, "entry", 0.0)) or _f(getattr(t, "opened_price", 0.0))
+    if entry <= 0:
+        return None
+    trigger_r = _f(getattr(config, "ESCORT_LOCK_TRIGGER_R", 1.0)) or 1.0
+    giveback_atr = _f(getattr(config, "ESCORT_LOCK_GIVEBACK_ATR", 0.5)) or 0.5
+    r_now = t.r_now(price)
+    if r_now < trigger_r:
+        return None
+    a = max(_f(atr), 1e-9)
+    buf = max(_f(spread) * 2.0, 0.05 * a)
+    if t.is_buy:
+        floor = entry + buf
+        trail = t.peak - giveback_atr * a
+        new_stop = max(floor, trail)
+        better = new_stop > t.stop
+    else:
+        floor = entry - buf
+        trail = t.trough + giveback_atr * a
+        new_stop = min(floor, trail)
+        better = new_stop < t.stop
+    if not better:
+        return None
+    return {"job": 4, "judge": "profit_lock", "action": "TIGHTEN",
+            "reason": (f"profit lock at R {r_now:.2f}: stop -> {new_stop:.2f} "
+                       f"(floor at entry, trail giveback {giveback_atr:.2f} ATR)"),
+            "new_stop": new_stop}
+
+
 def _job5_bomb(t: PaperTrade, news: Any, config: Any) -> Optional[Dict]:
     """Is a bomb coming?"""
     impact = str(getattr(news, "impact_level", "LOW") or "LOW").upper()
@@ -294,6 +334,7 @@ def escort_cycle(shot_plan: Dict[str, Any], signal_map: Dict[str, Any],
 
         # ---- the five jobs, one voice each ----------------------------------
         acts = [a for a in (
+            _profit_lock(t, price, atr, spread, config),
             _job1_exit_clear(t, signal_map, price),
             _job2_crowd_turning(t, order_flow, level3, price),
             _job3_push_dying(t, order_flow, footprint, divergence, mark),

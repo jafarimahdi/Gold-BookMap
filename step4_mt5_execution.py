@@ -627,22 +627,42 @@ class MT5Executor:
         # v4: structural stops — SL behind demand/supply zones (order blocks),
         # POC or strong round numbers; TP in front of opposing structure.
         # Falls back to the old ATR multiples when no structure exists.
+        # v8 wall brackets first (user decision 2026-10-07): TP just BEFORE the
+        # opposing wall, SL just BEHIND the wall behind us. Structure/ATR fallback.
+        sl, tp, struct_notes = None, None, []
         try:
-            from position_manager import compute_structural_stops
-            sl, tp, struct_notes = compute_structural_stops(
-                action, price, atr, snapshot, news_state)
-            if struct_notes:
-                # Add basis info to notes
-                try:
-                    if abs(self._last_basis) > 5:
-                        struct_notes.append(f"basis {self._last_basis:.2f} futures {self._last_futures:.2f}")
-                except:
-                    pass
-                logger.info("STEP 4: structural stops: %s",
-                            "; ".join(struct_notes))
+            from wall_brackets import compute_wall_brackets
+            sl, tp, wb_notes = compute_wall_brackets(action, price, atr, snapshot)
+            struct_notes = list(wb_notes or [])
         except Exception:
-            logger.exception("structural stops failed — ATR fallback")
-            sl, tp = self._calc_sl_tp(action, price, atr, news_state)
+            logger.exception("wall brackets failed - structural fallback")
+        if sl is None or tp is None:
+            try:
+                from position_manager import compute_structural_stops
+                sl, tp, struct_notes = compute_structural_stops(
+                    action, price, atr, snapshot, news_state)
+            except Exception:
+                logger.exception("structural stops failed — ATR fallback")
+                sl, tp = self._calc_sl_tp(action, price, atr, news_state)
+        if struct_notes:
+            try:
+                if abs(self._last_basis) > 5:
+                    struct_notes.append(f"basis {self._last_basis:.2f} futures {self._last_futures:.2f}")
+            except Exception:
+                pass
+            logger.info("STEP 4: stops: %s", "; ".join(struct_notes))
+        # v8 VALUE GATE (user requirement): reward must beat risk and be worth
+        # taking. Not worth it -> skip the trade and say why.
+        try:
+            from wall_brackets import value_gate
+            vg_ok, vg_reason = value_gate(action, price, sl, tp, atr, config)
+        except Exception:
+            vg_ok, vg_reason = True, ""
+        if not vg_ok:
+            logger.info("STEP 4: SKIPPED — %s", vg_reason)
+            return ExecutionResult(status="SKIPPED", reason=vg_reason,
+                                   symbol=self.symbol, price=price,
+                                   timestamp=now)
         stop_error = self._validate_stops(action, price, sl, tp, info)
         if stop_error:
             logger.error("STEP 4: %s", stop_error)
