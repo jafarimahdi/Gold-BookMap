@@ -147,7 +147,8 @@ def _file_identity(path: str):
 
 
 class _InstrumentState:
-    __slots__ = ("bids", "asks", "ticks", "best_bid", "best_ask", "last_dt", "mbo_events")
+    __slots__ = ("bids", "asks", "ticks", "best_bid", "best_ask", "last_dt",
+                 "mbo_events", "depth_touch")
 
     def __init__(self):
         self.bids: Dict[float, float] = {}
@@ -157,6 +158,9 @@ class _InstrumentState:
         self.best_ask: float = 0.0
         self.last_dt: Optional[datetime] = None
         self.mbo_events: List[Dict[str, Any]] = []
+        # bridge-fix-2026-10-07: rolling (ts, "B"/"A", price) of fresh depth
+        # events — the only live top-of-book source (no Bid/Ask events exist).
+        self.depth_touch: List[Any] = []
 
     def reset(self) -> None:
         self.bids, self.asks = {}, {}
@@ -164,6 +168,7 @@ class _InstrumentState:
         self.best_bid = self.best_ask = 0.0
         self.last_dt = None
         self.mbo_events = []
+        self.depth_touch = []
 
 
 class _BridgeTail:
@@ -249,12 +254,18 @@ class _BridgeTail:
                 st.bids.pop(price, None)
             else:
                 st.bids[price] = size
+                st.depth_touch.append((dt, "B", price))
+                if len(st.depth_touch) > 1200:
+                    del st.depth_touch[:600]
             st.last_dt = dt
         elif event == "DepthAsk":
             if operation == "Remove" or size <= 0:
                 st.asks.pop(price, None)
             else:
                 st.asks[price] = size
+                st.depth_touch.append((dt, "A", price))
+                if len(st.depth_touch) > 1200:
+                    del st.depth_touch[:600]
             st.last_dt = dt
         elif event in ("Mbo", "MBO", "Order"):
             try:
@@ -858,6 +869,43 @@ class BookmapBridgeProvider(BaseProvider):
 
         symbol_out = name or symbol or getattr(config, "DATA_SYMBOL", "MGC 12-26")
         data = self.build_market_data(symbol=symbol_out)
+        # bridge-fix-2026-10-07: TRUE touch + last-trade anchor + feed guard.
+        try:
+            with self.tail.lock:
+                st_fix = self.tail.instruments.get(symbol_out)
+            if st_fix is not None:
+                if st_fix.ticks:
+                    data["price"] = float(st_fix.ticks[-1]["price"])
+                tb = ta = 0.0
+                if st_fix.depth_touch:
+                    cutoff_ts = st_fix.depth_touch[-1][0].timestamp() - 30.0
+                    cb = [p for ts, sd, p in st_fix.depth_touch
+                          if sd == "B" and ts.timestamp() >= cutoff_ts and p > 0]
+                    ca = [p for ts, sd, p in st_fix.depth_touch
+                          if sd == "A" and ts.timestamp() >= cutoff_ts and p > 0]
+                    if cb:
+                        tb = max(cb)
+                    if ca:
+                        ta = min(ca)
+                if tb > 0 and ta > 0 and ta >= tb:
+                    data["bid"], data["ask"] = tb, ta
+                last_px = float(data.get("price") or 0.0)
+                bid = float(data.get("bid") or 0.0)
+                ask = float(data.get("ask") or 0.0)
+                warnings = []
+                if bid > 0 and ask > 0:
+                    spread_pct = 100.0 * (ask - bid) / bid
+                    if spread_pct > 0.5:
+                        warnings.append(f"quote spread {spread_pct:.3f}% implausible")
+                    mid = (ask + bid) / 2.0
+                    if last_px > 0 and abs(mid - last_px) > max(1.0, 0.001 * last_px):
+                        warnings.append(
+                            f"mid {mid:.2f} vs last trade {last_px:.2f} disagree")
+                if warnings:
+                    logger.warning("FEED GUARD (bridge-fix): %s", "; ".join(warnings))
+                data["feed_warnings"] = warnings
+        except Exception:
+            logger.exception("bridge-fix touch calculation failed")
         with self.tail.lock:
             direct = self.tail.direct_side_hits
             total = self.tail.line_count
