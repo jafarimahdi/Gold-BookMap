@@ -2175,14 +2175,13 @@ class SignalEngine:
                 # Budapest daytime 08-23 includes London + NY overlap = high activity
                 # Boost trend votes during London (07-16 UTC = 09-18 Budapest) and NY (12-21 UTC = 14-23 Budapest)
                 if tod == "LONDON":
-                    notes.append(f"BUDAPEST trading {b_hour:02d}:00 Budapest = {now_utc.hour:02d}:00 UTC LONDON session -> high volume trend")
-                    # London morning is prime gold time - slight boost via notes (weights already regime-adaptive)
+                    notes.append(f"BUDAPEST trading {b_hour:02d}:00 Budapest = {now_utc.hour:02d}:00 UTC LONDON session (clock: usually high-volume; live loudness = POWER M5 activity)")
                 elif tod == "NEW_YORK":
-                    notes.append(f"BUDAPEST trading {b_hour:02d}:00 Budapest = {now_utc.hour:02d}:00 UTC NEW_YORK session -> news reactions")
+                    notes.append(f"BUDAPEST trading {b_hour:02d}:00 Budapest = {now_utc.hour:02d}:00 UTC NEW_YORK session (clock: usually news-driven; live loudness = POWER M5 activity)")
                 else:
-                    notes.append(f"BUDAPEST trading {b_hour:02d}:00 Budapest = {now_utc.hour:02d}:00 UTC {sess} -> active")
+                    notes.append(f"BUDAPEST trading {b_hour:02d}:00 Budapest = {now_utc.hour:02d}:00 UTC {sess} (clock label; live loudness = POWER M5 activity)")
                 if overlap and "LONDON+NEW_YORK" in overlap:
-                    notes.append("BUDAPEST LONDON+NEW_YORK overlap (14:00-18:00 Budapest) -> highest volume")
+                    notes.append("BUDAPEST LONDON+NEW_YORK overlap (14:00-18:00 Budapest) (clock: usually the loudest hours; live loudness = POWER M5 activity)")
         except Exception as be:
             notes.append(f"Budapest session check error: {be}")
 

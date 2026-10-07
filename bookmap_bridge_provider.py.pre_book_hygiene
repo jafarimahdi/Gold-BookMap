@@ -148,7 +148,7 @@ def _file_identity(path: str):
 
 class _InstrumentState:
     __slots__ = ("bids", "asks", "ticks", "best_bid", "best_ask", "last_dt",
-                 "mbo_events", "depth_touch", "level_ts_b", "level_ts_a")
+                 "mbo_events", "depth_touch")
 
     def __init__(self):
         self.bids: Dict[float, float] = {}
@@ -161,10 +161,6 @@ class _InstrumentState:
         # bridge-fix-2026-10-07: rolling (ts, "B"/"A", price) of fresh depth
         # events — the only live top-of-book source (no Bid/Ask events exist).
         self.depth_touch: List[Any] = []
-        # book-hygiene-2026-10-07: last-touched timestamp per price level so
-        # ghost levels expire (root cure of the frozen-quote disease).
-        self.level_ts_b: Dict[float, Any] = {}
-        self.level_ts_a: Dict[float, Any] = {}
 
     def reset(self) -> None:
         self.bids, self.asks = {}, {}
@@ -173,7 +169,6 @@ class _InstrumentState:
         self.last_dt = None
         self.mbo_events = []
         self.depth_touch = []
-        self.level_ts_b, self.level_ts_a = {}, {}
 
 
 class _BridgeTail:
@@ -257,10 +252,8 @@ class _BridgeTail:
         elif event == "DepthBid":
             if operation == "Remove" or size <= 0:
                 st.bids.pop(price, None)
-                st.level_ts_b.pop(price, None)
             else:
                 st.bids[price] = size
-                st.level_ts_b[price] = dt
                 st.depth_touch.append((dt, "B", price))
                 if len(st.depth_touch) > 1200:
                     del st.depth_touch[:600]
@@ -268,10 +261,8 @@ class _BridgeTail:
         elif event == "DepthAsk":
             if operation == "Remove" or size <= 0:
                 st.asks.pop(price, None)
-                st.level_ts_a.pop(price, None)
             else:
                 st.asks[price] = size
-                st.level_ts_a[price] = dt
                 st.depth_touch.append((dt, "A", price))
                 if len(st.depth_touch) > 1200:
                     del st.depth_touch[:600]
@@ -425,56 +416,50 @@ class _BridgeTail:
                     candidates.append(p1)
                 elif os.path.exists(p2):
                     candidates.append(p2)
-            try:
-                win = max(60, int(getattr(config, "BOOKMAP_WINDOW_SECONDS",
-                                          getattr(config, "NT_WINDOW_SECONDS", 28800))))
-            except Exception:
-                win = 10800
-            cutoff_ts = datetime.now().astimezone().timestamp() - (win + 300.0)
-            replayed = skipped = 0
-            budget = 3000000
-            # book-hygiene replay v2: the LIVE file is replayed with the same
-            # time filter (kills the 64MB catch-up hole) and is always LAST.
-            ordered = sorted(candidates)
-            if os.path.exists(self.path) and self.path not in ordered:
-                ordered = ordered + [self.path]
-            for src in ordered:
+            replayed = 0
+            budget = 1200000
+            for src in sorted(candidates):
                 try:
                     opener = gzip.open if src.endswith(".gz") else open
                     with opener(src, "rt", encoding="utf-8", errors="replace") as fh:
                         for line in fh:
-                            if not line.endswith("\n"):
-                                continue
-                            ts_raw = line.split(",", 1)[0]
-                            try:
-                                ts = _parse_ts(ts_raw)
-                                ts_ok = (ts is not None
-                                         and ts.timestamp() >= cutoff_ts)
-                            except Exception:
-                                ts_ok = True
-                            if not ts_ok:
-                                skipped += 1
-                                continue
-                            self._handle_line(line)
-                            replayed += 1
-                            if replayed >= budget:
-                                break
+                            if line.endswith("\n"):
+                                self._handle_line(line)
+                                replayed += 1
+                                if replayed >= budget:
+                                    break
                 except Exception as exc:
                     logger.warning("BookMap history replay failed for %s: %s",
                                    os.path.basename(src), exc)
                 if replayed >= budget:
                     break
+            # memory-fix refinement (flow never crosses eras, structure may):
+            # drop ticks older than the window so candles/ATR are built only
+            # from the current era. Book/depth/wall state is kept either way.
+            try:
+                win = max(60, int(getattr(config, "BOOKMAP_WINDOW_SECONDS",
+                                          getattr(config, "NT_WINDOW_SECONDS", 28800))))
+            except Exception:
+                win = 10800
+            cutoff = datetime.now().astimezone().timestamp() - win
+            dropped = 0
+            for st in self.instruments.values():
+                before = len(st.ticks)
+                st.ticks = [t for t in st.ticks
+                            if t.get("ts") and t["ts"].timestamp() >= cutoff]
+                dropped += before - len(st.ticks)
             if replayed:
-                logger.info(
-                    "BookMap history replay v2: %d fresh lines kept (%d stale "
-                    "skipped) from %d recorded file(s) (single-source warm-up; "
-                    "window restored)", replayed, skipped, len(ordered))
-            else:
-                logger.info(
-                    "BookMap history replay v2: no fresh lines in the recorded "
-                    "history (day start/overnight gap; %d stale skipped) - "
-                    "candles/ATR stay honestly shallow until the window fills",
-                    skipped)
+                if dropped:
+                    logger.info(
+                        "BookMap history replay: %d lines from %d recorded file(s); "
+                        "day start/overnight gap: dropped %d stale ticks - candles/ATR "
+                        "stay honestly shallow until the window fills (map keeps "
+                        "structure)", replayed, len(candidates), dropped)
+                else:
+                    logger.info(
+                        "BookMap history replay: %d lines from %d recorded file(s) "
+                        "(single-source warm-up; window restored)", replayed,
+                        len(candidates))
         except Exception:
             logger.exception("BookMap history replay failed")
 
@@ -960,37 +945,17 @@ class BookmapBridgeProvider(BaseProvider):
             if st_fix is not None:
                 if st_fix.ticks:
                     data["price"] = float(st_fix.ticks[-1]["price"])
-                # book-hygiene: bid/ask from the FRESH book (levels touched
-                # within BOOKMAP_LEVEL_MAX_AGE). Ghost levels cannot publish.
                 tb = ta = 0.0
-                max_age = float(getattr(config, "BOOKMAP_LEVEL_MAX_AGE", 900.0) or 900.0)
-                now_ts = time.time()
-                try:
-                    fb = [p for p in st_fix.bids
-                          if p > 0 and st_fix.level_ts_b.get(p) is not None
-                          and (now_ts - st_fix.level_ts_b[p].timestamp()) <= max_age]
-                    fa = [p for p in st_fix.asks
-                          if p > 0 and st_fix.level_ts_a.get(p) is not None
-                          and (now_ts - st_fix.level_ts_a[p].timestamp()) <= max_age]
-                    if fb:
-                        tb = max(fb)
-                    if fa:
-                        ta = min(fa)
-                except Exception:
-                    tb = ta = 0.0
-                if not (tb > 0 and ta > 0 and ta >= tb):
-                    # fallback: the fresh-touch tracker (bridge-fix)
-                    tb = ta = 0.0
-                    if st_fix.depth_touch:
-                        cutoff_ts = st_fix.depth_touch[-1][0].timestamp() - 30.0
-                        cb = [p for ts, sd, p in st_fix.depth_touch
-                              if sd == "B" and ts.timestamp() >= cutoff_ts and p > 0]
-                        ca = [p for ts, sd, p in st_fix.depth_touch
-                              if sd == "A" and ts.timestamp() >= cutoff_ts and p > 0]
-                        if cb:
-                            tb = max(cb)
-                        if ca:
-                            ta = min(ca)
+                if st_fix.depth_touch:
+                    cutoff_ts = st_fix.depth_touch[-1][0].timestamp() - 30.0
+                    cb = [p for ts, sd, p in st_fix.depth_touch
+                          if sd == "B" and ts.timestamp() >= cutoff_ts and p > 0]
+                    ca = [p for ts, sd, p in st_fix.depth_touch
+                          if sd == "A" and ts.timestamp() >= cutoff_ts and p > 0]
+                    if cb:
+                        tb = max(cb)
+                    if ca:
+                        ta = min(ca)
                 if tb > 0 and ta > 0 and ta >= tb:
                     data["bid"], data["ask"] = tb, ta
                 last_px = float(data.get("price") or 0.0)
