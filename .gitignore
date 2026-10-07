@@ -36,3 +36,4 @@ day_report_*.txt
 # ===== the audit kit FOLDER is a build copy; the sources are committed at the root =====
 Gold-BookMap-AUDIT-KIT/
 *.pre_*
+*.pre_*
