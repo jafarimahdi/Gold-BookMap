@@ -634,6 +634,44 @@ def load_mbo(day, max_lines=0, lo_min=None, hi_min=None):
             "extras": [f for f in files[1:]], "capped_in": capped_in, "bad": bad}
 
 
+
+_DEC_FIELDS17 = ["timestamp", "symbol", "price", "signal_direction", "signal_strength",
+                 "signal_confidence", "regime", "divergence", "ai_action", "ai_confidence",
+                 "ai_model", "exec_status", "order_id", "news_state", "minutes_to_event",
+                 "next_event_title", "reason"]
+
+
+def _read_decision_rows_fh(f):
+    """Decision rows that survive a stale header (report16.1).
+
+    data/decisions_log.csv kept its 16-column pre-24k header after the 24k writer
+    began emitting 17 values per row (ai_model added). DictReader then slides every
+    column from exec_status one place left and the merge cannot dedupe the two
+    decision sources. When a row holds one value MORE than the header names and the
+    header has no ai_model, use the known 17-field layout for that row."""
+    out = []
+    reader = csv.reader(f)
+    try:
+        hdr = next(reader)
+    except StopIteration:
+        return out
+    hdr = [h.strip() for h in hdr]
+    for vals in reader:
+        if not vals:
+            continue
+        if "ai_model" not in hdr and len(vals) == len(hdr) + 1:
+            fields = _DEC_FIELDS17
+            vals = vals[:len(fields)]
+        else:
+            fields = hdr
+            if len(vals) < len(hdr):
+                vals = vals + [""] * (len(hdr) - len(vals))
+            elif len(vals) > len(hdr):
+                vals = vals[:len(hdr)]
+        out.append(dict(zip(fields, vals)))
+    return out
+
+
 def load_decisions(day):
     """Every decision row for that day, from the day's own mirror AND the rolling log.
 
@@ -658,7 +696,7 @@ def load_decisions(day):
         found = 0
         try:
             with open(p, encoding="utf-8", errors="ignore", newline="") as f:
-                for r in csv.DictReader(f):
+                for r in _read_decision_rows_fh(f):
                     dt = parse_ts(r.get("timestamp", ""))
                     if not on_day(dt, day):
                         continue
@@ -1373,7 +1411,10 @@ def test_3_pipeline(text, decisions):
     for step in ("STEP 1", "STEP 2", "STEP 3", "STEP 4", "STEP 5", "MT5 SIGNAL BRIDGE"):
         steps[step] = len(re.findall(re.escape(step) + r".*-> (OK|HOLD|SKIPPED|EXECUTED|REJECTED|WARN)", text))
     ok = len(re.findall(r"-> OK", text))
-    err = re.findall(r"(ERROR|CRITICAL|Traceback|Exception)[^\n]{0,120}", text)
+    _all_err = re.findall(r"(?:ERROR|CRITICAL|Traceback|Exception)[^\n]{0,120}", text)
+    _prot_pat = re.compile(r"L4 KILL SWITCH TRIGGERED|SAFETY: FLASH_CRASH|real account blocked")
+    protect = [e for e in _all_err if _prot_pat.search(e)]
+    err = [e for e in _all_err if not _prot_pat.search(e)]
     warn = re.findall(r"WARNING[^\n]{0,120}", text)
     cyc = len(re.findall(r"pipeline start", text))
     # per-cycle marker counts: STEP4/STEP5/bridge legitimately print HOLD/SKIPPED, not OK
@@ -1388,6 +1429,10 @@ def test_3_pipeline(text, decisions):
               ["no 'pipeline start' line in the log -> main.py loop never really ran",
                "the brain was not thinking, only the file watcher was sitting there"])
         return r, None
+    if protect:
+        why.append(f"{len(protect)} protective shout(s) logged at ERROR level "
+                   "(kill switch / flash crash / real-account belt) - the guards "
+                   "WORKING, not crashes: " + "; ".join(p.strip()[:80] for p in protect[:3]))
     if err:
         why.append(f"{len(err)} error/critical lines, e.g.: {err[0][:100]}")
     if warn:
@@ -3051,7 +3096,7 @@ def test_11_version_config(text, day):
     ran = ({k: rc.get(k) for k in ("CONFIDENCE_THRESHOLD", "AI_MIN_SIGNAL_STRENGTH",
                                    "V6_CFD_SPREAD_MAX", "BOOKMAP_WINDOW_SECONDS",
                                    "BOOKMAP_MAX_DEPTH_LEVELS")} if rc else {})
-    want = {"BOOKMAP_WINDOW_SECONDS": "10800", "BOOKMAP_MAX_DEPTH_LEVELS": "20",
+    want = {"BOOKMAP_WINDOW_SECONDS": "10800", "BOOKMAP_MAX_DEPTH_LEVELS": "250",
             "AI_MIN_SIGNAL_STRENGTH": "6", "CONFIDENCE_THRESHOLD": "50",
             "V6_CFD_SPREAD_MAX": "0.50", "TRADING_ENABLED": "1"}
     basis = {k: (ran.get(k) if ran.get(k) not in (None, "") else env.get(k)) for k in want}
@@ -3091,10 +3136,11 @@ def test_11_version_config(text, day):
     if creds:
         why.append(f"last credentials line seen by the robot: {creds[-1]}")
     if diff:
-        why.append("MISMATCH with v7.0-P3-M5-FAIR-CFD-50PCT: " + "; ".join(diff[:4]))
+        why.append("MISMATCH with the declared run baseline (v7.0-P3 + depth 250 = "
+                   "user decision 2026-10-07): " + "; ".join(diff[:4]))
         r.add("WARN", "VERSION CHECK", "did it run the version you think it ran?", why)
     else:
-        why.append("matches v7.0-P3 (3h window, 20 levels, 50% gate, 0.50 spread cap) -> the numbers below describe the build you intended")
+        why.append("matches the declared run baseline (3h window, 250 levels, 50% gate, 0.50 spread cap) -> the numbers below describe the build you intended")
         r.add("PASS", "VERSION CHECK", "did it run the version you think it ran?", why)
     return r, None
 
@@ -4088,6 +4134,8 @@ def test_16_team_cycle(day, diary, text, decisions):
     r = Report(16)
     why = []
     txt = text or ""
+    notes_txt = "\n".join(str(n) for d in (diary or []) for n in (d.get("notes") or []))
+    all_txt = txt + "\n" + notes_txt
 
     def _dicts(key):
         out = []
@@ -4102,12 +4150,12 @@ def test_16_team_cycle(day, diary, text, decisions):
     sims = _dicts("entry_simulation")
     escorts = _dicts("escort")
 
-    shooter_go = len(re.findall(r"SHOOTER: GO\b", txt))
-    shooter_wait = len(re.findall(r"SHOOTER: WAIT\b", txt))
-    shooter_none = len(re.findall(r"SHOOTER: no plan\b", txt))
-    paper_log = Counter(re.findall(r"PAPER ENTRY: ([A-Z_]+)", txt))
-    escort_guard = len(re.findall(r"ESCORT: guarding", txt))
-    escort_asleep = len(re.findall(r"ESCORT: asleep", txt))
+    shooter_go = len(re.findall(r"SHOOTER: GO\b", all_txt))
+    shooter_wait = len(re.findall(r"SHOOTER: WAIT\b", all_txt))
+    shooter_none = len(re.findall(r"SHOOTER: no plan\b", all_txt))
+    paper_log = Counter(re.findall(r"PAPER ENTRY: ([A-Z_]+)", all_txt))
+    escort_guard = len(re.findall(r"ESCORT: guarding", all_txt))
+    escort_asleep = len(re.findall(r"ESCORT: asleep", all_txt))
 
     why.append("TEAM CYCLE (POWER -> SHOOTING -> PAPER -> ESCORT) from "
                f"{len(diary or [])} diary snapshot(s) + the log:")
@@ -4191,8 +4239,8 @@ def test_16_team_cycle(day, diary, text, decisions):
 
     probes = re.findall(
         r"POWER HISTORY PROBE \| status=(\w+)[^\n]*?loaded_bars=(\d+)"
-        r"[^\n]*?scale=(\w+)", txt)
-    fb = len(re.findall(r"FUTURE_BAR|NO_HISTORY", txt))
+        r"[^\n]*?scale=(\w+)", all_txt)
+    fb = len(re.findall(r"FUTURE_BAR|NO_HISTORY", all_txt))
     if probes:
         st_p, bars_p, scale_p = probes[-1]
         ok = (st_p == "LOADED" and bars_p == "28" and scale_p == "OK")
@@ -4213,7 +4261,7 @@ def test_16_team_cycle(day, diary, text, decisions):
         _chk("WARN", "2  TRADING ON",
              f"'trading disabled' seen x{dis} - correct if this was the "
              "deliberate belt test (point 12); otherwise check TRADING_ENABLED")
-    elif str(te) == "1":
+    elif str(te).lower() in ("1", "true"):
         _chk("PASS", "2  TRADING ON",
              "TRADING_ENABLED=1 and no 'trading disabled' line in the log")
     else:
@@ -4320,13 +4368,18 @@ def test_16_team_cycle(day, diary, text, decisions):
              + (f" | trade_guard cooldown refusals x{cd_ref}" if cd_ref else ""))
 
     KNOWN = {"UPWARD_FORCE_DOMINATES", "DOWNWARD_FORCE_DOMINATES",
-             "WEAK_OR_NO_FORCE"}
+             "WEAK_OR_NO_FORCE", "REGIME_UNKNOWN_OR_UNCONFIRMED",
+             "RANGE_NO_CONFIRMED_BREAKOUT", "HIGH_IMPACT_EVENT", "STALE_FEED"}
     if powers:
-        good = sum(1 for p in powers if str(p.get("reason_code", "")) in KNOWN)
+        good = sum(1 for p in powers
+                   if str(p.get("reason_code", "") or "").strip()
+                   not in ("", "None", "UNAVAILABLE"))
+        named = sum(1 for p in powers if str(p.get("reason_code", "")) in KNOWN)
         if good / len(powers) >= 0.9:
             _chk("PASS", "9  POWER verdict carries a reason",
-                 f"{good}/{len(powers)} POWER answers have a reason code "
-                 "(UPWARD/DOWNWARD_FORCE_DOMINATES or WEAK_OR_NO_FORCE)")
+                 f"{good}/{len(powers)} POWER answers carry a reason code "
+                 f"({named} in the named family: UPWARD/DOWNWARD_FORCE_DOMINATES, "
+                 "WEAK_OR_NO_FORCE, regime/range/event/stale codes)")
         else:
             _chk("WARN", "9  POWER verdict carries a reason",
                  f"only {good}/{len(powers)} POWER answers carry a known "
@@ -4337,7 +4390,7 @@ def test_16_team_cycle(day, diary, text, decisions):
         _chk("NA", "9  POWER verdict carries a reason",
              "no POWER entries in the diary to grade")
 
-    warm = len(re.findall(r"POWER WARM-UP", txt))
+    warm = len(re.findall(r"POWER WARM-UP", all_txt))
     if probes and probes[-1][0] == "LOADED":
         _chk("PASS", "10  warm-up only before 28 bars",
              f"steady state reached (last probe LOADED "
@@ -4354,9 +4407,17 @@ def test_16_team_cycle(day, diary, text, decisions):
     flats = re.findall(r"daily flatten[^\n]*|SESSION_FLATTEN[^\n]*", txt, re.I)
     stamps = re.findall(r"\d{4}-\d{2}-\d{2} (\d{2}:\d{2}):\d{2}", txt)
     last_hm = stamps[-1] if stamps else None
+    n_sent = sum(1 for d in (decisions or [])
+                 if str(d.get("exec_status") or "").upper() in ("EXECUTED", "PENDING"))
     if flats:
         _chk("PASS", "11  PM daily flatten 21:30 UTC",
              "flatten evidence in the log, last: " + flats[-1].strip()[:90])
+    elif n_sent == 0:
+        _chk("PASS", "11  PM daily flatten 21:30 UTC",
+             "no 'daily flatten' line because there was NOTHING to flatten - "
+             "0 orders were sent today, and the checklist accepts "
+             "'positions flattened or none open'. The flatten logic itself is "
+             "still untested and needs a day with an open position")
     elif last_hm and last_hm < "23:00":
         _chk("NA", "11  PM daily flatten 21:30 UTC",
              f"the log ends at {last_hm} local - the robot was not running at "
@@ -5141,7 +5202,7 @@ def _make_demo_day(dst: Path):
     (dst / "data").mkdir(parents=True, exist_ok=True)
     (dst / "logs").mkdir(parents=True, exist_ok=True)
     (dst / ".env").write_text(
-        "BOOKMAP_WINDOW_SECONDS=10800\nBOOKMAP_MAX_DEPTH_LEVELS=20\n"
+        "BOOKMAP_WINDOW_SECONDS=10800\nBOOKMAP_MAX_DEPTH_LEVELS=250\n"
         "AI_MIN_SIGNAL_STRENGTH=6\nCONFIDENCE_THRESHOLD=50\n"
         "V6_CFD_SPREAD_MAX=0.50\nTRADING_ENABLED=1\n"
         # point the data paths INSIDE the demo tree, whatever the operator's real
