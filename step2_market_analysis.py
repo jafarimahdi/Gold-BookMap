@@ -2761,36 +2761,42 @@ class SignalEngine:
             votes.append((-1.0, 0.8 * recency_boost))
             notes.append("near supply zone %.1f (rejection) recency %.2fx -> SELL" % (nearest_resistance, recency_boost))
         # HTF POC H1/H4 votes - big timeframe volume magnets (user requested more logic/data)
+        # htf_weights: the three weights are .env-tunable (HTF_POC_H1_WEIGHT /
+        # HTF_POC_H1_FAR_WEIGHT / HTF_POC_H4_WEIGHT); defaults = the old hardcoded
+        # 0.7 / 0.4 / 0.9, and the note carries "w X" so the diary keeps the real one.
         try:
             if htf_poc:
                 h1_poc = htf_poc.get("H1")
                 h4_poc = htf_poc.get("H4")
+                htf_w_h1 = float(getattr(config, "HTF_POC_H1_WEIGHT", 0.7))
+                htf_w_h1_far = float(getattr(config, "HTF_POC_H1_FAR_WEIGHT", 0.4))
+                htf_w_h4 = float(getattr(config, "HTF_POC_H4_WEIGHT", 0.9))
                 if h1_poc:
                     dist_h1 = (price - h1_poc) / (volatility.atr or price*0.002) if price else 0
                     if abs(dist_h1) <= 1.0:  # within 1 ATR of H1 POC
                         if price > h1_poc:
-                            votes.append((+1.0, 0.7))
-                            notes.append(f"HTF H1 POC {h1_poc:.1f} below price {price:.1f} (dist {dist_h1:+.2f} ATR) -> BUY magnet")
+                            votes.append((+1.0, htf_w_h1))
+                            notes.append(f"HTF H1 POC {h1_poc:.1f} below price {price:.1f} (dist {dist_h1:+.2f} ATR) w {htf_w_h1:.1f} -> BUY magnet")
                         else:
-                            votes.append((-1.0, 0.7))
-                            notes.append(f"HTF H1 POC {h1_poc:.1f} above price {price:.1f} (dist {dist_h1:+.2f} ATR) -> SELL magnet")
+                            votes.append((-1.0, htf_w_h1))
+                            notes.append(f"HTF H1 POC {h1_poc:.1f} above price {price:.1f} (dist {dist_h1:+.2f} ATR) w {htf_w_h1:.1f} -> SELL magnet")
                     else:
                         # Price far from H1 POC -> mean reversion toward it
                         if price > h1_poc and dist_h1 > 2.0:
-                            votes.append((-1.0, 0.4))
-                            notes.append(f"HTF H1 POC {h1_poc:.1f} far below price {price:.1f} ({dist_h1:.1f} ATR) -> mean reversion SELL")
+                            votes.append((-1.0, htf_w_h1_far))
+                            notes.append(f"HTF H1 POC {h1_poc:.1f} far below price {price:.1f} ({dist_h1:.1f} ATR) w {htf_w_h1_far:.1f} -> mean reversion SELL")
                         elif price < h1_poc and dist_h1 < -2.0:
-                            votes.append((+1.0, 0.4))
-                            notes.append(f"HTF H1 POC {h1_poc:.1f} far above price {price:.1f} ({dist_h1:.1f} ATR) -> mean reversion BUY")
+                            votes.append((+1.0, htf_w_h1_far))
+                            notes.append(f"HTF H1 POC {h1_poc:.1f} far above price {price:.1f} ({dist_h1:.1f} ATR) w {htf_w_h1_far:.1f} -> mean reversion BUY")
                 if h4_poc:
                     dist_h4 = (price - h4_poc) / (volatility.atr or price*0.002) if price else 0
                     if abs(dist_h4) <= 1.5:
                         if price > h4_poc:
-                            votes.append((+1.0, 0.9))
-                            notes.append(f"HTF H4 POC {h4_poc:.1f} below price {price:.1f} (dist {dist_h4:+.2f} ATR) -> strong BUY magnet (H4)")
+                            votes.append((+1.0, htf_w_h4))
+                            notes.append(f"HTF H4 POC {h4_poc:.1f} below price {price:.1f} (dist {dist_h4:+.2f} ATR) w {htf_w_h4:.1f} -> strong BUY magnet (H4)")
                         else:
-                            votes.append((-1.0, 0.9))
-                            notes.append(f"HTF H4 POC {h4_poc:.1f} above price {price:.1f} (dist {dist_h4:+.2f} ATR) -> strong SELL magnet (H4)")
+                            votes.append((-1.0, htf_w_h4))
+                            notes.append(f"HTF H4 POC {h4_poc:.1f} above price {price:.1f} (dist {dist_h4:+.2f} ATR) w {htf_w_h4:.1f} -> strong SELL magnet (H4)")
         except Exception as he:
             notes.append(f"HTF POC vote error: {he}")
         # CVD slope vote: is CVD rising or falling?
@@ -3212,7 +3218,7 @@ _JUDGE_PATTERNS = [
     ("poc_day",           r"POC day ([\d.]+) price ([\d.]+) -> (above|below)"),
     ("supply_demand",     r"near (supply|demand) zone ([\d.]+)"),
     ("value_area",        r"near (VAH|VAL) ([\d.]+)|price ([\d.]+) (?:above VAH|below VAL) ([\d.]+)"),
-    ("htf_poc",           r"HTF H(1|4) POC ([\d.]+) (?:far )?(above|below) price.*?magnet.*?-> (BUY|SELL)|(?:mean reversion|strong| ) (BUY|SELL)"),
+    ("htf_poc",           r"HTF H[14] POC ([\d.]+) (?:far )?(above|below) price[^\n]*?-> (?:mean reversion |strong )?(BUY|SELL)"),  # htf_weights: all three note shapes recorded
     ("cvd_divergence",    r"(bullish|bearish) CVD divergence"),
     ("cvd_momentum",      r"CVD (rising|falling) delta ([+-]?[\d.]+) CVD ([+-]?[\d.]+)"),
     ("delta_pressure",    r"Delta (Buy|Sell)% ([\d.]+) >60% -> (BUY|SELL)"),

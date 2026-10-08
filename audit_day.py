@@ -948,7 +948,7 @@ _J = [
     ("poc_day",           r"POC day ([\d.]+) price ([\d.]+) -> (above|below)"),
     ("supply_demand",     r"near (supply|demand) zone ([\d.]+)"),
     ("value_area",        r"near (VAH|VAL) ([\d.]+)|price [\d.]+ (above VAH|below VAL)"),
-    ("htf_poc",           r"HTF H[14] POC ([\d.]+) (?:far )?(above|below) price[^\n]*?-> (BUY|SELL)"),
+    ("htf_poc",           r"HTF H[14] POC ([\d.]+) (?:far )?(above|below) price[^\n]*?-> (?:mean reversion |strong )?(BUY|SELL)"),  # htf_weights: all three note shapes recorded
     ("cvd_divergence",    r"(bullish|bearish) CVD divergence"),
     ("cvd_momentum",      r"CVD (rising|falling) delta"),
     ("delta_pressure",    r"Delta (Buy|Sell)% ([\d.]+) >60%"),

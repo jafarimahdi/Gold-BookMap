@@ -429,6 +429,10 @@ def _refresh() -> None:
     g["SIGNAL_W_L3_QUEUE"] = _ffloat("SIGNAL_W_L3_QUEUE", 0.8)
     g["L3_RANGE_BOOST"] = _ffloat("L3_RANGE_BOOST", 2.0)  # RANGE: whale+iceberg 2x
     g["L3_TREND_BOOST"] = _ffloat("L3_TREND_BOOST", 2.0)  # TREND: OFI+aggressive 2x
+    # htf_weights (2026-10-08): the HTF POC judge weights, .env-tunable; defaults = old hardcoded
+    g["HTF_POC_H1_WEIGHT"] = _ffloat("HTF_POC_H1_WEIGHT", 0.7)        # H1 POC within 1 ATR -> magnet
+    g["HTF_POC_H1_FAR_WEIGHT"] = _ffloat("HTF_POC_H1_FAR_WEIGHT", 0.4)  # H1 POC > 2 ATR -> mean reversion
+    g["HTF_POC_H4_WEIGHT"] = _ffloat("HTF_POC_H4_WEIGHT", 0.9)        # H4 POC within 1.5 ATR -> strong magnet
 
     g["REGIME_ADAPTIVE"] = _fget("REGIME_ADAPTIVE", "1") == "1"
     g["TREND_ADX_THRESHOLD"] = _ffloat("TREND_ADX_THRESHOLD", 25.0)
