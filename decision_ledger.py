@@ -12,28 +12,48 @@ so that over weeks we can see, gate by gate and signal by signal, which parts
 of the robot's logic earn their keep -- including the ones whose job is to
 say NO.
 
+The counterfactual is the EDITOR'S OWN replay convention, ported line for
+line from audit_day.py's simulate(): constant ATR (AUDIT_ATR, default 3.18),
+spread cost (AUDIT_SPREAD, default 0.50), SL_MULT/TP_MULT from the same env
+keys, the walk starts at the candle AFTER the entry minute, SL is checked
+before TP inside a candle, timeout closes at the last walked candle's close.
+Because it is the same convention, the ledger's ALL-SIGNALS total must land
+near the day report's TEST 7 what-if. It is an estimate, not a fill.
+
 Honest limits, said out loud:
-- The counterfactual is a replay with the standard geometry (SL 2.0 x ATR(M5),
-  TP 3.5 x ATR(M5), max 180 min, cost 0.5 pts/round trip) -- the same family
-  as TEST 7's what-if. It is an estimate, not a fill.
 - "stopped_by" is classified from the reason text the robot itself wrote;
   the raw reason is always shown next to it, so the classification can be
   checked, never trusted blindly.
 - Decisions with direction NEUTRAL are counted, not graded (they were never
   signals). Signals inside the tape's last candle cannot be scored (marked
   last_bar) -- same honesty rule as TEST 7.
+- Small residuals vs TEST 7 (a few percent) come from tick-dedupe
+  conventions; a big gap is a flag to look closer, not a mystery.
 
 Usage (git bash, project folder, after the robot's day is done):
     python decision_ledger.py --date 2026-10-08
 
 Output: console summary + data/decision_ledger_<date>.csv (one row per signal)
         + the same text saved to data/decision_ledger_<date>.txt
-The M5 'ALL PTS' line should land near the day report's what-if total.
 """
 import argparse, bisect, csv, os, sys
 from datetime import datetime
 
-import tf_study as T  # one engine, two reports: same tape reader, candles, ATR
+import tf_study as T  # one engine, two reports: same tape reader, candles, walk
+
+
+def _envf(key, default):
+    try:
+        return float(os.environ.get(key, default))
+    except (TypeError, ValueError):
+        return float(default)
+
+
+ATR_CONST = _envf("AUDIT_ATR", "3.18")            # the Editor's own constant
+SPREAD = _envf("AUDIT_SPREAD", "0.50")
+SL_MULT = _envf("STOP_LOSS_ATR_MULT", "2.0")
+TP_MULT = _envf("TAKE_PROFIT_ATR_MULT", "3.5")
+MAX_HOLD_MIN = _envf("AUDIT_MAX_HOLD_MIN", "180")
 
 
 def classify(reason, exec_status):
@@ -58,47 +78,44 @@ def classify(reason, exec_status):
     return "OTHER (see reason)"
 
 
-def replay_one(ts, direction, entry, keys, candles, atrs, tf, sl_m, tp_m, cost, max_min):
-    """Replay a single signal under M5 geometry. Returns (status, outcome, pts)."""
-    i = bisect.bisect_right(keys, ts) - 1
-    if i < 0:
-        return ("no_history", "-", None)
-    if i >= len(keys) - 1:
-        return ("last_bar", "-", None)      # inside the tape's last candle: nothing after it
-    atr = atrs[i]
-    if not atr or atr <= 0:
-        return ("no_atr", "-", None)
+def replay_one(ts, direction, entry, keys, candles, tf, sl_m, tp_m, spread, max_min):
+    """Exact port of audit_day.py simulate(): constant ATR, walk starts at the
+    candle after the entry minute, SL before TP, timeout at last walked close.
+    Returns (status, outcome, pts)."""
+    i = T.walk_start(keys, ts)
+    if i is None:
+        return ("last_bar", "-", None)
     max_bars = max(1, int(max_min // tf))
-    slp, tpp = sl_m * atr, tp_m * atr
+    seg = candles[i:i + max_bars]
+    if not seg:
+        return ("last_bar", "-", None)
+    slp, tpp = sl_m * ATR_CONST, tp_m * ATR_CONST
     buy = direction == "BUY"
-    for j in range(i + 1, min(i + 1 + max_bars, len(candles))):
-        _, h, l, c, _ = candles[j]
+    for c in seg:
+        _, h, l, cl, _ = c
         hit_sl = (l <= entry - slp) if buy else (h >= entry + slp)
         hit_tp = (h >= entry + tpp) if buy else (l <= entry - tpp)
-        if hit_sl:                            # same-bar SL+TP -> count the STOP (conservative)
-            return ("replayed", "SL", -slp - cost)
+        if hit_sl:                            # same-candle SL+TP -> count the STOP (conservative)
+            return ("replayed", "SL", (-slp if buy else -slp) - spread)
         if hit_tp:
-            return ("replayed", "TP", tpp - cost)
-    j = min(i + max_bars, len(candles) - 1)
-    resid = (candles[j][3] - entry) if buy else (entry - candles[j][3])
-    return ("replayed", "TIMEOUT", resid - cost)
+            return ("replayed", "TP", tpp - spread)
+    resid = (seg[-1][3] - entry) if buy else (entry - seg[-1][3])
+    return ("replayed", "TIMEOUT", resid - spread)
 
 
 def main():
     ap = argparse.ArgumentParser(description="per-signal decision ledger")
     ap.add_argument("--date", default=datetime.now().strftime("%Y-%m-%d"))
     ap.add_argument("--tf", type=int, default=5)
-    ap.add_argument("--sl", type=float, default=2.0)
-    ap.add_argument("--tp", type=float, default=3.5)
-    ap.add_argument("--cost", type=float, default=0.5)
-    ap.add_argument("--max-min", type=int, default=180)
     args = ap.parse_args()
+    sl_m, tp_m, spread, max_min = SL_MULT, TP_MULT, SPREAD, MAX_HOLD_MIN
 
     lines = []
     say = lines.append
     say("=" * 100)
     say(f" DECISION LEDGER - {args.date}  (every signal: who stopped it, and what it would have done)")
-    say(f" replay geometry: SL {args.sl}xATR(M{args.tf}) | TP {args.tp}xATR(M{args.tf}) | max hold {args.max_min} min | cost {args.cost} pts/round trip")
+    say(f" Editor's own geometry: SL {sl_m}x{ATR_CONST} | TP {tp_m}x{ATR_CONST} (constant ATR, AUDIT_ATR) "
+        f"| max hold {max_min:.0f} min | spread {spread} pts/round trip")
     say("=" * 100)
 
     trades, err = T.read_day_trades(args.date)
@@ -112,7 +129,6 @@ def main():
         print("\n".join(lines)); sys.exit(0)
 
     keys, candles = T.build_candles(trades, args.tf)
-    atrs = T.atr_series(candles)
 
     rows_out = []
     n_total = n_neutral = 0
@@ -140,9 +156,8 @@ def main():
             exec_status = (row.get("exec_status") or "").strip()
             reason = (row.get("reason") or "").strip()
             stopped_by = classify(reason, exec_status)
-            status, outcome, pts = replay_one(ts, d, price, keys, candles, atrs,
-                                              args.tf, args.sl, args.tp,
-                                              args.cost, args.max_min)
+            status, outcome, pts = replay_one(ts, d, price, keys, candles,
+                                              args.tf, sl_m, tp_m, spread, max_min)
             b = buckets.setdefault(stopped_by, {"n": 0, "pts": 0.0, "wins": 0, "unreplayed": 0})
             b["n"] += 1
             if pts is None:
@@ -183,16 +198,20 @@ def main():
     say("   a NEGATIVE would-be pts row = the gate SAVED that money (stopping was right).")
     say("   a POSITIVE row = the gate THREW AWAY that money (stopping cost us) -- the")
     say("   candidates to revisit are positive rows with many replayed signals, not one-off rows.")
-    say(f"   'ALL SIGNALS' should land near the day report's TEST 7 what-if (same geometry family).")
+    say("   'ALL SIGNALS' uses the Editor's own replay convention (constant ATR) and must land")
+    say("   near the day report's TEST 7 what-if; a big gap is a flag, not a mystery.")
 
     out_csv = os.path.join("data", f"decision_ledger_{args.date}.csv")
     try:
         os.makedirs("data", exist_ok=True)
-        with open(out_csv, "w", newline="", encoding="utf-8") as f:
-            w = csv.DictWriter(f, fieldnames=list(rows_out[0].keys()))
-            w.writeheader()
-            w.writerows(rows_out)
-        say(f" [saved] {out_csv}  <- one row per signal: open it in any spreadsheet")
+        if rows_out:
+            with open(out_csv, "w", newline="", encoding="utf-8") as f:
+                w = csv.DictWriter(f, fieldnames=list(rows_out[0].keys()))
+                w.writeheader()
+                w.writerows(rows_out)
+            say(f" [saved] {out_csv}  <- one row per signal: open it in any spreadsheet")
+        else:
+            say(f" [no signal rows to save]")
     except OSError as e:
         say(f" [could not save {out_csv}: {e}]")
     out_txt = os.path.join("data", f"decision_ledger_{args.date}.txt")
