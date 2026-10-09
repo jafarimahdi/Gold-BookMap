@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""tf_study.py -- end-of-day TIMEFRAME GEOMETRY study (M3 / M5 / M8 / M15).
+"""tf_study.py -- end-of-day EDGE PERSISTENCE study: how fast does the day's
+signal edge fade? Measured by replaying the SAME decisions under each exit
+geometry (M3 / M5 / M8 / M15), so the answers are comparable across geometries.
 
 Two questions, two row types, said out loud so nobody confuses them:
 
@@ -319,8 +321,9 @@ def main():
     lines = []
     say = lines.append
     say("=" * 100)
-    say(f" TIMEFRAME GEOMETRY STUDY - {args.date}  (same day's real decisions, each geometry's own exits)")
-    say(f" SL {args.sl}xATR | TP {args.tp}xATR | max hold {args.max_min} min | cost {args.cost} pts/round trip | conf gate {args.conf_gate:.0f}%")
+    say(f" EDGE PERSISTENCE STUDY - {args.date}  (how fast the day's signal edge fades, by exit geometry)")
+    say(f" This is NOT 'the robot at another timeframe': the decisions are the day's real M5 decisions,")
+    say(f" only the exit geometry changes. SL {args.sl}xATR | TP {args.tp}xATR | max hold {args.max_min} min | cost {args.cost} pts | conf gate {args.conf_gate:.0f}%")
     say(f" 'M5 (audit)' uses the Editor's constant ATR {const_atr} (AUDIT_ATR) -> must land near TEST 7's what-if.")
     say(" per-TF rows use that TF's own rolling ATR (adaptive geometry) -> a different question, not comparable to TEST 7.")
     say(" informs, never switches: this replays exits, it does NOT re-vote the panel (that is Level B)")
