@@ -194,11 +194,11 @@ class Budapest(tzinfo):
     @staticmethod
     def _dst(dt):
         y = dt.year
-        # last Sunday of March 02:00 local -> first Sunday of October 03:00 local
+        # last Sunday of March 02:00 local -> LAST Sunday of October 03:00 local (EU rule)
         mar_last = datetime(y, 3, 31)
         dst_on = mar_last - timedelta(days=(mar_last.weekday() + 1) % 7)
-        oct_first = datetime(y, 10, 1)
-        dst_off = oct_first + timedelta(days=(6 - oct_first.weekday()) % 7)
+        oct_last = datetime(y, 10, 31)
+        dst_off = oct_last - timedelta(days=(oct_last.weekday() + 1) % 7)
         naive = dt.replace(tzinfo=None)
         return dst_on <= naive < dst_off
 
