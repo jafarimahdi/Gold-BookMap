@@ -52,7 +52,8 @@ echo "[chief of staff] desk 3/3: the Shadow (the robot's own wall logic)..."
 hr
 
 # ---- the Editor's own numbers, if the day was audited -------------------------
-METRICS="data/day_metrics_${COMPACT}.json"
+# (audit_day saves day_metrics with DASHES in the date: day_metrics_2026-10-08.json)
+METRICS="data/day_metrics_${DATE}.json"
 if [ -f "$METRICS" ]; then
   echo "[chief of staff] the Editor's recorded verdict ($METRICS):"
   "$PY" - "$METRICS" <<'PYEOF' | sed 's/^/  /'

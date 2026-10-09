@@ -214,15 +214,18 @@ def walk_shadow(entry_dt, direction, entry, sl, tp, atr, keys, candles,
 
 
 def walk_benchmark(entry_dt, direction, entry, const_atr, keys, candles,
-                   max_min, cost, sl_m=2.0, tp_m=3.5):
-    """The fixed ruler (Editor convention): constant ATR, no gate, no trail."""
+                   max_min, cost, sl_m=2.0, tp_m=3.5, tf=1):
+    """The fixed ruler (Editor/ledger convention): constant ATR, no gate, no trail.
+    v1.1: walks the LEDGER'S candle size (tf, default M5) so the ALL-signals row
+    reconciles with decision_ledger.py exactly - same ruler, same walk, same
+    walkability rule. The SHADOW itself keeps its finer M1 walk."""
     sl = entry - sl_m * const_atr if direction == "BUY" else entry + sl_m * const_atr
     tp = entry + tp_m * const_atr if direction == "BUY" else entry - tp_m * const_atr
     buy = direction == "BUY"
     i = T.walk_start(keys, entry_dt)
     if i is None:
         return (None, None)
-    seg = candles[i:i + max(1, int(max_min))]
+    seg = candles[i:i + max(1, int(max_min) // tf)]
     if not seg:
         return (None, None)
     for c in seg:
@@ -311,9 +314,9 @@ def main():
             n_wall += 1
         ok, gwhy = value_gate(direction, entry, sl, tp, atr, CFG)
         # the fixed-ruler benchmark runs for EVERY walkable signal (gate or not),
-        # so its ALL-signals total can be reconciled with the decision ledger
-        bo, bp = walk_benchmark(ts, direction, entry, const_atr, keys1, candles1,
-                                args.max_min, args.cost)
+        # on the LEDGER'S M5 walk, so its ALL-signals total reconciles exactly
+        bo, bp = walk_benchmark(ts, direction, entry, const_atr, keys5, candles5,
+                                args.max_min, args.cost, tf=5)
         if bp is not None:
             bma_pts += bp; bma_n += 1
         if not ok:
@@ -358,8 +361,8 @@ def main():
     say("   profit-lock trail) would have done with these signals. The 'same subset'")
     say("   BENCHMARK row is the fixed TP/SL ruler on exactly the signals the shadow")
     say("   took - the gap between those two rows is the honest size of 'the walls")
-    say("   change the answer'. The 'ALL signals' BENCHMARK row must match the")
-    say("   decision ledger's ALL SIGNALS (same ruler, same population).")
+    say("   change the answer'. The 'ALL signals' BENCHMARK row uses the ledger's own")
+    say("   M5 walk and must match the decision ledger's ALL SIGNALS exactly.")
     say("   GATE_SKIP rows are the value gate saying 'not worth it' - that is the robot")
     say("   refusing its own trade, counted here exactly as it would refuse live.")
 
