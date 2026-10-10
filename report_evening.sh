@@ -8,10 +8,13 @@
 #   1. the Accountant (decision_ledger.py)  - who stopped each signal, was it right
 #   2. the Geometer   (tf_study.py)         - edge persistence across exit geometries
 #   3. the Shadow     (shadow_replay.py)    - the robot's OWN wall logic on the day
-#   4. the Editor's verdict (from data/day_metrics_<date>.json if present)
-#   5. the Watchman's day (data/tape_watchdog.log lines for the date)
+#   4. the Lens       (tf_lens.py)          - would finer clocks have SEEN more? (M2/M3/M8/M10 vs M5)
+#   5. the Anatomist  (fish_anatomy.py)     - the day's fish opened up: WHEN/SIZE/HEAT/PANEL
+#   6. the Editor's verdict (from data/day_metrics_<date>.json if present)
+#   7. the Watchman's day (data/tape_watchdog.log lines for the date)
 # plus the RECONCILIATION LINE: Accountant total vs Geometer 'M5 (audit)' row vs
 # the Editor's what-if. All three must tell the same story.
+# v1.2: desks 4+5 added (the measurement tools). --fast skips them (old 3-desk paper).
 #
 # Read-only with respect to trading: these are report tools; the robot never
 # imports them. Outputs land in data/ as always.
@@ -20,9 +23,11 @@ cd "$(dirname "$0")" || { echo "put this file in the project folder"; exit 1; }
 PY=$(command -v python || command -v python3)
 DATE=""
 FULL=0
+FAST=0
 for a in "$@"; do
   case "$a" in
     --full) FULL=1 ;;
+    --fast) FAST=1 ;;
     *) DATE="$a" ;;
   esac
 done
@@ -41,14 +46,34 @@ if [ "$FULL" = 1 ]; then
     || echo "[chief of staff] Editor failed or no data - continuing with the desks."
 fi
 
-echo "[chief of staff] desk 1/3: the Accountant (decision ledger)..."
+echo "[chief of staff] desk 1/5: the Accountant (decision ledger)..."
 "$PY" decision_ledger.py --date "$DATE" | sed 's/^/  /'
 hr
-echo "[chief of staff] desk 2/3: the Geometer (edge persistence)..."
+echo "[chief of staff] desk 2/5: the Geometer (edge persistence)..."
 "$PY" tf_study.py --date "$DATE" | sed 's/^/  /'
 hr
-echo "[chief of staff] desk 3/3: the Shadow (the robot's own wall logic)..."
+echo "[chief of staff] desk 3/5: the Shadow (the robot's own wall logic)..."
 "$PY" shadow_replay.py --date "$DATE" | sed 's/^/  /'
+hr
+
+# ---- v1.2: the measurement desks (skip with --fast) ----------------------------
+if [ "$FAST" = 1 ]; then
+  echo "[chief of staff] desks 4-5 skipped (--fast: the quick paper)"
+else
+  if [ -f tf_lens.py ]; then
+    echo "[chief of staff] desk 4/5: the Lens (timeframe glasses, ~1-3 min)..."
+    "$PY" tf_lens.py --date "$DATE" | sed 's/^/  /'
+  else
+    echo "[chief of staff] desk 4/5: the Lens is not installed (tf_lens.py missing) - skipping."
+  fi
+  hr
+  if [ -f fish_anatomy.py ] && [ -f tf_lens.py ]; then
+    echo "[chief of staff] desk 5/5: the Anatomist (fish dissection, ~1-3 min)..."
+    "$PY" fish_anatomy.py --date "$DATE" | sed 's/^/  /'
+  else
+    echo "[chief of staff] desk 5/5: the Anatomist needs fish_anatomy.py + tf_lens.py - skipping."
+  fi
+fi
 hr
 
 # ---- the Editor's own numbers, if the day was audited -------------------------
@@ -137,6 +162,6 @@ if shd is not None:
 PYEOF
 hr
 echo "[chief of staff] today's outputs:"
-ls -la "data/decision_ledger_${DATE}".* "data/tf_study_${DATE}".* "data/shadow_replay_${DATE}".* 2>/dev/null | awk '{print "  " $NF " (" $5 " bytes)"}'
+ls -la "data/decision_ledger_${DATE}".* "data/tf_study_${DATE}".* "data/shadow_replay_${DATE}".* "data/tf_lens_${DATE}".* "data/fish_anatomy_${DATE}".* 2>/dev/null | awk '{print "  " $NF " (" $5 " bytes)"}'
 echo ""
 echo "[chief of staff] done. The paper is above; the files are in data/."
