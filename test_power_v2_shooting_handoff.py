@@ -5,11 +5,15 @@ from escort_team import EscortBook, escort_cycle
 from paper_entry_simulator import reset_entry_simulator, simulate_entry
 from power_team_v2 import decide
 from shooting_team import plan_shot
+import config as _test_config
+_test_config.LIMIT_ORDER_ENABLED = True  # G10: tests must not depend on the operator's .env
+
 
 ROOT = Path(__file__).parent
 
 
 CFG = SimpleNamespace(
+    LIMIT_ORDER_ENABLED=True,
     POWER_MAX_TICK_AGE_SECONDS=60.0,
     STALE_DATA_SECONDS=300.0,
     SHOOT_ROAD_RATIO=6.0,

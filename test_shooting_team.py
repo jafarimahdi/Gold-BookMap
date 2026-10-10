@@ -2,9 +2,13 @@ from types import SimpleNamespace
 import time
 
 from shooting_team import plan_shot
+import config as _test_config
+_test_config.LIMIT_ORDER_ENABLED = True  # G10: tests must not depend on the operator's .env
+
 
 
 CFG = SimpleNamespace(
+    LIMIT_ORDER_ENABLED=True,
     POWER_MAX_TICK_AGE_SECONDS=60.0,
     STALE_DATA_SECONDS=300.0,
     SHOOT_ROAD_RATIO=6.0,
