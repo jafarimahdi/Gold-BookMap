@@ -266,7 +266,20 @@ def plan_shot(signal_map: Dict[str, Any], power: Dict[str, Any],
 
     passive = _geometry(passive_entry, direction, target_door, passive_shelter, a, sp, config)
     aggressive = _geometry(aggressive_entry, direction, target_door, aggressive_shelter, a, sp, config)
-    min_rr = _cfg(config, "SHOOT_MIN_RR", 1.2)
+    if ctx.get("a2_burst") is True:
+        # A2 burst bracket: measured fixed geometry (anatomy 3-day: p90 heat
+        # ~1.6, targets +1.4..+2.0 by 9-12 min). Never wall-based for bursts.
+        _a2_sl = _num(_cfg(config, "A2_BURST_SL_PTS", 1.8))
+        _a2_tp = _num(_cfg(config, "A2_BURST_TP_PTS", 1.8))
+        if _a2_sl and _a2_sl > 0 and _a2_tp and _a2_tp > 0:
+            _a2_stop = aggressive_entry - _a2_sl if is_buy else aggressive_entry + _a2_sl
+            _a2_target = aggressive_entry + _a2_tp if is_buy else aggressive_entry - _a2_tp
+            aggressive = {**aggressive, "eligible": True, "reason": None,
+                          "stop": _a2_stop, "target": _a2_target,
+                          "risk": _a2_sl, "reward": _a2_tp,
+                          "rr": _a2_tp / _a2_sl, "stop_source": "A2_BURST_FIXED"}
+    min_rr = (_cfg(config, "A2_MIN_RR", 1.0) if ctx.get("a2_burst") is True
+              else _cfg(config, "SHOOT_MIN_RR", 1.2))
     min_reward_usd = _cfg(config, "SHOOT_MIN_REWARD_USD", 0.0)
 
     def cost_check(plan: Dict[str, Any]) -> Optional[str]:
@@ -329,7 +342,8 @@ def plan_shot(signal_map: Dict[str, Any], power: Dict[str, Any],
     # Patient limit is preferred whenever the queue is acceptable/unknown. Use market
     # entry only if independently triggered and the limit queue is demonstrably poor
     # (or the passive geometry is invalid).
-    choose_aggressive = aggressive_allowed and (queue_blocks_limit or not passive_allowed)
+    choose_aggressive = aggressive_allowed and (queue_blocks_limit or not passive_allowed
+                                                     or ctx.get("a2_burst") is True)
     chosen = aggressive if choose_aggressive else passive
     style = "AGGRESSIVE_MARKET" if choose_aggressive else "PASSIVE_LIMIT"
     mode_label = "market" if choose_aggressive else "working limit"

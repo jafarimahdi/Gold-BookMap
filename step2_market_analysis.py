@@ -4655,6 +4655,11 @@ def analyze_market(market_data: Dict[str, Any],
             _aggr = {"confirmed": False,
                      "reason": "aggressive trigger error (fail-closed): "
                                + type(_ag_err).__name__}
+        # A2 (2026-10-13): the gate import. Missing module -> passthrough below.
+        try:
+            from aggressive_trigger import a2_v1_gate as _a2_gate
+        except Exception:
+            _a2_gate = None
         _shot_context = {
             "bid": _raw_bid,
             "ask": _raw_ask,
@@ -4668,8 +4673,12 @@ def analyze_market(market_data: Dict[str, Any],
             "now": now,
             # Aggressive impulse trigger (aggressive_trigger.py) - reviewed
             # 2026-10-06, fail-closed: fires only with AGGRESSIVE_ENTRY_ENABLED=1.
-            "aggressive_trigger_confirmed": bool(_aggr.get("confirmed")),
-            "aggressive_trigger_reason": str(_aggr.get("reason") or ""),
+            # A2 (2026-10-13): gated -- three measured eyes + caps + burst
+            # bracket; passthrough (identical behavior) when lane disabled.
+            **(_a2_gate(_aggr, _power_v2, order_flow, locals().get("direction"),
+                        now, config, notes) if _a2_gate is not None else
+               {"aggressive_trigger_confirmed": bool(_aggr.get("confirmed")),
+                "aggressive_trigger_reason": str(_aggr.get("reason") or "")}),
         }
         _shot = _plan(_signal_map, _power_v2, price,
                       getattr(volatility, "atr", 0.0) or 0.0,

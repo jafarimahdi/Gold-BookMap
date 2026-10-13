@@ -13,42 +13,63 @@ USER DECISION (2026-10-06)
     entries are a later version. So this trigger is the gate that decides when
     an aggressive opening is justified.
 
-DESIGN LAW
-    Fail-closed and deterministic. On ANY missing evidence or doubt it returns
-    confirmed=False with a human-readable reason. It NEVER sends orders; it
-    only returns a permission flag + reason for the Shooting entry context.
-    The paper-entry simulator estimates the fill; Escort only wakes on a
-    confirmed paper fill. Real order flow remains a separate, gated path.
+A2 — THE NOW BUTTON (wired 2026-10-13, owner's order; see A2_DESIGN_REVIEW)
+    The burst lane. Fires only when the three measured eyes ALL agree
+    (AND-combination; never one alone — the 62-on-a-rock law):
 
-CONDITIONS (all must hold, checked in order)
-    1. AGGRESSIVE_ENTRY_ENABLED=1 in .env (default 0 -> trigger never fires)
-    2. POWER v2 direction is UP or DOWN (NEITHER can never trigger)
-    3. POWER regime_gate and safety_gate are PASS when those fields exist
-       (a directional POWER decision already implies force checks passed;
-        these two are belt-and-braces and are treated FAIL if missing-and-
-       required-by-strict-mode, PASS-if-absent in normal mode only when the
-       direction itself is directional and force checks are not present)
-    4. fresh, quality market data (has_data + quality + tick age)
-    5. spread within AGGRESSIVE_SPREAD_MAX_PCT (default: MAX_SPREAD_PCT)
-    6. news is not in a blackout
-    7. IMPULSE: aggressive order flow agrees with the direction
-       (buy% - sell% for UP, sell% - buy% for DOWN >= AGGRESSIVE_FLOW_EDGE,
-        in percentage points). If L3 net-flow sign is available and opposes
-        the direction, the trigger is refused.
+      EYE 1  CVD print-spy lean: EMA3 of order-flow one-sidedness
+             (buying_pressure - selling_pressure) >= A2_LEAN_MIN (0.25),
+             held >= 60 s.  The measured 1.2-1.4x-lift eye (flow probe v1.1).
+      EYE 2  Panel same-direction signal within +-5 min — the panel's
+             DIRECTION (signal_direction), never its confidence.
+      EYE 3  Scout door structure — enforced inside plan_shot (route_clear,
+             nearest door); not re-implemented here.
+
+    Rails kept from v1: AGGRESSIVE_ENTRY_ENABLED master switch, POWER must be
+    directional UP/DOWN, regime/safety gates not-FAIL, spread/freshness/news
+    checked downstream by plan_shot's _power_gate.  Caps: A2_BURST_MAX_PER_DAY
+    trades/day (persisted counter), A2_BURST_COOLDOWN_MINUTES between fires,
+    never widens a stop (Escort only tightens), ALLOW_LIVE_TRADING=0 unchanged.
+
+    Attribution law: every fire logs "A2 burst: FIRE ..." with all three eyes;
+    refusals-with-a-lean log "A2 burst: lean ... refused: <why>" (max 1/min).
+
+DESIGN LAW (unchanged)
+    Fail-closed and deterministic. On ANY missing evidence or doubt it returns
+    not-confirmed with a human-readable reason. It NEVER sends orders; it only
+    returns a permission flag + reason for the Shooting entry context.
 
 CONFIG (read from environment first, then config module, then default)
-    AGGRESSIVE_ENTRY_ENABLED        default 0    master switch
-    AGGRESSIVE_FLOW_EDGE            default 2.0  pp of flow agreement needed
-    AGGRESSIVE_SPREAD_MAX_PCT       default MAX_SPREAD_PCT (or 0.05)
-    AGGRESSIVE_MAX_TICK_AGE_SECONDS default POWER_MAX_TICK_AGE_SECONDS (or 60)
+    AGGRESSIVE_ENTRY_ENABLED         default 0     master switch (v1 + A2)
+    A2_LEAN_MIN                      default 0.25  eye-1 one-sidedness floor
+    A2_LEAN_HOLD_SECONDS             default 60    eye-1 hold time
+    A2_PANEL_WINDOW_SECONDS          default 300   eye-2 look-back
+    A2_BURST_MAX_PER_DAY             default 10    burst trades per day
+    A2_BURST_COOLDOWN_MINUTES        default 5     min minutes between fires
+    A2_BURST_SL_PTS                  default 1.8   burst stop distance (pts)
+    A2_BURST_TP_PTS                  default 1.8   burst target distance (pts)
+    A2_MIN_RR                        default 1.0   burst R:R floor (measured)
+    (A2_BURST_SL_PTS / A2_MIN_RR are read by shooting_team's patch, same keys.)
 """
 from __future__ import annotations
 
+import json
 import math
 import os
-from typing import Any, Dict, Mapping, Optional
+from collections import deque
+from datetime import datetime, timedelta, timezone
+from typing import Any, Deque, Dict, List, Mapping, Optional, Tuple
 
-__all__ = ["evaluate_aggressive_trigger", "TRIGGER_KEYS"]
+__all__ = [
+    "evaluate_aggressive_trigger", "TRIGGER_KEYS",
+    "BurstEyes", "EYES", "a2_eval", "a2_full_compute_ctx", "a2_serve_eval",
+    "a2_count_fire", "a2_fire_count", "a2_v1_gate",
+]
+
+
+# --------------------------------------------------------------------------- #
+# v1 trigger (unchanged, 22-test-proven) — kept verbatim below.
+# --------------------------------------------------------------------------- #
 
 TRIGGER_KEYS = (
     "AGGRESSIVE_ENTRY_ENABLED",
@@ -94,8 +115,8 @@ def _get(obj: Any, *names: str) -> Any:
 
 def _flow_edge(order_flow: Any, direction: str) -> Optional[float]:
     """Signed flow agreement in percentage points for `direction`."""
-    buy = _num(_get(order_flow, "buy_pct", "buy_percent"))
-    sell = _num(_get(order_flow, "sell_pct", "sell_percent"))
+    buy = _num(_get(order_flow, "buy_pct", "buy_percent", "buying_pressure"))
+    sell = _num(_get(order_flow, "sell_pct", "sell_percent", "selling_pressure"))
     if buy is None or sell is None:
         bv = _num(_get(order_flow, "aggressive_buy_volume"))
         sv = _num(_get(order_flow, "aggressive_sell_volume"))
@@ -235,3 +256,402 @@ def evaluate_aggressive_trigger(
                    f"tick age {age:.1f}s, POWER gates green"),
         "checks": checks,
     }
+
+
+# --------------------------------------------------------------------------- #
+# A2 — THE NOW BUTTON (burst lane).  All new code lives below this line.
+# --------------------------------------------------------------------------- #
+
+A2_KEYS = (
+    "A2_LEAN_MIN", "A2_LEAN_HOLD_SECONDS", "A2_PANEL_WINDOW_SECONDS",
+    "A2_BURST_MAX_PER_DAY", "A2_BURST_COOLDOWN_MINUTES",
+    "A2_BURST_SL_PTS", "A2_BURST_TP_PTS", "A2_MIN_RR",
+)
+
+_SAMPLE_WINDOW_S = 240.0     # keep 4 minutes of one-sidedness samples
+_NOTE_MIN_GAP_S = 60.0      # refusal notes rate-limit
+
+
+def _enabled(config: Any) -> bool:
+    raw = os.environ.get("AGGRESSIVE_ENTRY_ENABLED")
+    if raw is None:
+        raw = getattr(config, "AGGRESSIVE_ENTRY_ENABLED", 0)
+    return str(raw).strip() in ("1", "1.0", "true", "True", "TRUE")
+
+
+def _as_dt(x: Any) -> Optional[datetime]:
+    if isinstance(x, datetime):
+        return x
+    try:
+        return datetime.fromisoformat(str(x))
+    except (TypeError, ValueError):
+        return None
+
+
+class BurstEyes:
+    """The two measured eyes that live on the serve cycle (O(1) per cycle).
+
+    Eye 1 (CVD print-spy lean): EMA3 over per-cycle one-sidedness samples
+          (buying_pressure - selling_pressure, in [-1, +1]); a lean exists
+          while |EMA3| >= A2_LEAN_MIN held >= A2_LEAN_HOLD_SECONDS.
+    Eye 2 (panel direction memory): remembers when the panel last said
+          BUY/SELL; agrees if a matching direction occurred within the window.
+    """
+
+    def __init__(self) -> None:
+        self.samples: Deque[Tuple[datetime, float]] = deque()
+        self.panel: Deque[Tuple[datetime, str]] = deque()
+        self.last_fire: Optional[datetime] = None
+        self._last_note: Optional[datetime] = None
+
+    # -- eye 1 ---------------------------------------------------------------
+    def sample(self, now: datetime, one_sidedness: Optional[float]) -> None:
+        v = _num(one_sidedness)
+        if v is None:
+            return
+        self.samples.append((now, max(-1.0, min(1.0, v))))
+        self._prune(now)
+
+    def lean(self, now: datetime, min_abs: float = 0.25,
+             hold_s: float = 60.0) -> Optional[Dict[str, Any]]:
+        # adaptive window: must hold enough history for the EMA + hold test at
+        # ANY cadence -- serve cycles sample every ~5s, bar-close gates every
+        # 300s (fixed 2026-10-13: the old fixed 240s window forgot the previous
+        # BAR sample, so a bar-close lean could never exist)
+        horizon = max(_SAMPLE_WINDOW_S, 6.0 * (hold_s or 60.0))
+        pts = [(t, v) for t, v in self.samples
+               if (now - t).total_seconds() <= horizon]
+        if not pts:
+            return None
+        alpha = 2.0 / (3.0 + 1.0)          # EMA3 span
+        ema: Optional[float] = None
+        series: List[Tuple[datetime, float]] = []
+        for t, v in pts:
+            ema = v if ema is None else alpha * v + (1.0 - alpha) * ema
+            series.append((t, ema))
+        if ema is None or abs(ema) < min_abs:
+            return None
+        held_from = pts[0][0]              # first time the run could have started
+        for t, e in series:
+            if abs(e) < min_abs:
+                held_from = t              # last crossing resets the clock
+        held_s = (now - held_from).total_seconds()
+        if held_s < hold_s:
+            return None
+        return {"direction": "UP" if ema > 0 else "DOWN",
+                "strength": round(abs(ema), 3), "held_s": round(held_s, 1)}
+
+    # -- eye 2 ---------------------------------------------------------------
+    def remember_panel(self, now: datetime, direction: Any) -> None:
+        d = str(direction or "").strip().upper()
+        if d in ("BUY", "SELL"):
+            self.panel.append((now, d))
+        self._prune(now)
+
+    def panel_agrees(self, now: datetime, direction: str,
+                     window_s: float = 300.0) -> Optional[Dict[str, Any]]:
+        want = "BUY" if direction == "UP" else "SELL"
+        best: Optional[datetime] = None
+        for t, d in self.panel:
+            if d == want and (now - t).total_seconds() <= window_s:
+                if best is None or t > best:
+                    best = t
+        if best is None:
+            return None
+        return {"direction": want, "age_s": round((now - best).total_seconds(), 1)}
+
+    # -- bookkeeping -----------------------------------------------------------
+    def _prune(self, now: datetime) -> None:
+        horizon = timedelta(seconds=max(_SAMPLE_WINDOW_S, 900.0))
+        while self.samples and (now - self.samples[0][0]) > horizon:
+            self.samples.popleft()
+        while self.panel and (now - self.panel[0][0]) > horizon:
+            self.panel.popleft()
+
+    def note_ok(self, now: datetime) -> bool:
+        if self._last_note is not None and (now - self._last_note).total_seconds() < _NOTE_MIN_GAP_S:
+            return False
+        self._last_note = now
+        return True
+
+
+EYES = BurstEyes()      # module singleton: one day, one process, one memory
+
+
+def _one_sidedness(order_flow: Any) -> Optional[float]:
+    """(buying_pressure - selling_pressure) / 100 — tolerant field lookup."""
+    buy = _num(_get(order_flow, "buying_pressure", "buy_pct", "buy_percent"))
+    sell = _num(_get(order_flow, "selling_pressure", "sell_pct", "sell_percent"))
+    if buy is None or sell is None:
+        return None
+    return (buy - sell) / 100.0
+
+
+# -- the daily burst counter (persisted; restart-safe; twin-safe: cwd-local) ----
+
+def _counter_path() -> str:
+    return os.path.join("data", "a2_burst_count.json")
+
+
+def a2_fire_count(now: datetime) -> int:
+    try:
+        with open(_counter_path(), encoding="utf-8") as f:
+            rec = json.load(f)
+        if rec.get("date") == now.strftime("%Y-%m-%d"):
+            return int(rec.get("count") or 0)
+    except (OSError, ValueError):
+        pass
+    return 0
+
+
+def a2_count_fire(now: datetime) -> int:
+    """Persist one more burst fire for today; returns the new count."""
+    rec = {"date": now.strftime("%Y-%m-%d"), "count": a2_fire_count(now) + 1}
+    try:
+        os.makedirs("data", exist_ok=True)
+        with open(_counter_path(), "w", encoding="utf-8") as f:
+            json.dump(rec, f)
+    except OSError:
+        pass
+    return rec["count"]
+
+
+# -- the A2 verdict -------------------------------------------------------------
+
+def a2_eval(power: Any, order_flow: Any, panel_direction: Any, now: datetime,
+            config: Any) -> Dict[str, Any]:
+    """The three eyes + rails. Feeds EYES first (sample + panel memory).
+
+    Returns {fire, direction, reason, lean, panel, count}. Fail-closed:
+    anything missing -> fire=False with the honest reason.
+    """
+    out: Dict[str, Any] = {"fire": False, "direction": None, "reason": "",
+                           "lean": None, "panel": None, "count": a2_fire_count(now)}
+    if not _enabled(config):
+        out["reason"] = "A2 disabled (AGGRESSIVE_ENTRY_ENABLED!=1)"
+        return out
+
+    # the eyes ALWAYS eat first (even when POWER is NEITHER or gates fail) --
+    # eye memory must not have gaps, and refusals must be explainable
+    lean_min = _num(_cfg(config, "A2_LEAN_MIN", 0.25), 0.25)
+    hold_s = _num(_cfg(config, "A2_LEAN_HOLD_SECONDS", 60.0), 60.0)
+    win_s = _num(_cfg(config, "A2_PANEL_WINDOW_SECONDS", 300.0), 300.0)
+    max_day = int(_num(_cfg(config, "A2_BURST_MAX_PER_DAY", 10), 10) or 10)
+    cool_s = 60.0 * (_num(_cfg(config, "A2_BURST_COOLDOWN_MINUTES", 5), 5) or 5)
+    EYES.sample(now, _one_sidedness(order_flow))
+    EYES.remember_panel(now, panel_direction)
+    out["lean"] = EYES.lean(now, min_abs=(lean_min or 0.25), hold_s=(hold_s or 60.0))
+
+    p = power if isinstance(power, Mapping) else {}
+    direction = str(_get(p, "direction", "decision") or "NEITHER").upper()
+    if direction not in ("UP", "DOWN"):
+        out["reason"] = f"POWER direction {direction or 'UNKNOWN'} (needs UP/DOWN)"
+        return out
+    out["direction"] = direction
+
+    # belt-and-braces: explicit FAIL gates refuse (plan_shot re-checks anyway)
+    for gate in ("regime_gate", "safety_gate"):
+        g = str(_get(p, gate) or "").upper()
+        if g and g not in ("PASS",):
+            out["reason"] = f"POWER {gate}={g}; burst refused"
+            return out
+
+    lean = out["lean"]
+    if lean is None:
+        out["reason"] = "eye 1 (CVD lean) not confirmed"
+        return out
+    if lean["direction"] != direction:
+        out["reason"] = (f"eye 1 lean is {lean['direction']} while POWER is {direction}")
+        return out
+
+    panel = EYES.panel_agrees(now, direction, window_s=(win_s or 300.0))
+    out["panel"] = panel
+    if panel is None:
+        out["reason"] = f"eye 2 (panel {direction}) not seen within {win_s:.0f}s"
+        return out
+
+    count = a2_fire_count(now)
+    out["count"] = count
+    if count >= max_day:
+        out["reason"] = f"daily burst cap reached ({count}/{max_day})"
+        return out
+    if EYES.last_fire is not None and (now - EYES.last_fire).total_seconds() < cool_s:
+        out["reason"] = "burst cooldown active"
+        return out
+
+    out["fire"] = True
+    out["reason"] = (f"A2 burst {direction}: eye1 lean {lean['strength']:.2f} "
+                     f"held {lean['held_s']:.0f}s | eye2 panel {panel['direction']} "
+                     f"{panel['age_s']:.0f}s ago | eye3 Scout door checked in plan_shot "
+                     f"| cap {count + 1}/{max_day}")
+    return out
+
+
+def _eyes_state(v: Dict[str, Any]) -> str:
+    lean = v.get("lean")
+    panel = v.get("panel")
+    e1 = (f"lean {lean['direction']} {lean['strength']:.2f}/{lean['held_s']:.0f}s"
+          if lean else "lean none")
+    e2 = (f"panel {panel['direction']} {panel['age_s']:.0f}s ago"
+          if panel else "panel none")
+    return f"eyes: {e1} | {e2} | door: plan_shot"
+
+
+# -- wiring point 1: the full compute (bar close) --------------------------------
+
+def a2_full_compute_ctx(power: Any, order_flow: Any, direction_local: Any,
+                        now: datetime, config: Any,
+                        notes: Optional[List[str]] = None) -> Dict[str, Any]:
+    """Stamp the Shooting entry context at bar close. Returns {} when disabled
+    (non-burst behavior stays byte-identical to the pre-A2 brain)."""
+    if not _enabled(config):
+        return {}
+    v = a2_eval(power, order_flow, direction_local, now, config)
+    if not v["fire"]:
+        if v.get("lean") and notes is not None and EYES.note_ok(now):
+            notes.append(f"A2 burst: {_eyes_state(v)} -> refused: {v['reason']}")
+        return {}
+    EYES.last_fire = now
+    if notes is not None:
+        notes.append(f"A2 burst: FIRE {_eyes_state(v)}")
+    return {
+        "aggressive_trigger_confirmed": True,
+        "aggressive_trigger_reason": str(v["reason"]),
+        "a2_burst": True,
+    }
+
+
+# -- A2 gate around the LIVE v1 wiring (installed on the owner's machine 2026-10-06) --
+
+def a2_v1_gate(v1: Any, power: Any, order_flow: Any, panel_direction: Any,
+               now: datetime, config: Any,
+               notes: Optional[List[str]] = None) -> Dict[str, Any]:
+    """A2 rails around the live v1 wiring (apply_aggressive_patches.py, 10-06).
+
+    The v1 verdict passes through UNTOUCHED when the lane is disabled. When
+    enabled, a confirmed v1 verdict additionally needs the three measured
+    eyes (lean + panel direction) and the caps; a fire sets ``a2_burst=True``
+    which activates the burst bracket in the (already-installed) shooting
+    patch. Counting happens here, at confirm time. Fail-closed everywhere.
+    """
+    if notes is None:
+        notes = []
+    passthrough = {"aggressive_trigger_confirmed": False,
+                   "aggressive_trigger_reason": ""}
+    if not isinstance(v1, Mapping):
+        return passthrough
+    confirmed = bool(v1.get("confirmed"))
+    reason = str(v1.get("reason") or "")
+    passthrough.update({"aggressive_trigger_confirmed": confirmed,
+                        "aggressive_trigger_reason": reason})
+    if not _enabled(config):
+        return passthrough
+
+    # the eyes always eat (bar-close cadence: 2 consecutive same-direction
+    # bars = a held lean, per the flow-probe measurement)
+    EYES.sample(now, _one_sidedness(order_flow))
+    EYES.remember_panel(now, panel_direction)
+    lean_min = _num(_cfg(config, "A2_LEAN_MIN", 0.25), 0.25)
+    hold_s = _num(_cfg(config, "A2_LEAN_HOLD_SECONDS", 60.0), 60.0)
+    win_s = _num(_cfg(config, "A2_PANEL_WINDOW_SECONDS", 300.0), 300.0)
+    lean = EYES.lean(now, min_abs=(lean_min or 0.25), hold_s=(hold_s or 60.0))
+
+    if not confirmed:
+        if lean is not None and EYES.note_ok(now):
+            notes.append(f"A2 burst: eyes lean {lean['direction']} "
+                         f"{lean['strength']:.2f}/{lean['held_s']:.0f}s "
+                         f"-> v1 lane refused: {reason[:120]}")
+        return passthrough
+
+    # v1 confirmed -> the A2 rails decide
+    direction = str(_get(power, "direction") or "").upper()
+    max_day = int(_num(_cfg(config, "A2_BURST_MAX_PER_DAY", 10), 10) or 10)
+    cool_s = 60.0 * (_num(_cfg(config, "A2_BURST_COOLDOWN_MINUTES", 5), 5) or 5)
+    count = a2_fire_count(now)
+    panel = (EYES.panel_agrees(now, direction, window_s=(win_s or 300.0))
+             if direction in ("UP", "DOWN") else None)
+    why = None
+    if lean is None:
+        why = "eye 1 (CVD lean) not confirmed"
+    elif direction in ("UP", "DOWN") and lean["direction"] != direction:
+        why = f"eye 1 lean {lean['direction']} vs POWER {direction}"
+    elif panel is None:
+        why = f"eye 2 (panel {direction or '?'}) not seen within {win_s:.0f}s"
+    elif count >= max_day:
+        why = f"daily burst cap reached ({count}/{max_day})"
+    elif EYES.last_fire is not None and (now - EYES.last_fire).total_seconds() < cool_s:
+        why = "burst cooldown active"
+    if why:
+        notes.append(f"A2 burst: v1 confirmed -> refused by A2 rails: {why}")
+        return {"aggressive_trigger_confirmed": False,
+                "aggressive_trigger_reason": f"A2 rails: {why} (v1: {reason[:100]})"}
+    EYES.last_fire = now
+    n = a2_count_fire(now)
+    notes.append(f"A2 burst: FIRE (v1 lane + rails) | eyes: lean "
+                 f"{lean['direction']} {lean['strength']:.2f}/{lean['held_s']:.0f}s"
+                 f" | panel {panel['direction']} {panel['age_s']:.0f}s ago"
+                 f" | burst trade {n}/{max_day}")
+    return {"aggressive_trigger_confirmed": True,
+            "aggressive_trigger_reason": f"A2 burst FIRE {n}/{max_day}: " + reason[:160],
+            "a2_burst": True}
+
+
+# -- wiring point 2: the serve cycle (between bars — the NOW in NOW button) ------
+
+def a2_serve_eval(served: Any, market_data: Mapping[str, Any], now: datetime,
+                  price: float, spread_now: float, config: Any,
+                  bid: float = 0.0, ask: float = 0.0,
+                  atr: float = 0.0) -> Tuple[Optional[Dict[str, Any]], List[str]]:
+    """Evaluate the burst lane on a serve cycle. Returns (new_shot, notes).
+
+    new_shot is not None only when the trigger fired AND plan_shot produced an
+    AGGRESSIVE_MARKET plan (Scout door + route verified inside plan_shot).
+    Fail-closed: any error -> ([], None) with the honest note; the cached
+    bar-close plan is left untouched.
+    """
+    if not _enabled(config):
+        return None, []
+    notes: List[str] = []
+    try:
+        power = getattr(served, "power_v2", None) or getattr(served, "power", None) or {}
+        if not isinstance(power, Mapping):
+            power = {}
+        v = a2_eval(power, getattr(served, "order_flow", None),
+                    getattr(served, "signal_direction", "NEUTRAL"), now, config)
+        if not v["fire"]:
+            if v.get("lean") and EYES.note_ok(now):
+                notes.append(f"A2 burst: {_eyes_state(v)} -> refused: {v['reason']}")
+            return None, notes
+
+        ctx: Dict[str, Any] = {
+            "bid": bid,
+            "ask": ask,
+            "news_state": getattr(getattr(served, "news", None), "news_state", ""),
+            "has_data": market_data.get("has_data", True),
+            "last_data_age_seconds": market_data.get("last_data_age_seconds", 0.0),
+            "data_quality_ok": market_data.get("data_quality_ok", True),
+            "queue_estimate": None,
+            "queue_enabled": False,          # burst lane never queues
+            "aggressive_trigger_confirmed": True,
+            "aggressive_trigger_reason": str(v["reason"]),
+            "a2_burst": True,
+        }
+        from shooting_team import plan_shot
+        from signal_team import get_book
+        shot = plan_shot(getattr(served, "signal_map", {}) or {}, power, price,
+                         atr or 0.0, spread=spread_now, config=config,
+                         book=get_book(), entry_context=ctx)
+        if shot.get("entry_style") == "AGGRESSIVE_MARKET":
+            EYES.last_fire = now
+            count = a2_count_fire(now)
+            notes.append(f"A2 burst: FIRE {_eyes_state(v)} | burst trade {count}"
+                         f" today | entry {shot.get('entry')} stop {shot.get('stop')}"
+                         f" target {shot.get('target')}")
+            return shot, notes
+        why = "; ".join(str(w) for w in (shot.get("why") or []))[:200]
+        notes.append(f"A2 burst: {_eyes_state(v)} -> plan_shot refused: "
+                     f"{shot.get('shot')} {why}")
+        return None, notes
+    except Exception as err:  # fail-closed: never break the serve cycle
+        return None, [f"A2 burst lane unavailable (fail-closed): "
+                      f"{type(err).__name__}: {err}"]
