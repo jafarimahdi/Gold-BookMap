@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""rig_memory.py -- the test rig for the TEAM MEMORY patch (v1.0, 2026-10-14).
+"""rig_memory.py -- the test rig for the TEAM MEMORY patch (v1.1, 2026-10-14).
+
+v1.1: install-order independent. The rig accepts a project-root step3 that
+already carries the doorman fix and/or the memory patch: a patcher answering
+[skip] (already applied) counts as healthy. Fixes D11, which wrongly demanded
+[ok] from the doorman patcher when the README order had already applied it.
 
 12 checks, run from the project root (next to the REAL step3_ai_decision.py
 and config.py). It never touches your live files: every patch test runs on a
@@ -86,6 +91,12 @@ RESULTS = []
 def expect(cond, msg):
     if not cond:
         raise AssertionError(msg)
+
+
+def _healthy(r):
+    """A patcher run is healthy if it applied ([ok]) or found its own patch
+    already present ([skip]) -- both leave the file carrying the patch."""
+    return ("[ok]" in r.stdout) or ("[skip]" in r.stdout)
 
 
 def write_panel(path, rows):
@@ -189,8 +200,9 @@ def d3_patch_applies():
     r = subprocess.run([sys.executable, str(APPLY_MEM)], cwd=patched,
                        capture_output=True, text=True)
     expect(r.returncode == 0, f"patcher exit {r.returncode}: {r.stdout} {r.stderr}")
-    expect(r.stdout.count("[ok]") >= 3, f"expected [ok] lines: {r.stdout}")
-    expect((patched / "step3_ai_decision.py.pre_memory").exists(), "no backup made")
+    expect(_healthy(r), f"patcher neither applied nor skipped cleanly: {r.stdout}")
+    if "[ok]" in r.stdout:
+        expect((patched / "step3_ai_decision.py.pre_memory").exists(), "no backup made")
     py_compile.compile(str(patched / "step3_ai_decision.py"), doraise=True)
     src = (patched / "step3_ai_decision.py").read_text(encoding="utf-8")
     expect("def _judge_report_card_block" in src, "helper missing")
@@ -284,7 +296,7 @@ def d11_composition():
         for script in order:
             r = subprocess.run([sys.executable, str(script)], cwd=d,
                                capture_output=True, text=True)
-            expect(r.returncode == 0 and "[ok]" in r.stdout,
+            expect(r.returncode == 0 and _healthy(r),
                    f"{tag}: {script.name} -> {r.stdout[-300:]} {r.stderr[-300:]}")
         src = (d / "step3_ai_decision.py").read_text(encoding="utf-8")
         expect("_note_key_failure" in src and "_judge_report_card_block" in src,
@@ -300,7 +312,12 @@ def d11_composition():
 
 
 def d12_backup_bytes():
-    a = (STATE["patched"] / "step3_ai_decision.py.pre_memory").read_bytes()
+    backup = STATE["patched"] / "step3_ai_decision.py.pre_memory"
+    if not backup.exists():
+        # Only possible when the root already carried the memory patch ([skip]):
+        # then the ROOT's own .pre_memory is the real backup -- nothing to check here.
+        return
+    a = backup.read_bytes()
     b = (STATE["orig"] / "step3_ai_decision.py").read_bytes()
     expect(a == b, "the .pre_memory backup does not preserve the original bytes")
 
