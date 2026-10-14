@@ -151,6 +151,56 @@ def _mask(key: str) -> str:
     return key[:4] + "..." + key[-4:]
 
 
+def _note_key_failure(key: str, key_index: int = 0) -> None:
+    """DOORMAN FIX (2026-10-14): count a NON-quota failure (network/timeout).
+
+    A quota error always parked the key; a network error was retried first on
+    every cycle -- the owner's 2026-10-13 log showed key #1 failing 118 times
+    in one day, each attempt waiting on a ~20s timeout (the speed-tail
+    culprit). After AI_KEY_DAILY_FAIL_CAP failures the key is parked with the
+    same cooldown machinery; it self-recovers, and because the day's counter
+    is kept, a still-broken key re-parks on its first new failure after the
+    cooldown. Bounded waste: ~cap+1 attempts per broken key per day.
+    """
+    def _cap() -> int:
+        import os
+        raw = os.environ.get("AI_KEY_DAILY_FAIL_CAP")
+        if raw is None:
+            raw = getattr(config, "AI_KEY_DAILY_FAIL_CAP", 5)
+        try:
+            return max(1, int(float(raw)))
+        except (TypeError, ValueError):
+            return 5
+    try:
+        path = _key_state_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        state = {}
+        try:
+            if path.exists():
+                state = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            state = {}
+        today = datetime.now(timezone.utc).date().isoformat()
+        if state.get("date") != today:
+            state = {"date": today}
+        kid = _key_id(key)
+        fails = dict(state.get("fails") or {})
+        fails[kid] = int(fails.get(kid) or 0) + 1
+        state["fails"] = fails
+        if fails[kid] >= _cap():
+            cooldowns = dict(state.get("cooldowns") or {})
+            cooldowns[kid] = (datetime.now(timezone.utc)
+                              + timedelta(minutes=_key_cooldown_minutes())).isoformat()
+            state["cooldowns"] = cooldowns
+            logger.warning(
+                "STEP 3: key #%d parked for %d min after %d failed calls "
+                "today (network/timeout, not quota); trying the next key.",
+                key_index, _key_cooldown_minutes(), fails[kid])
+        path.write_text(json.dumps(state), encoding="utf-8")
+    except OSError:
+        pass
+
+
 @dataclass
 class Decision:
     """AI output consumed by Step 4 (execution)."""
@@ -168,6 +218,97 @@ class Decision:
         d = asdict(self)
         d["timestamp"] = self.timestamp.isoformat() if self.timestamp else None
         return d
+
+
+_JUDGE_CARD_CACHE = {}
+
+
+def _judge_report_card_block(snapshot=None):
+    """TEAM MEMORY (2026-10-14): per-judge report cards for the AI weigher.
+
+    Reads data/judge_report_card.json (built by judge_report_card.py from the
+    nightly audit's judge_panel_*.csv grades) and returns a compact prompt
+    block, or "" when there is nothing trustworthy to show.
+
+    Fail-closed: any problem -> "" -> the prompt is byte-identical to a
+    no-card build. No look-ahead: the card is used only if every source day
+    is strictly BEFORE the snapshot's own day; the guard reads the snapshot
+    timestamp, never the wall clock (twin-replay safe).
+    """
+    try:
+        from pathlib import Path
+        from datetime import date
+
+        ts = getattr(snapshot, "timestamp", None)
+        if ts is None:
+            return ""
+        try:
+            aware = ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+            today = aware.astimezone(timezone.utc).date().isoformat()
+        except Exception:
+            return ""
+
+        def _knob(name, default):
+            import os
+            try:
+                return int(os.environ.get(name) or default)
+            except Exception:
+                return default
+
+        card_path = Path(__file__).resolve().parent / "data" / "judge_report_card.json"
+        try:
+            mtime = card_path.stat().st_mtime
+        except OSError:
+            return ""
+        cache_key = (str(card_path), mtime, today)
+        if _JUDGE_CARD_CACHE.get("key") == cache_key:
+            return _JUDGE_CARD_CACHE.get("block", "")
+
+        card = json.loads(card_path.read_text(encoding="utf-8"))
+        days = [str(d) for d in (card.get("source_days") or [])]
+        block = ""
+        if days and all(d and d < today for d in days):
+            max_stale = _knob("AI_CARD_MAX_STALE_DAYS", 4)
+            min_scored = _knob("AI_CARD_MIN_SCORED", 20)
+            try:
+                age = (date.fromisoformat(today) - date.fromisoformat(max(days))).days
+            except Exception:
+                age = 10 ** 6
+            judges = []
+            for j in (card.get("judges") or []):
+                try:
+                    judges.append((str(j["judge"]), int(j["scored"]),
+                                   float(j["hit_pct"]), float(j["pts_per_call"])))
+                except Exception:
+                    continue
+            judges = [t for t in judges if t[1] >= min_scored]
+            if age <= max_stale and judges:
+                judges.sort(key=lambda t: (-t[3], -t[2], t[0]))
+                lines = []
+                for name, scored, hit, ppc in judges:
+                    if ppc > 0 and hit >= 55.0:
+                        tag = "STRONG"
+                    elif ppc < -0.25 or hit < 40.0:
+                        tag = "WEAK"
+                    else:
+                        tag = "MIXED"
+                    lines.append("- {}: {:.0f}% right, {:+.2f} pts/call, {} scored calls [{}]"
+                                 .format(name, hit, ppc, scored, tag))
+                block = ("JUDGE REPORT CARDS (each judge's real track record over {} graded "
+                         "day(s) {}..{}, scored on its own clock by the nightly audit; weigh "
+                         "the panel votes accordingly):\n{}\n(tag rule: STRONG = pts/call>0 "
+                         "and hit>=55%; WEAK = pts/call<-0.25 or hit<40%; else MIXED)\n\n"
+                         .format(len(days), min(days), max(days), "\n".join(lines)))
+                try:
+                    logger.info("STEP 3: judge report card in prompt (%d judges, %s..%s)",
+                                len(judges), min(days), max(days))
+                except Exception:
+                    pass
+        _JUDGE_CARD_CACHE["key"] = cache_key
+        _JUDGE_CARD_CACHE["block"] = block
+        return block
+    except Exception:
+        return ""
 
 
 class AIDecisionEngine:
@@ -305,7 +446,8 @@ class AIDecisionEngine:
             self.SYSTEM_PROMPT + "\n\n"
             "TRADING SESSION CONTEXT (use this to judge volatility/liquidity):\n"
             + json.dumps(payload["session_context"], indent=2) + "\n\n"
-            "MARKET ANALYSIS METRICS (JSON) — trimmed to last {} bars, {} headlines for speed:\n".format(max_bars, max_headlines)
+            + _judge_report_card_block(snapshot)
+            + "MARKET ANALYSIS METRICS (JSON) — trimmed to last {} bars, {} headlines for speed:\n".format(max_bars, max_headlines)
             + json.dumps(payload, indent=2, default=str)
         )
 
@@ -651,6 +793,7 @@ class AIDecisionEngine:
                     # other error (network etc.) -> try the next key
                     logger.warning("STEP 3: call failed (key #%d, %s): %s",
                                    key_index, model, last_error[:120])
+                    _note_key_failure(key, key_index)
                     continue
 
         # nothing worked — try fallback before HOLD

@@ -10,11 +10,13 @@
 #   3. the Shadow     (shadow_replay.py)    - the robot's OWN wall logic on the day
 #   4. the Lens       (tf_lens.py)          - would finer clocks have SEEN more? (M2/M3/M8/M10 vs M5)
 #   5. the Anatomist  (fish_anatomy.py)     - the day's fish opened up: WHEN/SIZE/HEAT/PANEL
-#   6. the Editor's verdict (from data/day_metrics_<date>.json if present)
-#   7. the Watchman's day (data/tape_watchdog.log lines for the date)
+#   6. the Universes  (tf_robot_replay.py)  - the REAL robot brain replayed at 1/3/5/8/10 min (SLOW ~5-10 min)
+#   7. the Clocks     (clocks_verdict.py)   - the 5-day rules read honestly (C1/C2/C3/C6)
+#   8. the Editor's verdict (from data/day_metrics_<date>.json if present)
+#   9. the Watchman's day (data/tape_watchdog.log lines for the date)
 # plus the RECONCILIATION LINE: Accountant total vs Geometer 'M5 (audit)' row vs
 # the Editor's what-if. All three must tell the same story.
-# v1.2: desks 4+5 added (the measurement tools). --fast skips them (old 3-desk paper).
+# v1.3: desks 6+7 added (the Universes + the Clocks). --fast skips desks 4-7.
 #
 # Read-only with respect to trading: these are report tools; the robot never
 # imports them. Outputs land in data/ as always.
@@ -46,13 +48,13 @@ if [ "$FULL" = 1 ]; then
     || echo "[chief of staff] Editor failed or no data - continuing with the desks."
 fi
 
-echo "[chief of staff] desk 1/5: the Accountant (decision ledger)..."
+echo "[chief of staff] desk 1/7: the Accountant (decision ledger)..."
 "$PY" decision_ledger.py --date "$DATE" | sed 's/^/  /'
 hr
-echo "[chief of staff] desk 2/5: the Geometer (edge persistence)..."
+echo "[chief of staff] desk 2/7: the Geometer (edge persistence)..."
 "$PY" tf_study.py --date "$DATE" | sed 's/^/  /'
 hr
-echo "[chief of staff] desk 3/5: the Shadow (the robot's own wall logic)..."
+echo "[chief of staff] desk 3/7: the Shadow (the robot's own wall logic)..."
 "$PY" shadow_replay.py --date "$DATE" | sed 's/^/  /'
 hr
 
@@ -61,17 +63,31 @@ if [ "$FAST" = 1 ]; then
   echo "[chief of staff] desks 4-5 skipped (--fast: the quick paper)"
 else
   if [ -f tf_lens.py ]; then
-    echo "[chief of staff] desk 4/5: the Lens (timeframe glasses, ~1-3 min)..."
+    echo "[chief of staff] desk 4/7: the Lens (timeframe glasses, ~1-3 min)..."
     "$PY" tf_lens.py --date "$DATE" | sed 's/^/  /'
   else
     echo "[chief of staff] desk 4/5: the Lens is not installed (tf_lens.py missing) - skipping."
   fi
   hr
   if [ -f fish_anatomy.py ] && [ -f tf_lens.py ]; then
-    echo "[chief of staff] desk 5/5: the Anatomist (fish dissection, ~1-3 min)..."
+    echo "[chief of staff] desk 5/7: the Anatomist (fish dissection, ~1-3 min)..."
     "$PY" fish_anatomy.py --date "$DATE" | sed 's/^/  /'
   else
-    echo "[chief of staff] desk 5/5: the Anatomist needs fish_anatomy.py + tf_lens.py - skipping."
+    echo "[chief of staff] desk 5/7: the Anatomist needs fish_anatomy.py + tf_lens.py - skipping."
+  fi
+  hr
+  if [ -f tf_robot_replay.py ] && [ -f twin_day_runner.py ] && [ -f step2_market_analysis.py ]; then
+    echo "[chief of staff] desk 6/7: the Universes (REAL brain at 1/3/5/8/10 min, SLOW ~5-10 min)..."
+    "$PY" tf_robot_replay.py --date "$DATE" | sed 's/^/  /'
+  else
+    echo "[chief of staff] desk 6/7: the Universes need tf_robot_replay.py + twin_day_runner.py + the brain - skipping."
+  fi
+  hr
+  if [ -f clocks_verdict.py ]; then
+    echo "[chief of staff] desk 7/7: the Clocks (the 5-day rules, C1/C2/C3/C6)..."
+    "$PY" clocks_verdict.py | sed 's/^/  /'
+  else
+    echo "[chief of staff] desk 7/7: the Clocks are not installed (clocks_verdict.py missing) - skipping."
   fi
 fi
 hr
@@ -162,6 +178,6 @@ if shd is not None:
 PYEOF
 hr
 echo "[chief of staff] today's outputs:"
-ls -la "data/decision_ledger_${DATE}".* "data/tf_study_${DATE}".* "data/shadow_replay_${DATE}".* "data/tf_lens_${DATE}".* "data/fish_anatomy_${DATE}".* 2>/dev/null | awk '{print "  " $NF " (" $5 " bytes)"}'
+ls -la "data/decision_ledger_${DATE}".* "data/tf_study_${DATE}".* "data/shadow_replay_${DATE}".* "data/tf_lens_${DATE}".* "data/fish_anatomy_${DATE}".* "data/tf_robot_${DATE}".* "data/clocks_verdict.txt" 2>/dev/null | awk '{print "  " $NF " (" $5 " bytes)"}'
 echo ""
 echo "[chief of staff] done. The paper is above; the files are in data/."
