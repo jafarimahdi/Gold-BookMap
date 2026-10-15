@@ -13,6 +13,28 @@ v1.3 (2026-10-15 ~21:45): RIG ISOLATION FIX -- the v1.2 rig wrote its 3.0MB
   after state-diff proving the real data/ was untouched. If the v1.2 rig ever
   ran on a machine, run fix_memory_book.py there first (repairs the day-file).
 
+v1.5 (2026-10-15 ~22:10): ANCHOR FIX (incident #5, the law again): the live
+  FAST LANE line carries the ops-v2 WORDING (apply_ops_fix2.py reshaped it:
+  appended / error X / reason branches + the "memory " dedup), but v1.4's
+  idle-word anchor was the older ops-v1 shape -> [STOP], nothing written
+  (fail-closed worked). v1.5 anchors on the LIVE v2 shape (taken verbatim
+  from apply_ops_fix2.py, the newest patcher that touched the line) and
+  keeps the v1 shape as a fallback, so no machine wording is orphaned.
+
+v1.4 (2026-10-15 ~21:50): DISPLAY FIXES (the visibility audit's findings) --
+  (a) ARMOR book size now "book: today 14KB/28p" (KB + page count; v1.2's
+      MB-only read 0.0MB all day on a ~14KB/day book -- my flaw #5);
+  (b) FAST LANE memory word: "off" -> "idle" (off = between bar closes,
+      not sick; appended/idle/error/disabled are the 4 states);
+  (c) step2 Zones: "resistance none" instead of a misleading 0.00;
+  (d) step2 L3 label: "Mkt-aggr(tickwin) / Limit(events)" instead of
+      "Market: 5000" (5000 was the tick-window CAP, not a market count).
+  (c)/(d) are SOFT edits: if their anchors drifted on the live file they are
+  skipped harmlessly ([miss]) and the install still succeeds.
+  NOT touched here: O23 (the frozen L3 order-event stream) -- that needs the
+  live code first: run probe_l3_flow.py (read-only) and paste its output.
+  Machines on v1.2/v1.3 are auto-UPGRADED ([upgrade]); nothing to re-install.
+
 REQUIRES ops fix v1 AND v2 (apply_ops_fix.py + apply_ops_fix2.py) first.
 
 WHAT YOU GET - four new/extended lines EVERY cycle, all read-only:
@@ -24,7 +46,8 @@ WHAT YOU GET - four new/extended lines EVERY cycle, all read-only:
 
   ARMOR (opsfix3)     guard: 0 trades today/999 | risk: no halt | spread: 0.20
                       pts (0.005%) | flatten in 2.4h | disk free 38GB | book:
-                      today 2.1MB | MTF H1:UP M15:DOWN M5:DOWN | maintenance ran 2026-10-15
+                      today 14KB/28p | MTF H1:UP M15:DOWN M5:DOWN | maintenance
+                      ran 2026-10-15
       -> the guards' armor state (B5/B6/B7/B8) + the bookshelves (C9) + the
          silent servant (D10). The spread shown is the REAL book spread from
          bid/ask (the 0.000% display stays broken until the design session -
@@ -184,15 +207,19 @@ V3_BLOCK = JUDGES_TAIL + '''
             _v3_disk_s = f"disk free {_v3_free:.0f}GB"
         except Exception:
             _v3_disk_s = "disk n/a"
-        # opsfix:v3.2-book: the book writes ONE file per DAY (power_YYYY-MM-DD
-        # .jsonl); the pages are LINES inside it. v1.1 counted files ("pages: 1").
-        # Report today's file size - O(1), no re-read of a growing file.
+        # opsfix:v3.4-book: the book writes ONE file per DAY (power_YYYY-MM-DD
+        # .jsonl); the pages are LINES inside it. v1.2 showed MB only, but a
+        # day is ~14KB, so it read "0.0MB" all day (my flaw #5). KB + pages.
         _v3_mem_s = "book: none yet"
         try:
             _v3_mf = (_v3_dd / "power_v2_memory"
                       / f"power_{_v3_now.date().isoformat()}.jsonl")
             if _v3_mf.exists():
-                _v3_mem_s = f"book: today {_v3_mf.stat().st_size / 1048576:.1f}MB"
+                _v3_sz = _v3_mf.stat().st_size
+                _v3_pg = sum(1 for _ in _v3_mf.open("rb"))
+                _v3_sz_s = (f"{_v3_sz / 1048576:.1f}MB" if _v3_sz >= 1048576
+                            else f"{_v3_sz / 1024:.0f}KB")
+                _v3_mem_s = f"book: today {_v3_sz_s}/{_v3_pg}p"
         except Exception:
             pass
         _v3_mtf = " ".join(f"{_k}:{_v}" for _k, _v in
@@ -212,6 +239,74 @@ V3_BLOCK = JUDGES_TAIL + '''
     except Exception as _v3_err:
         _record("ARMOR (opsfix3)", f"(status unavailable: {type(_v3_err).__name__})")
     # opsfix:v3-armor-end'''
+
+# ============================== v1.4: display fixes (audit findings) ==========
+# (1) book size: v1.2's MB-only block -> KB + pages (a day is ~14KB, not MB)
+V12_MEM_OLD = '''        # opsfix:v3.2-book: the book writes ONE file per DAY (power_YYYY-MM-DD
+        # .jsonl); the pages are LINES inside it. v1.1 counted files ("pages: 1").
+        # Report today's file size - O(1), no re-read of a growing file.
+        _v3_mem_s = "book: none yet"
+        try:
+            _v3_mf = (_v3_dd / "power_v2_memory"
+                      / f"power_{_v3_now.date().isoformat()}.jsonl")
+            if _v3_mf.exists():
+                _v3_mem_s = f"book: today {_v3_mf.stat().st_size / 1048576:.1f}MB"
+        except Exception:
+            pass'''
+
+V14_MEM_NEW = '''        # opsfix:v3.4-book: the book writes ONE file per DAY (power_YYYY-MM-DD
+        # .jsonl); the pages are LINES inside it. v1.2 showed MB only, but a
+        # day is ~14KB, so it read "0.0MB" all day (my flaw #5). KB + pages.
+        _v3_mem_s = "book: none yet"
+        try:
+            _v3_mf = (_v3_dd / "power_v2_memory"
+                      / f"power_{_v3_now.date().isoformat()}.jsonl")
+            if _v3_mf.exists():
+                _v3_sz = _v3_mf.stat().st_size
+                _v3_pg = sum(1 for _ in _v3_mf.open("rb"))
+                _v3_sz_s = (f"{_v3_sz / 1048576:.1f}MB" if _v3_sz >= 1048576
+                            else f"{_v3_sz / 1024:.0f}KB")
+                _v3_mem_s = f"book: today {_v3_sz_s}/{_v3_pg}p"
+        except Exception:
+            pass'''
+
+# (2) FAST LANE memory word: the writer's "off" means idle-between-bars.
+#     ops v1 installed this line; v1.4 translates only the word "off".
+FL_OLD = '''        _ms_s = "appended" if _ms.get("appended") else str(_ms.get("reason") or "not")'''
+FL_NEW = '''        _ms_r = str(_ms.get("reason") or "")
+        _ms_s = "appended" if _ms.get("appended") else (  # opsfix:v3.4-idle
+            "idle" if _ms_r == "off" else (_ms_r or "not"))'''
+
+# v1.5: the LIVE shape (ops-v2 wording, verbatim from apply_ops_fix2.py) --
+# appended / error X / reason branches + the "memory " dedup fix (F21a).
+FL15_OLD = '''        _ms = _pv.get("memory_status") or {}
+        if _ms.get("appended"):
+            _ms_s = "appended"
+        elif _ms.get("error"):
+            _ms_s = f"error {_ms.get('error')}"
+        else:
+            _ms_s = str(_ms.get("reason") or "off").replace("memory ", "", 1)'''
+FL15_NEW = '''        _ms = _pv.get("memory_status") or {}
+        if _ms.get("appended"):
+            _ms_s = "appended"
+        elif _ms.get("error"):
+            _ms_s = f"error {_ms.get('error')}"
+        else:
+            _ms_r = str(_ms.get("reason") or "off").replace("memory ", "", 1)
+            _ms_s = "idle" if _ms_r == "off" else _ms_r    # opsfix:v3.5-idle'''
+
+# (3) step2 Zones: no resistance level exists -> print none, not 0.00 (soft)
+ZONES_OLD = '''        f"  Zones: support {snapshot.nearest_support:.2f} | resistance "
+        f"{snapshot.nearest_resistance:.2f}",'''
+ZONES_NEW = '''        (f"  Zones: support {snapshot.nearest_support:.2f} | resistance "
+         f"{snapshot.nearest_resistance:.2f}") if snapshot.nearest_resistance else
+        f"  Zones: support {snapshot.nearest_support:.2f} | resistance none",'''
+
+# (4) step2 L3 label: "Market: 5000" was the tick-window cap, not a count (soft)
+MKT_OLD = '''        f"  Imbalance: {l3.order_book_imbalance:+.3f}   Market: {l3.market_orders} "
+        f"  Limit: {l3.limit_orders}",'''
+MKT_NEW = '''        f"  Imbalance: {l3.order_book_imbalance:+.3f}   Mkt-aggr(tickwin): {l3.market_orders} "
+        f"  Limit(events): {l3.limit_orders}",'''
 
 # ==================================== main.py edit 2: the doorman's tail (A6) =
 S3_OLD = '''    _record("STEP 3  AI DECISION", f"{decision.action} @ {decision.confidence:.1f}%")'''
@@ -282,65 +377,110 @@ def install():
         return 1
     main = ROOT / "main.py"
     src = main.read_text(encoding="utf-8", errors="surrogateescape")
-    if "opsfix:v3-a2-start" in src:
-        if "opsfix:v3-armor-datefix" in src and "opsfix:v3.2-enabled" in src:
-            print("[skip] main.py: ops fix v3 (v1.2 install = current; this patcher is v1.3: isolated rig)")
-            return 0
-        # v1.0/v1.1 is installed but lacks the v1.2 line fixes -> auto-repair:
-        # restore the .pre_opsfix3 backups (back to the v2 state), then
-        # install fresh. One command, no manual rollback needed.
-        print("[repair] older ops-v3 found (pre-v1.2) -> restoring backups, re-applying...")
-        for _rel in ("main.py", "step2_market_analysis.py", "shooting_team.py"):
-            _p = ROOT / _rel
-            _b = Path(str(_p) + SUFFIX)
-            if _b.exists():
-                shutil.copy2(_b, _p)
-            elif _rel == "main.py":
-                print("[STOP] main.py.pre_opsfix3 backup missing - run --rollback, paste output.")
+    if "opsfix:v3.4-book" in src and ("opsfix:v3.4-idle" in src or "opsfix:v3.5-idle" in src):
+        print("[skip] main.py: ops fix v3 (v1.4/v1.5) already present")
+    else:
+        _fresh_v3 = "opsfix:v3-a2-start" not in src
+        if not _fresh_v3:
+            if "opsfix:v3-armor-datefix" in src and "opsfix:v3.2-enabled" in src:
+                # v1.2/v1.3 installed -> upgrade in place (display fixes only)
+                print("[upgrade] ops-v3 v1.2/v1.3 found -> v1.4 display fixes (book KB/pages + memory idle-word)")
+                if "opsfix:v3.4-book" not in src:
+                    if src.count(V12_MEM_OLD) != 1:
+                        print("[STOP] the v1.2 book-size block was not found exactly once in main.py.")
+                        print("       Paste this output to the assistant. (Nothing written.)")
+                        return 1
+                    src = src.replace(V12_MEM_OLD, V14_MEM_NEW, 1)
+            else:
+                # v1.0/v1.1 -> auto-repair: restore backups, install fresh below
+                print("[repair] older ops-v3 found (pre-v1.2) -> restoring backups, re-applying...")
+                for _rel in ("main.py", "step2_market_analysis.py", "shooting_team.py"):
+                    _p = ROOT / _rel
+                    _b = Path(str(_p) + SUFFIX)
+                    if _b.exists():
+                        shutil.copy2(_b, _p)
+                    elif _rel == "main.py":
+                        print("[STOP] main.py.pre_opsfix3 backup missing - run --rollback, paste output.")
+                        return 1
+                src = main.read_text(encoding="utf-8", errors="surrogateescape")
+                _fresh_v3 = "opsfix:v3-a2-start" not in src
+        if _fresh_v3:
+            if "opsfix:v2-judges-end" not in src:
+                print("[STOP] ops fix v2 is not installed - run apply_ops_fix2.py first. (Nothing written.)")
                 return 1
-        src = main.read_text(encoding="utf-8", errors="surrogateescape")
-    if "opsfix:v2-judges-end" not in src:
-        print("[STOP] ops fix v2 is not installed - run apply_ops_fix2.py first. (Nothing written.)")
-        return 1
-    if src.count(JUDGES_TAIL) != 1:
-        print("[STOP] the ops-fix-v2 JUDGES tail was not found exactly once in main.py.")
-        print("       Paste this output to the assistant. (Nothing written.)")
-        return 1
-    src = src.replace(JUDGES_TAIL, V3_BLOCK, 1)
-    if src.count(S3_OLD) != 1:
-        print("[STOP] the STEP 3 record line was not found exactly once in main.py.")
-        print("       (Nothing written.)")
-        return 1
-    src = src.replace(S3_OLD, S3_NEW, 1)
-    bak = Path(str(main) + SUFFIX)
-    if not bak.exists():
-        shutil.copy2(main, bak)
-    main.write_text(src, encoding="utf-8", errors="surrogateescape")
-    if not py_ok(main):
-        shutil.copy2(bak, main)
-        print("[FAIL] main.py py_compile failed -> backup restored, nothing changed")
-        return 1
-    print(f"[ok] main.py: 2 edits (A2 lane + armor lines, doorman tail), backup {bak.name}")
+            if src.count(JUDGES_TAIL) != 1:
+                print("[STOP] the ops-fix-v2 JUDGES tail was not found exactly once in main.py.")
+                print("       Paste this output to the assistant. (Nothing written.)")
+                return 1
+            src = src.replace(JUDGES_TAIL, V3_BLOCK, 1)
+            if src.count(S3_OLD) != 1:
+                print("[STOP] the STEP 3 record line was not found exactly once in main.py.")
+                print("       (Nothing written.)")
+                return 1
+            src = src.replace(S3_OLD, S3_NEW, 1)
+        if "opsfix:v3.4-idle" not in src and "opsfix:v3.5-idle" not in src:
+            # v1.5: try the LIVE ops-v2 wording first, then the old v1 shape
+            if src.count(FL15_OLD) == 1:
+                src = src.replace(FL15_OLD, FL15_NEW, 1)
+            elif src.count(FL_OLD) == 1:
+                src = src.replace(FL_OLD, FL_NEW, 1)
+            else:
+                print("[STOP] the FAST LANE memory line was not found exactly once in main.py")
+                print("       (neither the ops-v2 wording nor the ops-v1 shape).")
+                print("       (Nothing written.) Paste this output to the assistant:")
+                print('         grep -n "memory_status" main.py')
+                return 1
+        bak = Path(str(main) + SUFFIX)
+        if not bak.exists():
+            shutil.copy2(main, bak)
+        main.write_text(src, encoding="utf-8", errors="surrogateescape")
+        if not py_ok(main):
+            shutil.copy2(bak, main)
+            print("[FAIL] main.py py_compile failed -> backup restored, nothing changed")
+            return 1
+        if _fresh_v3:
+            print(f"[ok] main.py: full v3 install incl. v1.4 (A2 lane + armor KB/pages + doorman tail + idle-word), backup {bak.name}")
+        else:
+            print(f"[ok] main.py: v1.4 upgrade applied (book KB/pages + memory idle-word), backup {bak.name}")
 
     step2 = ROOT / "step2_market_analysis.py"
     if not step2.exists():
         print("[miss] step2_market_analysis.py not found - skipped")
     else:
         s2 = step2.read_text(encoding="utf-8", errors="surrogateescape")
-        bad = []
-        if s2.count(BRAKE_OLD) != 1:
-            bad.append("brake block")
-        if s2.count(FAMVAR_ANCHOR) != 1:
-            bad.append("family var anchor")
-        if s2.count(FAMLINE_OLD) != 1:
-            bad.append("family line anchor")
-        if bad:
-            print(f"[STOP] step2_market_analysis.py: anchor(s) not found -> NOTHING written: {', '.join(bad)}")
-            print("       Paste this output to the assistant.")
+        s2_edits = []
+        if "opsfix:v3-fam" in s2:
+            print("[skip] step2_market_analysis.py: brake numbers + fam scores already present")
         else:
-            s2 = s2.replace(BRAKE_OLD, BRAKE_NEW, 1)
-            s2 = s2.replace(FAMVAR_ANCHOR, FAMVAR_NEW, 1)
-            s2 = s2.replace(FAMLINE_OLD, FAMLINE_NEW, 1)
+            bad = []
+            if s2.count(BRAKE_OLD) != 1:
+                bad.append("brake block")
+            if s2.count(FAMVAR_ANCHOR) != 1:
+                bad.append("family var anchor")
+            if s2.count(FAMLINE_OLD) != 1:
+                bad.append("family line anchor")
+            if bad:
+                print(f"[STOP] step2_market_analysis.py: anchor(s) not found -> NOTHING written: {', '.join(bad)}")
+                print("       Paste this output to the assistant.")
+            else:
+                s2 = s2.replace(BRAKE_OLD, BRAKE_NEW, 1)
+                s2 = s2.replace(FAMVAR_ANCHOR, FAMVAR_NEW, 1)
+                s2 = s2.replace(FAMLINE_OLD, FAMLINE_NEW, 1)
+                s2_edits.append("brake numbers + fam scores")
+        # v1.4 soft cosmetics - never block the install
+        if "resistance none" not in s2:
+            if s2.count(ZONES_OLD) == 1:
+                s2 = s2.replace(ZONES_OLD, ZONES_NEW, 1)
+                s2_edits.append("zones none-guard")
+            else:
+                print("[miss] step2: zones anchor not found exactly once - cosmetic skipped (harmless)")
+        if "Limit(events)" not in s2:
+            if s2.count(MKT_OLD) == 1:
+                s2 = s2.replace(MKT_OLD, MKT_NEW, 1)
+                s2_edits.append("L3 label")
+            else:
+                print("[miss] step2: L3-label anchor not found exactly once - cosmetic skipped (harmless)")
+        if s2_edits:
             b2 = Path(str(step2) + SUFFIX)
             if not b2.exists():
                 shutil.copy2(step2, b2)
@@ -349,14 +489,16 @@ def install():
                 shutil.copy2(b2, step2)
                 print("[FAIL] step2 py_compile failed -> backup restored")
                 return 1
-            print(f"[ok] step2_market_analysis.py: 2 edits (brake numbers + fam scores), backup {b2.name}")
+            print(f"[ok] step2_market_analysis.py: {len(s2_edits)} edit(s) ({', '.join(s2_edits)}), backup {b2.name}")
 
     shoot = ROOT / "shooting_team.py"
     if not shoot.exists():
         print("[miss] shooting_team.py not found - skipped")
     else:
         ss = shoot.read_text(encoding="utf-8", errors="surrogateescape")
-        if ss.count(CROWD_OLD) != 1:
+        if "opsfix:v3 -- show the components" in ss:
+            print("[skip] shooting_team.py: crowd components already present")
+        elif ss.count(CROWD_OLD) != 1:
             print("[STOP] shooting_team.py: crowd anchor not found exactly once -> NOTHING written.")
             print("       Paste this output to the assistant.")
         else:
@@ -379,7 +521,7 @@ def install():
 
 def rig():
     print("=" * 78)
-    print("OPS FIX v3 RIG (v1.3, isolated) - proving the install with real checks")
+    print("OPS FIX v3 RIG (v1.5, isolated) - proving the install with real checks")
     print("=" * 78)
     results = []
 
@@ -412,6 +554,7 @@ def rig():
     check("marker: A2 lane block", "opsfix:v3-a2-start" in ms and "opsfix:v3-a2-end" in ms)
     check("marker: armor block", "opsfix:v3-armor-start" in ms and "opsfix:v3-armor-end" in ms)
     check("marker: v2 blocks still intact", "opsfix:v2-judges-end" in ms and "opsfix:v1-start" in ms)
+    check("marker: v1.4 book KB/pages + idle word", "opsfix:v3.4-book" in ms and ("opsfix:v3.4-idle" in ms or "opsfix:v3.5-idle" in ms))
     check("py_compile main.py", py_ok(main))
 
     s2 = ROOT / "step2_market_analysis.py"
@@ -496,7 +639,7 @@ def rig():
               and "spread: 0.20 pts (0.005%)" in armor_line
               and "MTF H1:UP M5:DOWN" in armor_line
               and "flatten in" in armor_line
-              and "book: today 3.0MB" in armor_line)
+              and "book: today 3.0MB/1p" in armor_line)
         # fail-closed: broken snapshot must not raise
         recorded2 = []
         ns2 = {"snapshot": types.SimpleNamespace(bid=None, ask=None, mtf_trends=None),

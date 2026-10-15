@@ -763,7 +763,8 @@ def run_signal_bridge(snapshot, decision) -> None:
         elif _ms.get("error"):
             _ms_s = f"error {_ms.get('error')}"
         else:
-            _ms_s = str(_ms.get("reason") or "off").replace("memory ", "", 1)
+            _ms_r = str(_ms.get("reason") or "off").replace("memory ", "", 1)
+            _ms_s = "idle" if _ms_r == "off" else _ms_r    # opsfix:v3.5-idle
         _pd = str(_pv.get("direction") or "n/a")
         _calls = _ai_calls_today()
         if _LAST_AI_CALL:
@@ -914,15 +915,19 @@ def run_signal_bridge(snapshot, decision) -> None:
             _v3_disk_s = f"disk free {_v3_free:.0f}GB"
         except Exception:
             _v3_disk_s = "disk n/a"
-        # opsfix:v3.2-book: the book writes ONE file per DAY (power_YYYY-MM-DD
-        # .jsonl); the pages are LINES inside it. v1.1 counted files ("pages: 1").
-        # Report today's file size - O(1), no re-read of a growing file.
+        # opsfix:v3.4-book: the book writes ONE file per DAY (power_YYYY-MM-DD
+        # .jsonl); the pages are LINES inside it. v1.2 showed MB only, but a
+        # day is ~14KB, so it read "0.0MB" all day (my flaw #5). KB + pages.
         _v3_mem_s = "book: none yet"
         try:
             _v3_mf = (_v3_dd / "power_v2_memory"
                       / f"power_{_v3_now.date().isoformat()}.jsonl")
             if _v3_mf.exists():
-                _v3_mem_s = f"book: today {_v3_mf.stat().st_size / 1048576:.1f}MB"
+                _v3_sz = _v3_mf.stat().st_size
+                _v3_pg = sum(1 for _ in _v3_mf.open("rb"))
+                _v3_sz_s = (f"{_v3_sz / 1048576:.1f}MB" if _v3_sz >= 1048576
+                            else f"{_v3_sz / 1024:.0f}KB")
+                _v3_mem_s = f"book: today {_v3_sz_s}/{_v3_pg}p"
         except Exception:
             pass
         _v3_mtf = " ".join(f"{_k}:{_v}" for _k, _v in

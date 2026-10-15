@@ -4864,8 +4864,8 @@ def format_snapshot(snapshot: MarketSnapshot) -> str:
         f"  Buying levels: {len(f.buying_levels)}   Selling levels: {len(f.selling_levels)}",
         "",
         "--- LEVEL 3 (order events) ---",
-        f"  Imbalance: {l3.order_book_imbalance:+.3f}   Market: {l3.market_orders} "
-        f"  Limit: {l3.limit_orders}",
+        f"  Imbalance: {l3.order_book_imbalance:+.3f}   Mkt-aggr(tickwin): {l3.market_orders} "
+        f"  Limit(events): {l3.limit_orders}",
         f"  Aggressive buys/sells: {l3.aggressive_buys}/{l3.aggressive_sells} "
         f"(flow ratio {l3.aggressive_flow_ratio:.2f})",
         f"  OFI (L3): {l3.ofi:+,.0f}   Streaks B/S: {l3.buy_streak}/{l3.sell_streak}",
@@ -4898,8 +4898,9 @@ def format_snapshot(snapshot: MarketSnapshot) -> str:
         f"  confidence={snapshot.confidence:.1f}   divergence={snapshot.divergence:+.0f}",
         f"  MTF align: {' '.join(f'{k}:{v}' for k, v in sorted(snapshot.mtf_trends.items())) or 'n/a'}   "
         f"spread: {snapshot.spread_pct:.3f}%",
-        f"  Zones: support {snapshot.nearest_support:.2f} | resistance "
-        f"{snapshot.nearest_resistance:.2f}",
+        (f"  Zones: support {snapshot.nearest_support:.2f} | resistance "
+         f"{snapshot.nearest_resistance:.2f}") if snapshot.nearest_resistance else
+        f"  Zones: support {snapshot.nearest_support:.2f} | resistance none",
         _session_line(),
     ]
     if snapshot.notes:
