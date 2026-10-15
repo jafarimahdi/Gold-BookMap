@@ -17,6 +17,8 @@
 # plus the RECONCILIATION LINE: Accountant total vs Geometer 'M5 (audit)' row vs
 # the Editor's what-if. All three must tell the same story.
 # v1.3: desks 6+7 added (the Universes + the Clocks). --fast skips desks 4-7.
+# v1.4 (report v2, 2026-10-15): desk 8 added - the AI COST line (paid calls +
+# where the full cost story lives). Reconciliation line untouched.
 #
 # Read-only with respect to trading: these are report tools; the robot never
 # imports them. Outputs land in data/ as always.
@@ -135,6 +137,25 @@ if [ -f "$WL" ]; then
 else
   echo "[chief of staff] no watchdog log (data/tape_watchdog.log) - the Watchman did not run."
 fi
+hr
+
+# ---- v1.4 (report v2): the AI COST line ------------------------------------------
+echo "[chief of staff] desk 8: the AI COST line (report v2)..."
+"$PY" - "$DATE" <<'PYEOF' | sed 's/^/  /'
+import json, sys
+date = sys.argv[1]
+try:
+    d = json.load(open("data/ai_calls.json", encoding="utf-8"))
+    if str(d.get("date")) == date:
+        print(f"paid AI calls (data/ai_calls.json): {d.get('calls')}")
+    else:
+        print(f"paid AI calls: the file holds {d.get('date')} ({d.get('calls')} calls) - it resets daily;")
+        print("the day's own count is in the Editor's TEST 17 (read from the log)")
+except Exception as e:
+    print(f"paid AI calls: (data/ai_calls.json unreadable: {e})")
+print("the full cost story (real calls / throttled rests / bells lost to the rest):")
+print("the Editor's TEST 17:  python audit_day.py --date " + date)
+PYEOF
 hr
 
 # ---- the reconciliation line ----------------------------------------------------

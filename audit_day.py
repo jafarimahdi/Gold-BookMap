@@ -1171,7 +1171,7 @@ def html_report(day, reports, metrics):
            "pre{white-space:pre-wrap;background:#10131d;padding:12px;border-radius:8px}")
     return ("<!doctype html><meta charset=utf-8><title>Day report " + _esc(str(day)) +
             "</title><style>" + css + "</style><h1>Gold-BookMap day report - " + _esc(str(day)) +
-            "</h1><h2>16 tests</h2><ul>" + lis + "</ul><h2>Full text</h2><pre>" + _esc(full_text) + "</pre>")
+            "</h1><h2>17 tests</h2><ul>" + lis + "</ul><h2>Full text</h2><pre>" + _esc(full_text) + "</pre>")
 
 
 def write_index_page():
@@ -2398,7 +2398,7 @@ def one_page_report(day, console_lines, sb_rows, sb_thin, ai_rec, parts):
 
     # --- 2. the full night report, verbatim ---------------------------------------
     txt = "\n".join(str(x) for x in (console_lines or []))
-    add_section("report", "The full night report (all 16 tests)",
+    add_section("report", "The full night report (all 17 tests)",
                 f"<pre class='console'>{esc(txt)}</pre>",
                 "Exactly what the console printed - nothing summarised away.",
                 open_by_default=False)
@@ -3099,6 +3099,13 @@ def test_11_version_config(text, day):
     want = {"BOOKMAP_WINDOW_SECONDS": "10800", "BOOKMAP_MAX_DEPTH_LEVELS": "250",
             "AI_MIN_SIGNAL_STRENGTH": "6", "CONFIDENCE_THRESHOLD": "50",
             "V6_CFD_SPREAD_MAX": "0.50", "TRADING_ENABLED": "1"}
+    # report v2 (2026-10-15): grade each day under the rule that was lawful when
+    # it ran - depth 250 -> 150 on 2026-10-13 (owner's .env), the M3 era from
+    # 2026-10-15 (TIMEFRAME / A1_BASE_TF_MINUTES / the voice fix VOICE_GAIN).
+    if day >= date_cls(2026, 10, 13):
+        want["BOOKMAP_MAX_DEPTH_LEVELS"] = "150"
+    if day >= date_cls(2026, 10, 15):
+        want.update({"TIMEFRAME": "M3", "A1_BASE_TF_MINUTES": "3", "VOICE_GAIN": "3.0"})
     basis = {k: (ran.get(k) if ran.get(k) not in (None, "") else env.get(k)) for k in want}
     src_name = "recorded by the robot for that day" if ran else "today's .env (no run_config file)"
     def _same(a, b):
@@ -3826,7 +3833,7 @@ PARTIAL was graded before that day had ended, so it covers less than 24 hours - 
 report: {", ".join(str(x) for x in audited_now) or "none"}.
 Days that exist on disk but are not in this window are still one command away:
 <code>python audit_day.py --date YYYY-MM-DD</code>.
-The per-day visual report (all 16 tests, judges, what-if) stays at
+The per-day visual report (all 17 tests, judges, what-if) stays at
 <code>data/day_report_&lt;date&gt;.html</code>.</p>
 </div></body></html>"""
 
@@ -4460,8 +4467,152 @@ def test_16_team_cycle(day, diary, text, decisions):
                "checklist_pass": cg.get("PASS", 0),
                "checklist_fail": cg.get("FAIL", 0)}
 
+def test_17_new_organs(day, diary, text, decisions):
+    """NEW ORGANS AND AI COST (report v2, 2026-10-15) - the machinery installed
+    after 2026-10-08 was invisible to every desk (the 2026-10-15 report-team
+    audit, ledger O12). This test reads the diary's NEW fields and the AI cost:
+      * POWER receipts: voice_gain (the 10-15 voice fix), force-check stamps,
+        reason codes, regime
+      * the A2 fast lane: gate runs, fires, refusal reasons (born 10-13)
+      * the memory book: memory_status (born 10-14)
+      * AI COST: real paid decisions (log + data/ai_calls.json), throttled
+        rests, and bells (strength >= 6) that rang while the doorman rested
+        (ledger O11 evidence: the 5-min rest vs the 3-min eyes)
+    Grades REPORTING COVERAGE, not trading: a quiet market is not a failure,
+    and an organ absent BEFORE its birth date is marked correct, not missing."""
+    r = Report(17)
+    why = []
+    txt = text or ""
+    BORN = {"a2": date_cls(2026, 10, 13), "memory": date_cls(2026, 10, 14),
+            "voice": date_cls(2026, 10, 15)}
+
+    # ---- 1) recursive census over the diary ------------------------------------
+    vg, ms, reasons, regimes = [], [], Counter(), Counter()
+    a2_runs, a2_fires, a2_reasons = 0, 0, []
+    fc_pass, fc_total, pv2 = 0, 0, 0
+
+    def _walk(o):
+        nonlocal a2_runs, a2_fires, fc_pass, fc_total, pv2
+        if isinstance(o, dict):
+            for k, v in o.items():
+                kl = str(k).lower()
+                if kl == "power_v2" and isinstance(v, dict):
+                    pv2 += 1
+                if kl == "memory_status":
+                    ms.append(v)
+                if not isinstance(v, (dict, list)):
+                    if kl == "voice_gain" and isinstance(v, (int, float)):
+                        vg.append(round(float(v), 3))
+                    elif kl == "aggressive_trigger_confirmed":
+                        a2_runs += 1
+                        if v is True:
+                            a2_fires += 1
+                    elif kl == "aggressive_trigger_reason" and v:
+                        a2_reasons.append(str(v))
+                    elif kl == "reason_code" and v:
+                        reasons[str(v)] += 1
+                    elif kl == "regime" and isinstance(v, str) and v:
+                        regimes[v] += 1
+                    elif kl.endswith("force_checks_pass"):
+                        fc_total += 1
+                        fc_pass += (v is True)
+                if isinstance(v, (dict, list)):
+                    _walk(v)
+        elif isinstance(o, list):
+            for v in o:
+                _walk(v)
+
+    try:
+        for d in diary or []:
+            _walk(d)
+    except Exception as e:
+        why.append(f"census error (survived): {type(e).__name__}: {e}")
+    why.append(f"diary records scanned: {len(diary or [])} (recursive key census)")
+    why.append(f"POWER answers: {pv2} | top reason codes: "
+               + (", ".join(f"{k} x{v}" for k, v in reasons.most_common(3)) or "none seen"))
+    if fc_total:
+        why.append(f"force-check stamps: {fc_pass}/{fc_total} passing")
+    missing = []
+    if day >= BORN["voice"] and not vg:
+        missing.append("voice_gain (born 10-15, expected from that day)")
+    if day >= BORN["memory"] and not ms:
+        missing.append("memory_status (born 10-14, expected from that day)")
+    if day >= BORN["a2"] and a2_runs == 0:
+        missing.append("aggressive_trigger stamps (born 10-13, expected from that day)")
+    for m in missing:
+        why.append(f"MISSING: {m} -> installed but the diary never shows it: "
+                   "tell the assistant (a reporting gap, not necessarily a robot fault)")
+    if vg:
+        why.append(f"voice_gain: stamped on {len(vg)} records, values {sorted(set(vg))} "
+                   "(the 10-15 voice fix, live and visible)")
+    if ms:
+        appended = sum(1 for m in ms if isinstance(m, dict) and m.get("appended"))
+        why.append(f"memory book: {len(ms)} memory_status stamps, {appended} appended")
+    if a2_runs:
+        top_ref = Counter(str(x).split("(")[0][:60] for x in a2_reasons).most_common(2)
+        why.append(f"A2 fast lane: gate ran {a2_runs}x, FIRES {a2_fires}; top refusals: "
+                   + (", ".join(f"{k} x{v}" for k, v in top_ref) or "none recorded"))
+    if regimes:
+        why.append("regime field: " + ", ".join(f"{k} x{v}" for k, v in regimes.most_common(3)))
+
+    # ---- 2) the AI cost truth ---------------------------------------------------
+    real_calls = len(re.findall(r"AI DECISION\s+(?:HOLD|BUY|SELL)\s*@\s*[\d.]+%", txt))
+    throttled = skipped_weak = missed_bells = 0
+    last_strength = 0.0
+    try:
+        for line in txt.splitlines():
+            m = re.search(r"strength ([\d.]+)", line)
+            if m:
+                try:
+                    last_strength = float(m.group(1))
+                except ValueError:
+                    pass
+            if "AI throttled" in line:
+                throttled += 1
+                if last_strength >= 6.0:
+                    missed_bells += 1
+            elif "AI skipped" in line:
+                skipped_weak += 1
+    except Exception as e:
+        why.append(f"cost scan error (survived): {type(e).__name__}: {e}")
+    ai_json = ""
+    try:
+        with open(DATA_DIR() / "ai_calls.json", encoding="utf-8", errors="ignore") as f:
+            j = json.load(f)
+        if str(j.get("date")) == f"{day:%Y-%m-%d}":
+            ai_json = f"data/ai_calls.json agrees: {j.get('calls')} paid call(s) that day"
+        else:
+            ai_json = (f"data/ai_calls.json holds {j.get('date')} ({j.get('calls')} calls) - "
+                       "it resets daily; the log count above is the day's own")
+    except Exception:
+        ai_json = "data/ai_calls.json not readable for this day (fine on old days)"
+    why.append(f"AI COST: real paid decisions {real_calls} | doorman refusals: "
+               f"{throttled} resting, {skipped_weak} below-bell | BELLS LOST TO THE REST "
+               f"(strength>=6 while throttled): {missed_bells}")
+    if missed_bells:
+        why.append(f"-> {missed_bells} moment(s) were interesting enough to ring while the "
+                   "doorman rested (ledger O11 evidence: the 5-min rest vs the 3-min eyes)")
+    why.append(ai_json)
+
+    if not diary:
+        r.add("NA", "NEW ORGANS AND AI COST",
+              "do the reports see the NEW machinery, and what did the AI cost?",
+              ["no diary records for this day - nothing to census",
+               "run the robot for a day, then re-audit"])
+        return r, {}
+    grade = "WARN" if missing else "PASS"
+    if missed_bells >= 3 and grade == "PASS":
+        grade = "WARN"
+    r.add(grade, "NEW ORGANS AND AI COST",
+          "do the reports see the NEW machinery, and what did the AI cost?",
+          why)
+    return r, {"voice_gain_records": len(vg), "a2_gate_runs": a2_runs,
+               "a2_fires": a2_fires, "missed_bells": missed_bells,
+               "real_ai_calls": real_calls, "throttled": throttled}
+
+
 def _safe_test(no, name, fn, *a, **kw):
-    """Run one of the 16 tests; if it explodes, grade it WARN and keep the rest alive.
+    """Run one of the 17 tests; if it explodes, grade it WARN and keep the rest alive.
 
     An auditor that dies on one odd file prints NOTHING about the other 14 - which is
     exactly the day you needed the report most.  Nothing is skipped silently: the
@@ -4692,7 +4843,7 @@ def main(argv=None):
     SUMMARY_ONE_LINER = ""           # never let a previous day's verdict survive into this one
     rule()
     _rc_note = _apply_run_config(day, args)   # BEFORE the header prints the gate
-    say(f" GOLD-BOOKMAP DAY AUDIT - {day:%Y-%m-%d} (Budapest) - 16 tests")
+    say(f" GOLD-BOOKMAP DAY AUDIT - {day:%Y-%m-%d} (Budapest) - 17 tests")
     # the header must state the frame the numbers really use - --from/--to used to
     # print the old 08:00-23:00 text while grading a different slice of the day
     if args.t_from or args.t_to:
@@ -4894,6 +5045,14 @@ def main(argv=None):
     # report16: the team's money path + the 12 acceptance points
     reports["cycle"], _cycle = _safe_test(16, "TEAM CYCLE & ACCEPTANCE",
                                           test_16_team_cycle, day, diary, text, decisions)
+    # report v2 (2026-10-15): the new organs + the AI cost truth (ledger O12/O11)
+    reports["organs"], _organs = _safe_test(17, "NEW ORGANS AND AI COST",
+                                            test_17_new_organs, day, diary, text, decisions)
+    METRICS["new_organs"] = {"voice_gain_records": (_organs or {}).get("voice_gain_records", 0),
+                             "a2_gate_runs": (_organs or {}).get("a2_gate_runs", 0),
+                             "a2_fires": (_organs or {}).get("a2_fires", 0),
+                             "missed_bells": (_organs or {}).get("missed_bells", 0),
+                             "real_ai_calls": (_organs or {}).get("real_ai_calls", 0)}
 
     # ---- machine-readable day record: the trend table reads these, never the text
     METRICS.update({
@@ -5116,7 +5275,7 @@ def main(argv=None):
                                            AI_RECORD, _PAGE_PARTS), encoding="utf-8")
             print(f"[saved] {_op}")
             print(f"        ^ THIS ONE HAS EVERYTHING: verdict, scoreboard, the AI's veto "
-                  f"record, all 16 tests, every decision, trades and judges. Open only this.")
+                  f"record, all 17 tests, every decision, trades and judges. Open only this.")
             to_open = _op
         except Exception as _e:
             print(f"[warn] one-page report not written: {type(_e).__name__}: {_e}")

@@ -31,24 +31,23 @@ fi
 
 echo
 echo "== 1. the files you installed tonight =================================="
-# audit_day.py is verified by its BUILD marker, not by size: sizes change every
-# time we fix something, and a stale constant here once called a good install bad.
-if [ -f audit_day.py ] && grep -q "BUILD = \"audit-2026-09-24j\"" audit_day.py; then
-  ok "audit_day.py is the build the kit shipped ($(stat -c %s audit_day.py) bytes, marker present)"
+# report v2 (2026-10-15): builds are verified by CAPABILITY markers, never by
+# size or old kit stamps - the September stamp was stale and its advice
+# ("re-copy from the kit") would have erased A1/A2/memory/voice. Never again.
+if [ -f audit_day.py ] && grep -q "def test_17_new_organs" audit_day.py; then
+  ok "audit_day.py carries the report-v2 organs test (test 17 present)"
 elif [ -f audit_day.py ]; then
-  no "audit_day.py has no kit build marker ($(stat -c %s audit_day.py) bytes) - re-copy it from the kit"
+  no "audit_day.py has no test_17_new_organs - report-v2 not installed (or an older build). Tell the assistant; do NOT copy old kits over live files"
 else
   no "audit_day.py missing from $(pwd)"
 fi
-# daily_check.sh and morning_check.sh check themselves by parsing, never by size -
-# a size constant inside a file it measures can never be right after an edit.
-for f in dashboard.py:1226 tools/dashboard.py:31843 judge_panel.py:15606 main.py:48991; do
-  n=${f%%:*}; want=${f##*:}
+# report v2 (2026-10-15): existence + the compile section below are the truth;
+# byte sizes from any old kit are not. No re-copy advice, ever again.
+for n in dashboard.py tools/dashboard.py judge_panel.py main.py; do
   if [ -f "$n" ]; then
-    sz=$(stat -c %s "$n")
-    [ "$sz" = "$want" ] && ok "$n ($sz bytes)" || no "$n is $sz bytes, expected $want - re-copy it from the kit"
+    info "$n present ($(stat -c %s "$n") bytes)"
   else
-    no "$n missing from $(pwd)"
+    info "$n not present (fine if this build never had it)"
   fi
 done
 for sh in morning_check.sh daily_check.sh; do
@@ -99,7 +98,7 @@ fi
 if [ -f tools/insight.py ] && $PY -m py_compile tools/insight.py >/dev/null 2>&1; then
   ok "tools/insight.py is here ($(stat -c %s tools/insight.py) bytes) - the four learning modes are live"
 else
-  no "tools/insight.py missing or broken - re-copy it from the kit (the 15-test day audit still runs; --explain, --weight-ab, --walk-forward and the two HTML pages stay quiet)"
+  no "tools/insight.py missing or broken - tell the assistant; NEVER copy an old kit over live files (the day audit still runs; --explain, --weight-ab, --walk-forward and the two HTML pages stay quiet)"
 fi
 $PY -c "import config, session, datetime as d; n=d.datetime.now(d.timezone.utc); raise SystemExit(0 if not session.is_market_open(n) else 1)" 2>/dev/null \
   && ok "session guard is live: is_market_open() says closed before 08:00 (no accidental trades)" \
