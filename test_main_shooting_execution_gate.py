@@ -5,19 +5,40 @@ from types import SimpleNamespace
 import main
 from main import _shooting_execution_gate
 
+# gates:v1 (2026-10-15 night) — updated for THE FRIDAY GATES:
+# the corridor is now OPEN in python execution mode (owner-ordered reviewed
+# change; the old "never execute" tests are inverted to pin the NEW policy),
+# the doorman is advisory when absent, and every veto that still protects
+# is kept exactly as it was.
 
-def snap(status="PLAN_ONLY", side="BUY", direction="UP"):
-    return SimpleNamespace(
+
+def snap(status="PLAN_ONLY", side="BUY", direction="UP",
+         reason_code=None, confidence=None):
+    s = SimpleNamespace(
         shot={"shot": "GO", "side": side, "entry_style": "PASSIVE_LIMIT",
               "execution_status": status},
         power={"direction": direction},
     )
+    if reason_code is not None:
+        s.power = {"direction": direction, "reason_code": reason_code}
+    if confidence is not None:
+        s.confidence = confidence
+    return s
 
 
-def test_analysis_only_shooting_plan_cannot_authorize_order():
+def test_go_plan_opens_the_corridor_in_python_mode(monkeypatch):
+    monkeypatch.setattr(main.config, "EXECUTION_MODE", "python")
     ok, reason = _shooting_execution_gate(SimpleNamespace(action="BUY"), snap())
+    assert ok
+    assert "corridor open" in reason
+
+
+def test_corridor_stays_closed_outside_python_mode(monkeypatch):
+    monkeypatch.setattr(main.config, "EXECUTION_MODE", "none")
+    ok, reason = _shooting_execution_gate(
+        SimpleNamespace(action="BUY"), snap(status="BROKER_READY"))
     assert not ok
-    assert "analysis-only" in reason
+    assert "corridor closed" in reason
 
 
 def test_power_and_shooting_must_agree_on_side():
@@ -34,11 +55,39 @@ def test_wrong_shooting_side_cannot_authorize_order():
     assert "Shooting did not approve" in reason
 
 
-def test_broker_ready_label_alone_cannot_enable_unimplemented_adapter():
+def test_doorman_advisory_when_power_dominant_and_panel_agrees(monkeypatch):
+    monkeypatch.setattr(main.config, "EXECUTION_MODE", "python")
+    monkeypatch.setattr(main.config, "AI_CONFIDENCE_THRESHOLD", 45.0)
+    d = SimpleNamespace(action="HOLD", confidence=0.0)
     ok, reason = _shooting_execution_gate(
-        SimpleNamespace(action="BUY"), snap(status="BROKER_READY"))
-    assert not ok
-    assert "no reviewed Step-4/EA adapter" in reason
+        d, snap(status="BROKER_READY", direction="UP",
+                reason_code="UPWARD_FORCE_DOMINATES", confidence=46.0))
+    assert ok
+    assert d.action == "BUY"
+    assert d.confidence == 46.0
+
+
+def test_doorman_advisory_denies_when_panel_confidence_below_gate(monkeypatch):
+    monkeypatch.setattr(main.config, "EXECUTION_MODE", "python")
+    monkeypatch.setattr(main.config, "AI_CONFIDENCE_THRESHOLD", 45.0)
+    d = SimpleNamespace(action="HOLD", confidence=0.0)
+    ok, reason = _shooting_execution_gate(
+        d, snap(status="BROKER_READY", direction="UP",
+                reason_code="UPWARD_FORCE_DOMINATES", confidence=30.0))
+    assert ok
+    assert "no new-entry action" in reason
+    assert d.action == "HOLD"
+
+
+def test_doorman_advisory_requires_dominant_force_reason(monkeypatch):
+    monkeypatch.setattr(main.config, "EXECUTION_MODE", "python")
+    monkeypatch.setattr(main.config, "AI_CONFIDENCE_THRESHOLD", 45.0)
+    d = SimpleNamespace(action="HOLD", confidence=0.0)
+    ok, reason = _shooting_execution_gate(
+        d, snap(status="BROKER_READY", direction="UP", confidence=60.0))
+    assert ok
+    assert "no new-entry action" in reason
+    assert d.action == "HOLD"
 
 
 def test_non_entry_action_does_not_need_new_entry_authorization():
@@ -52,14 +101,18 @@ def test_unknown_action_fails_closed():
     assert "unrecognized Step-3 action" in reason
 
 
-def test_actual_step4_handoff_cannot_execute_actionable_ai_decision(monkeypatch):
+def test_actual_step4_handoff_routes_to_the_python_executor(monkeypatch):
     class Result:
         def __init__(self, **kwargs):
             self.__dict__.update(kwargs)
 
+    captured = {}
+
     class Executor:
-        def execute(self, *_args):
-            raise AssertionError("Step 4 must not call the executor")
+        def execute(self, decision, snapshot):
+            captured["decision"] = decision
+            captured["snapshot"] = snapshot
+            return Result(status="EXECUTED", reason="stub executor ran")
 
     fake_step4 = types.ModuleType("step4_mt5_execution")
     fake_step4.ExecutionResult = Result
@@ -69,10 +122,10 @@ def test_actual_step4_handoff_cannot_execute_actionable_ai_decision(monkeypatch)
     monkeypatch.setattr(main.config, "EXECUTION_MODE", "python")
     monkeypatch.setattr(main, "_record", lambda *_args, **_kwargs: None)
 
-    result = main.run_step4(
-        SimpleNamespace(action="BUY"), snap(status="BROKER_READY"))
-    assert result.status == "SKIPPED"
-    assert "Shooting/POWER v2 veto" in result.reason
+    d = SimpleNamespace(action="BUY", confidence=55.0)
+    result = main.run_step4(d, snap(status="BROKER_READY"))
+    assert result.status == "EXECUTED"
+    assert captured["decision"] is d
 
 
 def test_actual_ea_bridge_handoff_neutralizes_ai_entry(monkeypatch):
