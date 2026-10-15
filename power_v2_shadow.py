@@ -55,6 +55,69 @@ def _bar_close_price(ticks: List[Dict[str, Any]], end: datetime) -> Optional[flo
     return best_price
 
 
+def _voice_gain_value() -> float:
+    """VOICE FIX (2026-10-15): the microphone calibration factor.
+
+    The four tick sensors measure volume-imbalance ratios, which in real gold
+    tape live at ~0.03-0.12 even during genuine moves (measured 2026-10-14
+    14:40: down_power 100%, net_force -1.0, activity 0.0624 -- a unanimous
+    referee muzzled by vote MAGNITUDE). POWER's gates expect >= 0.18 average
+    loudness. The gain rescales the sensors to their real operating range so
+    fish-sized force is audible. This calibrates the MICROPHONES; every gate
+    (min_activity, min_family_signal, min_agreeing_families, dominance) stays
+    exactly as it was. Default 3.0 = the smallest gain that makes the proven
+    monster bar audible (0.0624 x 3 = 0.187 >= 0.18).
+    """
+    import os
+    try:
+        g = float(os.environ.get("VOICE_GAIN", "3.0"))
+    except (TypeError, ValueError):
+        return 3.0
+    return g if g > 0 else 3.0
+
+
+def _apply_voice_gain(judges):
+    """VOICE FIX (2026-10-15): rescale tick-judge vote magnitudes.
+
+    Calibration, not verdicts: signs are preserved exactly (no direction is
+    invented or flipped), values clamp to [-1, 1], quality fields are
+    untouched, judges without a numeric value pass through unchanged.
+    Fail-closed: any problem returns the judges untouched (old behavior).
+    """
+    try:
+        import os
+        if not isinstance(judges, dict):
+            return judges
+        default_gain = _voice_gain_value()
+        out = {}
+        for name, reading in judges.items():
+            try:
+                if not isinstance(reading, dict):
+                    out[name] = reading
+                    continue
+                value = reading.get("value")
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    out[name] = reading
+                    continue
+                gain = default_gain
+                raw = os.environ.get("VOICE_GAIN_" + str(name).upper())
+                if raw:
+                    try:
+                        per = float(raw)
+                        if per > 0:
+                            gain = per
+                    except (TypeError, ValueError):
+                        pass
+                new = dict(reading)
+                new["value"] = max(-1.0, min(1.0, float(value) * gain))
+                out[name] = new
+            except Exception:
+                out[name] = reading
+        return out
+    except Exception:
+        return judges
+
+
 def run_power_v2(
     tick_data: List[Dict[str, Any]],
     *,
@@ -82,6 +145,9 @@ def run_power_v2(
     evaluation_end = bar_end - timedelta(microseconds=1)
     built = build_m5_inputs(
         tick_data or [], now=evaluation_end, tick_size=tick_size)
+    # VOICE FIX (2026-10-15): calibrate the tick judges' vote magnitudes so
+    # fish-sized force is audible to POWER's (unchanged) activity gate.
+    built["judges"] = _apply_voice_gain(built["judges"])
     context = dict(built["context"])
     context["market_regime"] = str(market_regime or "UNKNOWN").upper()
     context["breakout_confirmed"] = bool(breakout_confirmed)
@@ -90,6 +156,10 @@ def run_power_v2(
     # are defined and wired by the caller.
     context["high_impact_news"] = bool(high_impact_news)
     answer = decide(built["judges"], context=context)
+    try:
+        answer["voice_gain"] = _voice_gain_value()
+    except Exception:
+        pass
     availability = built.get("judge_availability") or {}
     excluded = answer.get("excluded_judges") or {}
     for judge_name, status in availability.items():
