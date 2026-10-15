@@ -498,15 +498,29 @@ def run_step2(data):
             "notes": _notes_for_diary(getattr(snapshot, "notes", []) or []),
         }
         _append_diary(record, hist_path)
-        # v5.0: rotate snapshots_history if >50MB to prevent big file crash
+        # opsfix:v1-start (2026-10-15) -- byte-capped rotation.
+        # The old rule kept the last 20k lines assuming ~1KB lines (~20MB, per
+        # its own comment). Diary lines are now ~9KB (voice/A2/memory stamps +
+        # notes), so 20k lines = ~187MB -- STILL over the 50MB trigger, so the
+        # file rotated EVERY minute (a ~187MB read+write inside STEP 2 every
+        # cycle; receipt 2026-10-15: 187,056,257 bytes on disk). New law: after
+        # the line cap, cap BY BYTES -- while the result is over 40MB, halve
+        # the kept lines (floor 2000). One bounded rotation; the per-day
+        # mirrors (diary_YYYYMMDD.jsonl) keep the full history for grading.
         try:
             if hist_path.stat().st_size > 50*1024*1024:
-                # Keep last 20k lines (~20MB)
-                lines = hist_path.read_text(encoding="utf-8").splitlines()[-20000:]
+                lines = hist_path.read_text(encoding="utf-8", errors="ignore").splitlines()[-20000:]
+                while len(lines) > 2000:
+                    _nbytes = sum(len(_l) + 1 for _l in lines)
+                    if _nbytes <= 40*1024*1024:
+                        break
+                    lines = lines[len(lines) // 2:]
                 hist_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-                logger.info(f"Rotated snapshots_history.jsonl >50MB -> kept last 20k")
+                logger.info(f"Rotated snapshots_history.jsonl >50MB -> kept {len(lines)} lines "
+                            f"(byte-capped, opsfix v1)")
         except:
             pass
+        # opsfix:v1-end
     except Exception as he:
         try:
             logger.debug(f"snapshot history save failed: {he}")
@@ -728,6 +742,34 @@ def run_signal_bridge(snapshot, decision) -> None:
         _record("MT5 SIGNAL BRIDGE", f"OK -> {path.name}")
     else:
         _record("MT5 SIGNAL BRIDGE", "SKIPPED (write failed)")
+
+    # opsfix:v1 (2026-10-15) -- FAST LANE visibility: the console was the last
+    # blind surface (no POWER voice/memory, no doorman cost or next wake;
+    # ledger O16). One compact read-only line per cycle. It reports state only;
+    # it changes nothing. Fail-closed: if anything is missing, the line says so
+    # and the cycle is untouched.
+    try:
+        import time as _fl_time
+        _pv = getattr(snapshot, "power_v2", None) or {}
+        _vg = _pv.get("voice_gain")
+        _vg_s = f"{_vg:g}" if isinstance(_vg, (int, float)) else "n/a"
+        _ms = _pv.get("memory_status") or {}
+        _ms_s = "appended" if _ms.get("appended") else str(_ms.get("reason") or "not")
+        _pd = str(_pv.get("direction") or "n/a")
+        _calls = _ai_calls_today()
+        if _LAST_AI_CALL:
+            _rest = (config.AI_MIN_INTERVAL_MINUTES * 60.0
+                     - (_fl_time.time() - _LAST_AI_CALL)) / 60.0
+            _dm_s = (f"resting {max(0.0, _rest):.0f} min" if _rest > 0
+                     else "ready")
+        else:
+            _dm_s = "not called yet today"
+        _record("FAST LANE (opsfix)",
+                f"POWER {_pd} voice_gain={_vg_s} memory={_ms_s} | "
+                f"doorman: {_calls} paid call(s) today, {_dm_s}")
+    except Exception as _fl_err:
+        _record("FAST LANE (opsfix)",
+                f"(status unavailable: {type(_fl_err).__name__})")
 
 
 _OUTCOME_LOG_FIELDS = ["timestamp", "order_id", "symbol", "side", "pnl",
