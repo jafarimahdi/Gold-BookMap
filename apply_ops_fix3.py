@@ -4,6 +4,15 @@ apply_ops_fix3.py -- OPS FIX v3: FULL VISIBILITY (the owner's complete order)
 ==============================================================================
 (2026-10-15 night. Owner: "I want ALL of these visible in each cycle, live.")
 
+v1.3 (2026-10-15 ~21:45): RIG ISOLATION FIX -- the v1.2 rig wrote its 3.0MB
+  test fixture into the REAL data/power_v2_memory/ day-file and never removed
+  it -> the live book died (MemoryIntegrityError, fail-closed; "memory=error"
+  every cycle; "book: today 3.0MB" was the garbage). The INSTALL sections are
+  UNCHANGED (v1.2 install = current; [skip] if already installed). The rig now
+  runs every fixture inside a TEMP working dir and adds check 13: a before/
+  after state-diff proving the real data/ was untouched. If the v1.2 rig ever
+  ran on a machine, run fix_memory_book.py there first (repairs the day-file).
+
 REQUIRES ops fix v1 AND v2 (apply_ops_fix.py + apply_ops_fix2.py) first.
 
 WHAT YOU GET - four new/extended lines EVERY cycle, all read-only:
@@ -14,8 +23,8 @@ WHAT YOU GET - four new/extended lines EVERY cycle, all read-only:
          still speaks through the SHOOTER note - it lives in plan_shot.
 
   ARMOR (opsfix3)     guard: 0 trades today/999 | risk: no halt | spread: 0.20
-                      pts (0.005%) | flatten in 2.4h | disk free 38GB | memory
-                      pages: 288 | MTF H1:UP M15:DOWN M5:DOWN | maintenance ran 2026-10-15
+                      pts (0.005%) | flatten in 2.4h | disk free 38GB | book:
+                      today 2.1MB | MTF H1:UP M15:DOWN M5:DOWN | maintenance ran 2026-10-15
       -> the guards' armor state (B5/B6/B7/B8) + the bookshelves (C9) + the
          silent servant (D10). The spread shown is the REAL book spread from
          bid/ask (the 0.000% display stays broken until the design session -
@@ -275,7 +284,7 @@ def install():
     src = main.read_text(encoding="utf-8", errors="surrogateescape")
     if "opsfix:v3-a2-start" in src:
         if "opsfix:v3-armor-datefix" in src and "opsfix:v3.2-enabled" in src:
-            print("[skip] main.py: ops fix v3 (v1.2) already present")
+            print("[skip] main.py: ops fix v3 (v1.2 install = current; this patcher is v1.3: isolated rig)")
             return 0
         # v1.0/v1.1 is installed but lacks the v1.2 line fixes -> auto-repair:
         # restore the .pre_opsfix3 backups (back to the v2 state), then
@@ -370,9 +379,29 @@ def install():
 
 def rig():
     print("=" * 78)
-    print("OPS FIX v3 RIG - proving the install with real checks")
+    print("OPS FIX v3 RIG (v1.3, isolated) - proving the install with real checks")
     print("=" * 78)
     results = []
+
+    def _watched_state():
+        """v1.3: the isolation witness -- names+sizes+mtimes of every real
+        file the rig's fixtures could touch. The rig must leave this snapshot
+        byte-identical (check 13). Run --rig with the robot STOPPED."""
+        watched = {}
+        mem_dir = ROOT / "data" / "power_v2_memory"
+        if mem_dir.is_dir():
+            for p in sorted(mem_dir.glob("power_*.jsonl")):
+                st = p.stat()
+                watched[str(p.relative_to(ROOT))] = (st.st_size, st.st_mtime_ns)
+        for name in ("trade_guard_state.json", "risk_state.json",
+                     "maintenance_state.json"):
+            p = ROOT / "data" / name
+            if p.is_file():
+                st = p.stat()
+                watched[str(p.relative_to(ROOT))] = (st.st_size, st.st_mtime_ns)
+        return watched
+
+    _pre_state = _watched_state()
 
     def check(name, cond):
         results.append((name, bool(cond)))
@@ -397,6 +426,8 @@ def rig():
     check("py_compile shooting_team.py", py_ok(sh))
 
     # behavioral: run the REAL A2+armor blocks with stubs
+    _real_cwd = None      # v1.3: set once the temp dir exists; the finally is
+    _tmpdir = None        # safe even if the try fails before that
     try:
         import types, textwrap, datetime, logging
         block = ms.split("opsfix:v3-a2-start", 1)[1].split("opsfix:v3-armor-end", 1)[0]
@@ -417,11 +448,27 @@ def rig():
         eyes_mod.a2_fire_count = lambda n: 2
         sys.modules["aggressive_trigger"] = eyes_mod
 
-        import os as _rig_os
+        import os as _rig_os, tempfile as _rig_tf
         _rig_os.environ["AGGRESSIVE_ENTRY_ENABLED"] = "1"      # the REAL source (.env loads here)
-        (_v3_dir := ROOT / "data" / "power_v2_memory").mkdir(parents=True, exist_ok=True)
+        # opsfix:v1.3-rig-isolation: v1.2 wrote this fixture into the REAL
+        # data/power_v2_memory/ day-file and never removed it -> the live book
+        # died with MemoryIntegrityError (fail-closed) until fix_memory_book.py
+        # repaired it. LAW: a rig owns NOTHING outside its process. Fixtures
+        # live in a TEMP working dir; the real data/ is diffed before/after
+        # (check 13, "isolation").
+        _real_cwd = _rig_os.getcwd()
+        _tmpdir = _rig_tf.mkdtemp(prefix="opsfix3_rig_")
         _today_name = "power_" + datetime.datetime.now(datetime.timezone.utc).date().isoformat() + ".jsonl"
-        (_v3_dir / _today_name).write_bytes(b"x" * (3 * 1048576))   # a 3.0MB day-file
+        (Path(_tmpdir) / "data" / "power_v2_memory").mkdir(parents=True, exist_ok=True)
+        (Path(_tmpdir) / "data" / "power_v2_memory" / _today_name).write_bytes(
+            b"x" * (3 * 1048576))                                   # 3.0MB, ISOLATED
+        for _st_name in ("trade_guard_state.json", "risk_state.json",
+                         "maintenance_state.json"):
+            _st_src = ROOT / "data" / _st_name      # copies of the real state, so
+            if _st_src.is_file():                   # the armor line carries the
+                shutil.copy2(_st_src,               # same values, read in isolation
+                             Path(_tmpdir) / "data" / _st_name)
+        _rig_os.chdir(_tmpdir)
         snap = types.SimpleNamespace(bid=4172.50, ask=4172.70, mtf_trends={"M5": "DOWN", "H1": "UP"})
         cfg = types.SimpleNamespace(A2_BURST_MAX_PER_DAY=10, AGGRESSIVE_ENTRY_ENABLED=1,
                                      MAX_TRADES_PER_DAY=999, A2_BURST_COOLDOWN_MINUTES=5)
@@ -461,9 +508,27 @@ def rig():
     except Exception as e:
         check(f"behavioral tests (error: {type(e).__name__}: {e})", False)
     finally:
-        sys.modules.pop("aggressive_trigger", None)
         import os as _rig_os2
+        if _real_cwd:
+            try:
+                _rig_os2.chdir(_real_cwd)
+            except Exception:
+                pass
+        if _tmpdir:
+            shutil.rmtree(_tmpdir, ignore_errors=True)
+        sys.modules.pop("aggressive_trigger", None)
         _rig_os2.environ.pop("AGGRESSIVE_ENTRY_ENABLED", None)
+
+    # opsfix:v1.3 check 13: the isolation proof -- the rig must leave the
+    # real data/ byte-identical. This is the check that would have caught
+    # the v1.2 rig destroying the live book's day-file.
+    _post_state = _watched_state()
+    _iso_ok = _pre_state == _post_state
+    check(f"isolation: real data/ untouched by the rig ({len(_pre_state)} watched file(s))",
+          _iso_ok)
+    if not _iso_ok:
+        print("       NOTE: watched data/ files changed DURING the rig. The rig itself")
+        print("       writes nothing real -- was the robot running? Stop it and re-run.")
 
     print("-" * 78)
     npass = sum(1 for _, c in results if c)
