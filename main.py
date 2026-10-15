@@ -632,9 +632,12 @@ def run_step3(snapshot):
     _LAST_AI_CALL = now
     _record_ai_call()
     decision = AIDecisionEngine().decide(snapshot)
+    _rat_txt = str(getattr(decision, "rationale", "") or "")[-110:]
+    if " " in _rat_txt:
+        _rat_txt = _rat_txt[_rat_txt.find(" ") + 1:]      # opsfix:v3.2: no mid-word cuts
     _record("STEP 3  AI DECISION",
             f"{decision.action} @ {decision.confidence:.1f}%"
-            + (f" | {str(decision.rationale)[-90:]}" if getattr(decision, "rationale", "") else ""))
+            + (f" | {_rat_txt}" if _rat_txt.strip() else ""))
     return decision
 
 
@@ -802,8 +805,20 @@ def run_signal_bridge(snapshot, decision) -> None:
         from aggressive_trigger import EYES as _v3_eyes, a2_fire_count as _v3_fires
         _v3_now = _v3_dt.datetime.now(_v3_dt.timezone.utc)
         _v3_max = int(getattr(config, "A2_BURST_MAX_PER_DAY", 10) or 10)
-        _v3_en = getattr(config, "AGGRESSIVE_ENTRY_ENABLED", 0)
-        _v3_enabled = bool(_v3_en is True or str(_v3_en) == "1")
+        # opsfix:v3.2-enabled: mirror the REAL gate (_enabled in aggressive_trigger):
+        # os.environ FIRST (.env loads there via load_dotenv), then the config
+        # attr (which config.py does not define for this key), same acceptance
+        # set ("1", "1.0", "true"...). v1.1 read only the config attr and
+        # wrongly showed enabled=False while the lane was ON.
+        _v3_raw = None
+        try:
+            import os as _v3_os
+            _v3_raw = _v3_os.environ.get("AGGRESSIVE_ENTRY_ENABLED")
+        except Exception:
+            pass
+        if _v3_raw is None:
+            _v3_raw = getattr(config, "AGGRESSIVE_ENTRY_ENABLED", 0)
+        _v3_enabled = str(_v3_raw).strip() in ("1", "1.0", "true", "True", "TRUE")
         _v3_lean = None
         try:
             _v3_lean = _v3_eyes.lean(_v3_now)
@@ -899,11 +914,15 @@ def run_signal_bridge(snapshot, decision) -> None:
             _v3_disk_s = f"disk free {_v3_free:.0f}GB"
         except Exception:
             _v3_disk_s = "disk n/a"
-        _v3_mem_s = "memory: n/a"
+        # opsfix:v3.2-book: the book writes ONE file per DAY (power_YYYY-MM-DD
+        # .jsonl); the pages are LINES inside it. v1.1 counted files ("pages: 1").
+        # Report today's file size - O(1), no re-read of a growing file.
+        _v3_mem_s = "book: none yet"
         try:
-            _v3_mp = _v3_dd / "power_v2_memory"
-            if _v3_mp.exists():
-                _v3_mem_s = f"memory pages: {len(list(_v3_mp.glob('*.json*')))}"
+            _v3_mf = (_v3_dd / "power_v2_memory"
+                      / f"power_{_v3_now.date().isoformat()}.jsonl")
+            if _v3_mf.exists():
+                _v3_mem_s = f"book: today {_v3_mf.stat().st_size / 1048576:.1f}MB"
         except Exception:
             pass
         _v3_mtf = " ".join(f"{_k}:{_v}" for _k, _v in

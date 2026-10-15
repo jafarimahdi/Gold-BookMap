@@ -66,8 +66,20 @@ V3_BLOCK = JUDGES_TAIL + '''
         from aggressive_trigger import EYES as _v3_eyes, a2_fire_count as _v3_fires
         _v3_now = _v3_dt.datetime.now(_v3_dt.timezone.utc)
         _v3_max = int(getattr(config, "A2_BURST_MAX_PER_DAY", 10) or 10)
-        _v3_en = getattr(config, "AGGRESSIVE_ENTRY_ENABLED", 0)
-        _v3_enabled = bool(_v3_en is True or str(_v3_en) == "1")
+        # opsfix:v3.2-enabled: mirror the REAL gate (_enabled in aggressive_trigger):
+        # os.environ FIRST (.env loads there via load_dotenv), then the config
+        # attr (which config.py does not define for this key), same acceptance
+        # set ("1", "1.0", "true"...). v1.1 read only the config attr and
+        # wrongly showed enabled=False while the lane was ON.
+        _v3_raw = None
+        try:
+            import os as _v3_os
+            _v3_raw = _v3_os.environ.get("AGGRESSIVE_ENTRY_ENABLED")
+        except Exception:
+            pass
+        if _v3_raw is None:
+            _v3_raw = getattr(config, "AGGRESSIVE_ENTRY_ENABLED", 0)
+        _v3_enabled = str(_v3_raw).strip() in ("1", "1.0", "true", "True", "TRUE")
         _v3_lean = None
         try:
             _v3_lean = _v3_eyes.lean(_v3_now)
@@ -163,11 +175,15 @@ V3_BLOCK = JUDGES_TAIL + '''
             _v3_disk_s = f"disk free {_v3_free:.0f}GB"
         except Exception:
             _v3_disk_s = "disk n/a"
-        _v3_mem_s = "memory: n/a"
+        # opsfix:v3.2-book: the book writes ONE file per DAY (power_YYYY-MM-DD
+        # .jsonl); the pages are LINES inside it. v1.1 counted files ("pages: 1").
+        # Report today's file size - O(1), no re-read of a growing file.
+        _v3_mem_s = "book: none yet"
         try:
-            _v3_mp = _v3_dd / "power_v2_memory"
-            if _v3_mp.exists():
-                _v3_mem_s = f"memory pages: {len(list(_v3_mp.glob('*.json*')))}"
+            _v3_mf = (_v3_dd / "power_v2_memory"
+                      / f"power_{_v3_now.date().isoformat()}.jsonl")
+            if _v3_mf.exists():
+                _v3_mem_s = f"book: today {_v3_mf.stat().st_size / 1048576:.1f}MB"
         except Exception:
             pass
         _v3_mtf = " ".join(f"{_k}:{_v}" for _k, _v in
@@ -190,9 +206,12 @@ V3_BLOCK = JUDGES_TAIL + '''
 
 # ==================================== main.py edit 2: the doorman's tail (A6) =
 S3_OLD = '''    _record("STEP 3  AI DECISION", f"{decision.action} @ {decision.confidence:.1f}%")'''
-S3_NEW = '''    _record("STEP 3  AI DECISION",
+S3_NEW = '''    _rat_txt = str(getattr(decision, "rationale", "") or "")[-110:]
+    if " " in _rat_txt:
+        _rat_txt = _rat_txt[_rat_txt.find(" ") + 1:]      # opsfix:v3.2: no mid-word cuts
+    _record("STEP 3  AI DECISION",
             f"{decision.action} @ {decision.confidence:.1f}%"
-            + (f" | {str(decision.rationale)[-90:]}" if getattr(decision, "rationale", "") else ""))'''
+            + (f" | {_rat_txt}" if _rat_txt.strip() else ""))'''
 
 # ============================================== step2 edit 1: the brake (A2) ==
 BRAKE_OLD = '''        if news.news_state == "WARNING":
@@ -255,13 +274,13 @@ def install():
     main = ROOT / "main.py"
     src = main.read_text(encoding="utf-8", errors="surrogateescape")
     if "opsfix:v3-a2-start" in src:
-        if "opsfix:v3-armor-datefix" in src:
-            print("[skip] main.py: ops fix v3 (v1.1) already present")
+        if "opsfix:v3-armor-datefix" in src and "opsfix:v3.2-enabled" in src:
+            print("[skip] main.py: ops fix v3 (v1.2) already present")
             return 0
-        # v1.0 is installed but lacks the armor datefix -> auto-repair:
+        # v1.0/v1.1 is installed but lacks the v1.2 line fixes -> auto-repair:
         # restore the .pre_opsfix3 backups (back to the v2 state), then
         # install fresh. One command, no manual rollback needed.
-        print("[repair] v1.0 found without the armor datefix -> restoring backups, re-applying...")
+        print("[repair] older ops-v3 found (pre-v1.2) -> restoring backups, re-applying...")
         for _rel in ("main.py", "step2_market_analysis.py", "shooting_team.py"):
             _p = ROOT / _rel
             _b = Path(str(_p) + SUFFIX)
@@ -398,6 +417,11 @@ def rig():
         eyes_mod.a2_fire_count = lambda n: 2
         sys.modules["aggressive_trigger"] = eyes_mod
 
+        import os as _rig_os
+        _rig_os.environ["AGGRESSIVE_ENTRY_ENABLED"] = "1"      # the REAL source (.env loads here)
+        (_v3_dir := ROOT / "data" / "power_v2_memory").mkdir(parents=True, exist_ok=True)
+        _today_name = "power_" + datetime.datetime.now(datetime.timezone.utc).date().isoformat() + ".jsonl"
+        (_v3_dir / _today_name).write_bytes(b"x" * (3 * 1048576))   # a 3.0MB day-file
         snap = types.SimpleNamespace(bid=4172.50, ask=4172.70, mtf_trends={"M5": "DOWN", "H1": "UP"})
         cfg = types.SimpleNamespace(A2_BURST_MAX_PER_DAY=10, AGGRESSIVE_ENTRY_ENABLED=1,
                                      MAX_TRADES_PER_DAY=999, A2_BURST_COOLDOWN_MINUTES=5)
@@ -424,7 +448,8 @@ def rig():
               and "risk: no halt" in armor_line
               and "spread: 0.20 pts (0.005%)" in armor_line
               and "MTF H1:UP M5:DOWN" in armor_line
-              and "flatten in" in armor_line)
+              and "flatten in" in armor_line
+              and "book: today 3.0MB" in armor_line)
         # fail-closed: broken snapshot must not raise
         recorded2 = []
         ns2 = {"snapshot": types.SimpleNamespace(bid=None, ask=None, mtf_trends=None),
@@ -437,6 +462,8 @@ def rig():
         check(f"behavioral tests (error: {type(e).__name__}: {e})", False)
     finally:
         sys.modules.pop("aggressive_trigger", None)
+        import os as _rig_os2
+        _rig_os2.environ.pop("AGGRESSIVE_ENTRY_ENABLED", None)
 
     print("-" * 78)
     npass = sum(1 for _, c in results if c)
