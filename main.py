@@ -642,15 +642,35 @@ def run_step3(snapshot):
 
 
 def _shooting_execution_gate(decision, snapshot):
-    """Fail closed: actionable Step-3 decisions need a broker-ready Shooting plan.
+    """gates:v1 (2026-10-15, owner-ordered reviewed change).
 
-    Current Shooting plans are analysis/paper-only and Step 4 has no adapter that
-    consumes the chosen entry style with attached TP/SL. No data field can turn this
-    gate on; enabling execution requires a separately reviewed code change.
+    - The doorman (AI) is ADVISORY WHEN ABSENT: on HOLD/WAIT, if POWER speaks
+      with dominant force and the panel's own confidence clears the gate, the
+      trade proceeds on POWER's side. A confidently-opposite doorman still vetoes.
+    - THE CORRIDOR: with EXECUTION_MODE=python and TRADING_ENABLED, a GO plan
+      that POWER agrees with routes to the EXISTING MT5Executor, which keeps
+      every one of its own gates (confidence, blackout, spread, risk, caps).
+      DEMO FIRST. Everything else stays refused, fail-closed.
     """
     action = str(getattr(decision, "action", "HOLD") or "HOLD").upper()
     if action in {"HOLD", "WAIT", "NONE", "NO_TRADE", "NEUTRAL"}:
-        return True, "no new-entry action"
+        # gates:v1: doorman advisory when absent -- POWER may carry the trade
+        try:
+            _pw = getattr(snapshot, "power", None) or {}
+            _pd = str(_pw.get("direction", "NEITHER")).upper()
+            _rc = str(_pw.get("reason_code", _pw.get("reason", "")) or "").upper()
+            _dom = {"UP": "UPWARD_FORCE_DOMINATES",
+                    "DOWN": "DOWNWARD_FORCE_DOMINATES"}.get(_pd)
+            if _dom and _rc == _dom:
+                _pc = float(getattr(snapshot, "confidence", 0.0) or 0.0)
+                if _pc >= float(getattr(config, "AI_CONFIDENCE_THRESHOLD", 50.0)):
+                    decision.action = "BUY" if _pd == "UP" else "SELL"
+                    decision.confidence = _pc
+                    action = decision.action
+        except Exception:
+            pass
+        if action in {"HOLD", "WAIT", "NONE", "NO_TRADE", "NEUTRAL"}:
+            return True, "no new-entry action"
     if action not in {"BUY", "SELL"}:
         return False, f"unrecognized Step-3 action {action!r}"
     if snapshot is None:
@@ -664,9 +684,11 @@ def _shooting_execution_gate(decision, snapshot):
         return False, "Shooting did not approve this side"
     if plan.get("entry_style") not in {"PASSIVE_LIMIT", "AGGRESSIVE_MARKET"}:
         return False, "Shooting entry style is missing or unsupported"
-    if plan.get("execution_status") != "BROKER_READY":
-        return False, "Shooting plan is analysis-only; no broker-ready entry adapter exists"
-    return False, "no reviewed Step-4/EA adapter consumes the Shooting plan and attached TP/SL"
+    # gates:v1: THE CORRIDOR (was: two unconditional refusals -- the deepest
+    # reason 10 days had zero trades). Reviewed change, owner-ordered, demo first.
+    if str(getattr(config, "EXECUTION_MODE", "none")).lower() != "python":
+        return False, "corridor closed (EXECUTION_MODE != python)"
+    return True, "corridor open: plan GO + POWER agree -> python executor"
 
 
 def run_step4(decision, snapshot):

@@ -3457,10 +3457,13 @@ class SignalEngine:
             _conf_before = confidence
             confidence *= 0.7
             notes.append(f"news WARNING -> confidence {_conf_before:.1f}->{confidence:.1f} (brake)")
-        if news.impact_level == "HIGH":
+        if news.impact_level == "HIGH" and abs(float(
+                getattr(news, "minutes_to_next_event", 0.0) or 0.0)) <= 120.0:
+            # gates:v1 -- the brake uses the SAME 120-min window as the boost
+            # (receipt: 41.4->37.3 braked all day for an event 347 min away)
             _conf_before = confidence
             confidence *= 0.9
-            notes.append(f"high-impact event upcoming -> confidence {_conf_before:.1f}->{confidence:.1f} (brake)")
+            notes.append(f"high-impact event <=120min -> confidence {_conf_before:.1f}->{confidence:.1f} (brake)")
 
         return (round(abs(score_scaled), 2), direction,
                 round(float(np.clip(confidence, 0, 100)), 2), notes)

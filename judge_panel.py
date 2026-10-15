@@ -91,6 +91,11 @@ def parse_judge_panel(notes: List[str]) -> List[Dict[str, Any]]:
             m = _re.search(pat, note)
             if not m:
                 continue
+            if judge == "whale_walls":
+                # gates:v1 -- C1 clock matured (6 days, 4183 calls, -1.012
+                # pts/call); owner-ordered cut 2026-10-15. The L3-whale note
+                # still prints in the signal map; it just no longer votes.
+                continue
             d, w = 0.0, 0.0
             g = m.groups()
             for token in g:
