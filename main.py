@@ -632,7 +632,9 @@ def run_step3(snapshot):
     _LAST_AI_CALL = now
     _record_ai_call()
     decision = AIDecisionEngine().decide(snapshot)
-    _record("STEP 3  AI DECISION", f"{decision.action} @ {decision.confidence:.1f}%")
+    _record("STEP 3  AI DECISION",
+            f"{decision.action} @ {decision.confidence:.1f}%"
+            + (f" | {str(decision.rationale)[-90:]}" if getattr(decision, "rationale", "") else ""))
     return decision
 
 
@@ -794,6 +796,133 @@ def run_signal_bridge(snapshot, decision) -> None:
     except Exception as _j_err:
         _record("JUDGES (opsfix2)", f"(status unavailable: {type(_j_err).__name__})")
     # opsfix:v2-judges-end
+    # opsfix:v3-a2-start -- the fast lane's eyes, live (audit A1)
+    try:
+        import datetime as _v3_dt
+        from aggressive_trigger import EYES as _v3_eyes, a2_fire_count as _v3_fires
+        _v3_now = _v3_dt.datetime.now(_v3_dt.timezone.utc)
+        _v3_max = int(getattr(config, "A2_BURST_MAX_PER_DAY", 10) or 10)
+        _v3_en = getattr(config, "AGGRESSIVE_ENTRY_ENABLED", 0)
+        _v3_enabled = bool(_v3_en is True or str(_v3_en) == "1")
+        _v3_lean = None
+        try:
+            _v3_lean = _v3_eyes.lean(_v3_now)
+        except Exception:
+            _v3_lean = None
+        if isinstance(_v3_lean, dict):
+            _v3_ls = _v3_lean.get("strength", _v3_lean.get("value",
+                        _v3_lean.get("ema3", 0.0)))
+            try:
+                _v3_lean_s = f"{_v3_lean.get('direction')} {float(_v3_ls):+.2f}"
+            except Exception:
+                _v3_lean_s = str(_v3_lean.get("direction"))
+        else:
+            _v3_lean_s = "none"
+        _v3_panel_s = "none"
+        try:
+            if _v3_eyes.panel:
+                _v3_t, _v3_d = _v3_eyes.panel[-1]
+                _v3_panel_s = f"{_v3_d} ({(_v3_now - _v3_t).total_seconds():.0f}s ago)"
+        except Exception:
+            pass
+        _v3_cool_s = "ready"
+        try:
+            if _v3_eyes.last_fire:
+                _v3_cm = float(getattr(config, "A2_BURST_COOLDOWN_MINUTES", 5) or 5)
+                _v3_age = (_v3_now - _v3_eyes.last_fire).total_seconds() / 60.0
+                _v3_cool_s = (f"cooldown {max(0.0, _v3_cm - _v3_age):.0f} min"
+                              if _v3_age < _v3_cm else "ready")
+        except Exception:
+            pass
+        _record("A2 LANE (opsfix3)",
+                f"enabled={_v3_enabled} fires {_v3_fires(_v3_now)}/{_v3_max} today | "
+                f"eye1 lean: {_v3_lean_s} | eye2 panel: {_v3_panel_s} | {_v3_cool_s}")
+    except Exception as _v3_err:
+        _record("A2 LANE (opsfix3)", f"(status unavailable: {type(_v3_err).__name__})")
+    # opsfix:v3-a2-end
+    # opsfix:v3-armor-start -- the guards' armor + the bookshelves (B5-B8/C9/D10)
+    try:
+        import datetime as _v3_dt, json as _v3_json, shutil as _v3_shutil
+        _v3_now = _v3_dt.datetime.now(_v3_dt.timezone.utc)
+        _v3_dd = Path("data")
+        _v3_tg = {}
+        try:
+            _v3_tg = _v3_json.loads((_v3_dd / "trade_guard_state.json")
+                                    .read_text(encoding="utf-8"))
+        except Exception:
+            pass
+        # opsfix:v3-armor-datefix: the state file keeps OLD days too - only
+        # count trades when the file's date is TODAY (local), exactly like
+        # trade_guard._today_state does; else a stale count shows as "today".
+        _v3_trades = 0
+        try:
+            if _v3_tg.get("date") == _v3_dt.datetime.now().astimezone().date().isoformat():
+                _v3_trades = int(_v3_tg.get("trades_today", 0) or 0)
+        except Exception:
+            pass
+        _v3_cap = int(getattr(config, "MAX_TRADES_PER_DAY", 0) or 0)
+        _v3_guard_s = f"guard: {_v3_trades} trades today"
+        if _v3_cap:
+            _v3_guard_s += f"/{_v3_cap}"
+        _v3_risk_s = "risk: no halt"
+        try:
+            _v3_rs = _v3_json.loads((_v3_dd / "risk_state.json")
+                                    .read_text(encoding="utf-8"))
+            if _v3_rs.get("halt_until"):
+                _v3_hu = None
+                try:
+                    _v3_hu = _v3_dt.datetime.fromisoformat(str(_v3_rs["halt_until"]))
+                    if _v3_hu.tzinfo is None:
+                        _v3_hu = _v3_hu.replace(tzinfo=_v3_dt.timezone.utc)
+                except Exception:
+                    _v3_hu = None
+                # an EXPIRED halt reads as "no halt" (same as risk_manager.check);
+                # an unparseable one still shows, so it is never hidden
+                if _v3_hu is None or _v3_hu > _v3_now:
+                    _v3_risk_s = (f"risk: HALT until {_v3_rs.get('halt_until')} "
+                                  f"({_v3_rs.get('reason', '')})")
+        except Exception:
+            pass
+        _v3_bid = float(getattr(snapshot, "bid", 0) or 0)
+        _v3_ask = float(getattr(snapshot, "ask", 0) or 0)
+        if _v3_ask > _v3_bid > 0:
+            _v3_pts = _v3_ask - _v3_bid
+            _v3_spread_s = f"spread: {_v3_pts:.2f} pts ({100.0 * _v3_pts / _v3_bid:.3f}%)"
+        else:
+            _v3_spread_s = "spread: n/a"
+        _v3_flat = _v3_now.replace(hour=21, minute=30, second=0, microsecond=0)
+        if _v3_flat < _v3_now:
+            _v3_flat = _v3_flat + _v3_dt.timedelta(days=1)
+        _v3_flat_s = f"flatten in {(_v3_flat - _v3_now).total_seconds() / 3600.0:.1f}h"
+        try:
+            _v3_free = _v3_shutil.disk_usage(".").free / (1024 ** 3)
+            _v3_disk_s = f"disk free {_v3_free:.0f}GB"
+        except Exception:
+            _v3_disk_s = "disk n/a"
+        _v3_mem_s = "memory: n/a"
+        try:
+            _v3_mp = _v3_dd / "power_v2_memory"
+            if _v3_mp.exists():
+                _v3_mem_s = f"memory pages: {len(list(_v3_mp.glob('*.json*')))}"
+        except Exception:
+            pass
+        _v3_mtf = " ".join(f"{_k}:{_v}" for _k, _v in
+                           sorted((getattr(snapshot, "mtf_trends", None) or {}).items())
+                           ) or "n/a"
+        _v3_maint_s = "maintenance: never/state n/a"
+        try:
+            _v3_ms = _v3_json.loads((_v3_dd / "maintenance_state.json")
+                                    .read_text(encoding="utf-8"))
+            _v3_ran = _v3_ms.get("last_run", _v3_ms.get("date", "?"))
+            _v3_maint_s = f"maintenance ran {_v3_ran}"
+        except Exception:
+            pass
+        _record("ARMOR (opsfix3)",
+                f"{_v3_guard_s} | {_v3_risk_s} | {_v3_spread_s} | {_v3_flat_s} | "
+                f"{_v3_disk_s} | {_v3_mem_s} | MTF {_v3_mtf} | {_v3_maint_s}")
+    except Exception as _v3_err:
+        _record("ARMOR (opsfix3)", f"(status unavailable: {type(_v3_err).__name__})")
+    # opsfix:v3-armor-end
 
 
 _OUTCOME_LOG_FIELDS = ["timestamp", "order_id", "symbol", "side", "pnl",

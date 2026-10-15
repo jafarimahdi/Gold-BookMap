@@ -3454,11 +3454,13 @@ class SignalEngine:
 
         # news-time modifiers
         if news.news_state == "WARNING":
+            _conf_before = confidence
             confidence *= 0.7
-            notes.append("news WARNING -> confidence reduced")
+            notes.append(f"news WARNING -> confidence {_conf_before:.1f}->{confidence:.1f} (brake)")
         if news.impact_level == "HIGH":
+            _conf_before = confidence
             confidence *= 0.9
-            notes.append("high-impact event upcoming -> confidence reduced")
+            notes.append(f"high-impact event upcoming -> confidence {_conf_before:.1f}->{confidence:.1f} (brake)")
 
         return (round(abs(score_scaled), 2), direction,
                 round(float(np.clip(confidence, 0, 100)), 2), notes)
@@ -4560,11 +4562,21 @@ def analyze_market(market_data: Dict[str, Any],
         for _name, _why in _excluded.items()
     ) or "none"
     _gate_status = lambda _gate: "PASS" if _gate.get("pass", False) else "FAIL"
+    # opsfix:v3-fam -- top-3 POWER family scores by magnitude (audit A4)
+    try:
+        _fam_txt = ", ".join(
+            f"{_fk} {_fv.get('score', 0.0):+.2f}"
+            for _fk, _fv in sorted((_power.get("family_scores") or {}).items(),
+                                   key=lambda _kv: -abs(float((_kv[1] or {}).get("score", 0.0) or 0.0)))[:3]
+        ) or "n/a"
+    except Exception:
+        _fam_txt = "n/a"
     notes.append(
         "POWER M5 | "
         f"decision={_power.get('direction', 'NEITHER')} "
         f"force={_power.get('up_power_pct', 50.0):.1f}/{_power.get('down_power_pct', 50.0):.1f} "
         f"activity={_power.get('activity', 0.0):.3f} coverage={_power.get('coverage', 0.0):.2f} | "
+        f"fam: {_fam_txt} | "
         f"regime={_rg_diag.get('market_regime', 'UNKNOWN')} "
         f"regime_gate={'PASS' if _regime_gate_pass else 'FAIL'} "
         f"safety_gate={'PASS' if _safety_gate_pass else 'FAIL'} "

@@ -236,7 +236,10 @@ def plan_shot(signal_map: Dict[str, Any], power: Dict[str, Any],
     road_ratio = road_lots / target_size if target_size > 0 else math.inf
     road_limit = _cfg(config, "SHOOT_ROAD_RATIO", 6.0)
     if road_ratio >= road_limit:
-        return _wait(f"route is too crowded ({road_ratio:.1f}x target size; limit {road_limit:.1f}x)", p,
+        # opsfix:v3 -- show the components behind the ratio (audit A3)
+        return _wait(f"route is too crowded ({road_ratio:.1f}x target size; "
+                     f"road {road_lots:.0f} lots over {road_count} door(s) vs "
+                     f"target {target_size:.1f} lots; limit {road_limit:.1f}x)", p,
                      {"door": dict(target_door), "road_ratio": road_ratio})
 
     is_buy = direction == "UP"
