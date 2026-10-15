@@ -743,18 +743,22 @@ def run_signal_bridge(snapshot, decision) -> None:
     else:
         _record("MT5 SIGNAL BRIDGE", "SKIPPED (write failed)")
 
-    # opsfix:v1 (2026-10-15) -- FAST LANE visibility: the console was the last
-    # blind surface (no POWER voice/memory, no doorman cost or next wake;
-    # ledger O16). One compact read-only line per cycle. It reports state only;
-    # it changes nothing. Fail-closed: if anything is missing, the line says so
-    # and the cycle is untouched.
+    # opsfix:v2 (2026-10-15) -- FAST LANE visibility (v2 wording) + THE JUDGES
+    # LINE (owner's order: see the judges work each cycle). Read-only, fail-
+    # closed, changes nothing. v2 fixes: no "memory=memory ..." duplication;
+    # clear doorman wording right after a restart; NEW JUDGES summary line.
     try:
         import time as _fl_time
         _pv = getattr(snapshot, "power_v2", None) or {}
         _vg = _pv.get("voice_gain")
         _vg_s = f"{_vg:g}" if isinstance(_vg, (int, float)) else "n/a"
         _ms = _pv.get("memory_status") or {}
-        _ms_s = "appended" if _ms.get("appended") else str(_ms.get("reason") or "not")
+        if _ms.get("appended"):
+            _ms_s = "appended"
+        elif _ms.get("error"):
+            _ms_s = f"error {_ms.get('error')}"
+        else:
+            _ms_s = str(_ms.get("reason") or "off").replace("memory ", "", 1)
         _pd = str(_pv.get("direction") or "n/a")
         _calls = _ai_calls_today()
         if _LAST_AI_CALL:
@@ -762,14 +766,34 @@ def run_signal_bridge(snapshot, decision) -> None:
                      - (_fl_time.time() - _LAST_AI_CALL)) / 60.0
             _dm_s = (f"resting {max(0.0, _rest):.0f} min" if _rest > 0
                      else "ready")
+            _doorman = f"{_calls} paid call(s) today, {_dm_s}"
         else:
-            _dm_s = "not called yet today"
+            _doorman = f"{_calls} in file today; this process has not called yet"
         _record("FAST LANE (opsfix)",
                 f"POWER {_pd} voice_gain={_vg_s} memory={_ms_s} | "
-                f"doorman: {_calls} paid call(s) today, {_dm_s}")
+                f"doorman: {_doorman}")
     except Exception as _fl_err:
         _record("FAST LANE (opsfix)",
                 f"(status unavailable: {type(_fl_err).__name__})")
+    # opsfix:v2-judges-start -- the judges, one line per cycle
+    # (panel votes: {judge, dir +1 BUY / -1 SELL / 0 flat, weight})
+    try:
+        _jv = list(getattr(snapshot, "judge_votes", None) or [])
+        _jb = [v for v in _jv if isinstance(v, dict) and float(v.get("dir") or 0) > 0]
+        _js = [v for v in _jv if isinstance(v, dict) and float(v.get("dir") or 0) < 0]
+        _jf = len(_jv) - len(_jb) - len(_js)
+
+        def _jtop(vs):
+            vs = sorted(vs, key=lambda v: -float(v.get("weight") or 0.0))
+            return ", ".join(f"{v.get('judge')} (w{float(v.get('weight') or 0.0):g})"
+                             for v in vs[:2]) or "none"
+
+        _record("JUDGES (opsfix2)",
+                f"{len(_jb)} BUY / {len(_js)} SELL / {_jf} flat of {len(_jv)} | "
+                f"top BUY: {_jtop(_jb)} | top SELL: {_jtop(_js)}")
+    except Exception as _j_err:
+        _record("JUDGES (opsfix2)", f"(status unavailable: {type(_j_err).__name__})")
+    # opsfix:v2-judges-end
 
 
 _OUTCOME_LOG_FIELDS = ["timestamp", "order_id", "symbol", "side", "pnl",
