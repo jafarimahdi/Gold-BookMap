@@ -21,9 +21,15 @@ import unittest
 from types import SimpleNamespace
 
 from aggressive_trigger import evaluate_aggressive_trigger
+import shooting_team as _shooting_module
 from shooting_team import plan_shot, describe as shot_describe
 from paper_entry_simulator import simulate_entry, reset_entry_simulator
 from escort_team import escort_cycle, describe as escort_describe, get_escort
+
+# crowdv2:v1 -- warm the road history so the paper-cycle tests can plan
+# (Three Fair Questions fail closed until SHOOT_ROAD_HISTORY_MIN samples exist).
+_shooting_module._ROAD_HISTORY.extend(
+    (time.time(), 0.0) for _ in range(12))
 
 CONFIG = SimpleNamespace(
     MAX_SPREAD_PCT=0.05, POWER_MAX_TICK_AGE_SECONDS=60.0, STALE_DATA_SECONDS=300.0,
@@ -62,7 +68,10 @@ def make_ctx(queue=None, **over):
     base = {"bid": BID, "ask": ASK, "news_state": "QUIET", "has_data": True,
             "last_data_age_seconds": 5.0, "data_quality_ok": True,
             "queue_estimate": queue, "queue_enabled": True,
-            "market_symbol": "TEST", "now": time.time()}
+            "market_symbol": "TEST", "now": time.time(),
+            # crowdv2:v1 -- volume window for Q3 (trade_lots intentionally
+            # absent so the CONFIG.LOT_SIZE fallback path is exercised here)
+            "recent_volume": 1000.0}
     base.update(over)
     return base
 

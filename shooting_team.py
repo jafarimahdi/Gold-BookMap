@@ -8,7 +8,9 @@ and reviewed impulse trigger is supplied; Power direction alone is not that trig
 from __future__ import annotations
 
 import math
+import statistics
 import time
+from collections import deque
 from datetime import datetime
 from typing import Any, Dict, List, Mapping, Optional
 
@@ -45,6 +47,88 @@ def _epoch(value: Any) -> Optional[float]:
         except (OverflowError, OSError, ValueError):
             return None
     return _num(value)
+
+
+# crowdv2:v1 -- road-history ring buffer + the Three Fair Questions ---------
+# Replaces the old road/target-size ratio (two static depth stocks compared to
+# each other; on quiet tape door targets are 8-10 lots while roads stay
+# 150-300, so the ratio was 15-36x BY CONSTRUCTION -- a dimensional error,
+# not a market fact).  The professional decomposition instead asks:
+#   Q1 SERVED:          is the door big enough for OUR OWN shot size?
+#   Q2 NORMAL ROAD:     is the road normal compared with ITS OWN recent history?
+#   Q3 SMALL FOOTPRINT: is our shot a small fraction of the traded flow?
+# Fail-closed on every missing input.  Receipts on every answer.
+_ROAD_HISTORY: "deque" = deque(maxlen=4096)
+
+
+def _crowd_v2(door_size, road_lots, shot_lots, recent_volume, config):
+    """Three Fair Questions.  Returns a verdict dict; every field is a receipt."""
+    now = time.time()
+    window = max(300.0, _cfg(config, "SHOOT_ROAD_HISTORY_SECONDS", 2700.0))
+    while _ROAD_HISTORY and now - _ROAD_HISTORY[0][0] > window:
+        _ROAD_HISTORY.popleft()
+    if road_lots is not None and road_lots >= 0:
+        _ROAD_HISTORY.append((now, float(road_lots)))
+    hist_min = max(1, int(_cfg(config, "SHOOT_ROAD_HISTORY_MIN", 12)))
+    road_normal = None
+    if len(_ROAD_HISTORY) >= hist_min:
+        road_normal = statistics.median(v for _, v in _ROAD_HISTORY)
+    door_margin = (door_size / shot_lots
+                   if (door_size or 0) > 0 and (shot_lots or 0) > 0
+                   else math.inf)
+    if road_normal is not None and road_normal > 0:
+        road_ratio = (road_lots or 0) / road_normal
+    elif road_normal is not None:
+        road_ratio = 0.0 if (road_lots or 0) <= 0 else math.inf
+    else:
+        road_ratio = None
+    participation = (shot_lots / recent_volume
+                     if (shot_lots or 0) > 0 and (recent_volume or 0) > 0
+                     else None)
+    out = {"verdict": "WAIT", "reason": "",
+           "door_size": _num(door_size), "shot_lots": _num(shot_lots),
+           "door_margin": None if door_margin is math.inf else door_margin,
+           "road_lots": _num(road_lots), "road_normal": road_normal,
+           "road_ratio": road_ratio,
+           "participation": participation,
+           "history_n": len(_ROAD_HISTORY), "history_min": hist_min}
+    margin_min = _cfg(config, "SHOOT_DOOR_MARGIN", 3.0)
+    normal_max = _cfg(config, "SHOOT_ROAD_NORMAL_MAX", 2.0)
+    part_max = _cfg(config, "SHOOT_PARTICIPATION_MAX", 0.10)
+    if door_size is None or door_size <= 0:
+        out["reason"] = "crowd v2 Q1 SERVED failed: door size unavailable"
+        return out
+    if shot_lots is None or shot_lots <= 0:
+        out["reason"] = "crowd v2 Q1 SERVED failed: shot size unavailable"
+        return out
+    if door_margin < margin_min:
+        out["reason"] = (f"crowd v2 Q1 SERVED failed: door {door_size:.1f} lots "
+                         f"is only {door_margin:.1f}x our shot {shot_lots:.2f} "
+                         f"(need {margin_min:.1f}x)")
+        return out
+    if road_normal is None:
+        out["reason"] = (f"crowd v2 Q2 road history warming up "
+                         f"({len(_ROAD_HISTORY)}/{hist_min} samples) - fail closed")
+        return out
+    if road_ratio is math.inf or road_ratio > normal_max:
+        out["reason"] = (f"crowd v2 Q2 NORMAL ROAD failed: road "
+                         f"{(road_lots or 0):.0f} lots > {normal_max:.1f}x its "
+                         f"own normal {road_normal:.0f}")
+        return out
+    if recent_volume is None or recent_volume <= 0:
+        out["reason"] = ("crowd v2 Q3 SMALL FOOTPRINT failed: volume window "
+                         "unavailable - fail closed")
+        return out
+    if participation > part_max:
+        out["reason"] = (f"crowd v2 Q3 SMALL FOOTPRINT failed: shot "
+                         f"{shot_lots:.2f} is {participation:.0%} of window "
+                         f"volume {recent_volume:.0f} (max {part_max:.0%})")
+        return out
+    out["verdict"] = "PASS"
+    out["reason"] = (f"crowd v2 PASS: door/shot {door_margin:.1f}x, "
+                     f"road/normal {road_ratio:.2f}x, "
+                     f"shot/vol {participation:.1%}")
+    return out
 
 
 def _validate_queue(raw: Any, ctx: Mapping[str, Any], side: str,
@@ -233,14 +317,17 @@ def plan_shot(signal_map: Dict[str, Any], power: Dict[str, Any],
     road_count = int(raw_road_count)
     road_lots = raw_road_lots
     route_clear = target_door.get("road_clear") is True
-    road_ratio = road_lots / target_size if target_size > 0 else math.inf
-    road_limit = _cfg(config, "SHOOT_ROAD_RATIO", 6.0)
-    if road_ratio >= road_limit:
-        # opsfix:v3 -- show the components behind the ratio (audit A3)
-        return _wait(f"route is too crowded ({road_ratio:.1f}x target size; "
-                     f"road {road_lots:.0f} lots over {road_count} door(s) vs "
-                     f"target {target_size:.1f} lots; limit {road_limit:.1f}x)", p,
-                     {"door": dict(target_door), "road_ratio": road_ratio})
+    # crowdv2:v1 -- the Three Fair Questions replace the road/target-size ratio.
+    shot_lots = _num(ctx.get("trade_lots"))
+    if shot_lots is None or shot_lots <= 0:
+        shot_lots = _cfg(config, "LOT_SIZE", 1.0)
+    crowd = _crowd_v2(target_size, road_lots, shot_lots,
+                      _num(ctx.get("recent_volume")), config)
+    road_ratio = (crowd["road_ratio"] if crowd["road_ratio"] is not None
+                  else math.inf)
+    if crowd["verdict"] != "PASS":
+        return _wait(crowd["reason"], p,
+                     {"door": dict(target_door), "crowd_v2": crowd})
 
     is_buy = direction == "UP"
     side = "BUY" if is_buy else "SELL"
@@ -355,7 +442,10 @@ def plan_shot(signal_map: Dict[str, Any], power: Dict[str, Any],
                     "meaning": "force shares, not probabilities"}
     why = [f"POWER v2 {direction}; force shares are not probabilities",
            f"nearest viable Scout door {target_px:.2f} ({target_size:.1f} lots)",
-           f"route {road_count} level(s), {road_lots:.1f} lots; ratio {road_ratio:.2f}x",
+           f"route {road_count} level(s), {road_lots:.1f} lots; "
+           f"crowd v2: door/shot {crowd['door_margin']:.1f}x, "
+           f"road/normal {road_ratio:.2f}x, "
+           f"shot/vol {crowd['participation']:.1%}",
            f"{mode_label} entry; stop source {chosen['stop_source']}",
            f"reward {chosen['reward']:.2f} vs risk {chosen['risk']:.2f} -> R:R {chosen['rr']:.2f}"]
     if queue_known:

@@ -246,6 +246,12 @@ def _judge_panel_from_notes(notes):
 
 
 def _record(step: str, status: str) -> None:
+    # crowdv2:v1 -- item 67: ASCII-fold at the logging boundary.  AI text can
+    # carry non-ASCII (e.g. Greek sigma in "VWAP -1-sigma band"); the Windows
+    # console is cp1252 and crashed on it (2026-10-16 19:33 UnicodeEncodeError).
+    # Folding here protects every caller; content survives as \uXXXX escapes.
+    step = str(step).encode("ascii", "backslashreplace").decode("ascii")
+    status = str(status).encode("ascii", "backslashreplace").decode("ascii")
     STATUS.append((step, status))
     logger.info("%s -> %s", step, status)
 
@@ -807,6 +813,13 @@ def run_signal_bridge(snapshot, decision) -> None:
     # (panel votes: {judge, dir +1 BUY / -1 SELL / 0 flat, weight})
     try:
         _jv = list(getattr(snapshot, "judge_votes", None) or [])
+        # crowdv2:v1 -- item 62: whale_walls is RETIRED (C1 card: -1.012/call
+        # over 6 days; step2 confidence has ignored it since v5.8.1).  Cut it
+        # from the DISPLAY so the line stops advertising a retired judge.
+        # (POWER's agreement gate reads its own timeframe family, not the
+        # judges -- verified 2026-10-16, whale cannot reach it.)
+        _jv = [v for v in _jv
+               if str(v.get("judge") or "") != "whale_walls"]
         _jb = [v for v in _jv if isinstance(v, dict) and float(v.get("dir") or 0) > 0]
         _js = [v for v in _jv if isinstance(v, dict) and float(v.get("dir") or 0) < 0]
         _jf = len(_jv) - len(_jb) - len(_js)

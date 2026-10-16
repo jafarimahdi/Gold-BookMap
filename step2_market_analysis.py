@@ -4675,9 +4675,19 @@ def analyze_market(market_data: Dict[str, Any],
             from aggressive_trigger import a2_v1_gate as _a2_gate
         except Exception:
             _a2_gate = None
+        _crowd_vol = 0.0
+        try:
+            _crowd_ticks = tick_data[-500:] if isinstance(tick_data, list) else []
+            _crowd_vol = sum(float(t.get("volume", 0) or 0)
+                             for t in _crowd_ticks if isinstance(t, dict))
+        except Exception:
+            _crowd_vol = 0.0
         _shot_context = {
             "bid": _raw_bid,
             "ask": _raw_ask,
+            # crowdv2:v1 -- inputs for the Three Fair Questions
+            "trade_lots": float(getattr(config, "LOT_SIZE", 1.0) or 1.0),
+            "recent_volume": _crowd_vol,
             "news_state": news.news_state,
             "has_data": _shot_has_data,
             "last_data_age_seconds": _shot_data_age,

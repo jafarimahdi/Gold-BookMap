@@ -1,17 +1,24 @@
-from types import SimpleNamespace
 import time
+from types import SimpleNamespace
 
+import pytest
+
+import shooting_team
 from shooting_team import plan_shot
 import config as _test_config
 _test_config.LIMIT_ORDER_ENABLED = True  # G10: tests must not depend on the operator's .env
-
 
 
 CFG = SimpleNamespace(
     LIMIT_ORDER_ENABLED=True,
     POWER_MAX_TICK_AGE_SECONDS=60.0,
     STALE_DATA_SECONDS=300.0,
-    SHOOT_ROAD_RATIO=6.0,
+    LOT_SIZE=1.0,
+    SHOOT_DOOR_MARGIN=3.0,
+    SHOOT_ROAD_NORMAL_MAX=2.0,
+    SHOOT_PARTICIPATION_MAX=0.10,
+    SHOOT_ROAD_HISTORY_MIN=12,
+    SHOOT_ROAD_HISTORY_SECONDS=2700.0,
     SHOOT_QUEUE_MIN_FILL_PROB=0.70,
     SHOOT_MIN_RR=1.2,
     SHOOT_MIN_REWARD_USD=0.0,
@@ -20,6 +27,17 @@ CFG = SimpleNamespace(
     LIMIT_TICK_SIZE=0.1,
     SHOOT_PLAN_TTL_SECONDS=30.0,
 )
+
+
+@pytest.fixture(autouse=True)
+def _seed_road_history():
+    """crowdv2:v1 -- every test starts with a warm, quiet road history
+    (12 samples of an empty road).  The crowd tests below re-seed their own
+    history to build the scenario they are grading."""
+    shooting_team._ROAD_HISTORY.clear()
+    shooting_team._ROAD_HISTORY.extend(
+        (time.time(), 0.0) for _ in range(12))
+    yield
 
 
 def power(direction="UP"):
@@ -48,9 +66,17 @@ def ctx(**changes):
     base = {"bid": 99.9, "ask": 100.1, "news_state": "QUIET",
             "data_quality_ok": True, "has_data": True,
             "last_data_age_seconds": 1.0, "aggressive_trigger_confirmed": False,
-            "now": time.time(), "market_symbol": "GCZ6"}
+            "now": time.time(), "market_symbol": "GCZ6",
+            "trade_lots": 1.0, "recent_volume": 1000.0}
     base.update(changes)
     return base
+
+
+def seed_road(values):
+    """crowdv2:v1 -- replace the road history with these samples."""
+    shooting_team._ROAD_HISTORY.clear()
+    shooting_team._ROAD_HISTORY.extend(
+        (time.time(), float(v)) for v in values)
 
 
 def valid_queue(fill_prob=0.30, direction="UP", **changes):
@@ -168,11 +194,57 @@ def test_nearest_viable_door_is_used_not_attraction_order():
     assert out["door"]["price"] == 103
 
 
-def test_crowded_route_waits():
+# ---- crowd v2: the Three Fair Questions (2026-10-16) -----------------------
+
+def test_crowd_v2_warmup_fails_closed():
+    """No road history yet -> WAIT with a warm-up reason (fail-closed)."""
+    seed_road([])  # empty: below the 12-sample minimum
     out = plan_shot(smap(lots_between=160), power(), 100, 1, 0.2, CFG,
                     entry_context=ctx())
     assert out["shot"] == "WAIT"
-    assert "crowded" in out["why"][0]
+    assert "warming up" in out["why"][0]
+
+
+def test_crowd_v2_abnormal_road_waits():
+    """Road 350 vs its own normal 100 = 3.5x > 2x -> Q2 veto."""
+    seed_road([100.0] * 12)
+    out = plan_shot(smap(lots_between=350), power(), 100, 1, 0.2, CFG,
+                    entry_context=ctx())
+    assert out["shot"] == "WAIT"
+    assert "Q2" in out["why"][0]
+    assert out["crowd_v2"]["road_ratio"] > 2.0
+
+
+def test_crowd_v2_normal_road_passes():
+    """Quiet tape: road 160 vs its own normal 100 = 1.6x -> pass, plan GO."""
+    seed_road([100.0] * 12)
+    out = plan_shot(smap(lots_between=160), power(), 100, 1, 0.2, CFG,
+                    entry_context=ctx())
+    assert out["shot"] == "GO"
+    assert any("crowd v2" in w for w in out["why"])
+
+
+def test_crowd_v2_small_door_waits():
+    """Door 2 lots vs our shot 1 lot = 2x < 3x -> Q1 veto."""
+    out = plan_shot(smap(size=2.0), power(), 100, 1, 0.2, CFG,
+                    entry_context=ctx())
+    assert out["shot"] == "WAIT"
+    assert "Q1" in out["why"][0]
+
+
+def test_crowd_v2_big_footprint_waits():
+    """Shot 1 lot vs window volume 5 = 20% > 10% -> Q3 veto."""
+    out = plan_shot(smap(), power(), 100, 1, 0.2, CFG,
+                    entry_context=ctx(recent_volume=5.0))
+    assert out["shot"] == "WAIT"
+    assert "Q3" in out["why"][0]
+
+
+def test_crowd_v2_missing_volume_fails_closed():
+    out = plan_shot(smap(), power(), 100, 1, 0.2, CFG,
+                    entry_context=ctx(recent_volume=None))
+    assert out["shot"] == "WAIT"
+    assert "volume window unavailable" in out["why"][0]
 
 
 def test_poor_queue_waits_unless_triggered_aggressive():

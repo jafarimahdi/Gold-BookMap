@@ -1,9 +1,13 @@
+import time
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 from escort_team import EscortBook, escort_cycle
 from paper_entry_simulator import reset_entry_simulator, simulate_entry
 from power_team_v2 import decide
+import shooting_team
 from shooting_team import plan_shot
 import config as _test_config
 _test_config.LIMIT_ORDER_ENABLED = True  # G10: tests must not depend on the operator's .env
@@ -16,7 +20,12 @@ CFG = SimpleNamespace(
     LIMIT_ORDER_ENABLED=True,
     POWER_MAX_TICK_AGE_SECONDS=60.0,
     STALE_DATA_SECONDS=300.0,
-    SHOOT_ROAD_RATIO=6.0,
+    LOT_SIZE=1.0,
+    SHOOT_DOOR_MARGIN=3.0,
+    SHOOT_ROAD_NORMAL_MAX=2.0,
+    SHOOT_PARTICIPATION_MAX=0.10,
+    SHOOT_ROAD_HISTORY_MIN=12,
+    SHOOT_ROAD_HISTORY_SECONDS=2700.0,
     SHOOT_QUEUE_MIN_FILL_PROB=0.70,
     SHOOT_MIN_RR=1.2,
     SHOOT_MIN_REWARD_USD=0.0,
@@ -24,6 +33,15 @@ CFG = SimpleNamespace(
     SHOOT_PAPER_LIMIT_TTL_SECONDS=300.0,
     LIMIT_TICK_SIZE=0.1,
 )
+
+
+@pytest.fixture(autouse=True)
+def _seed_road_history():
+    """crowdv2:v1 -- warm, quiet road history so plan_shot can reach a plan."""
+    shooting_team._ROAD_HISTORY.clear()
+    shooting_team._ROAD_HISTORY.extend(
+        (time.time(), 0.0) for _ in range(12))
+    yield
 
 
 def test_power_v2_to_shooting_to_paper_fill_to_escort_end_to_end():
@@ -55,6 +73,7 @@ def test_power_v2_to_shooting_to_paper_fill_to_escort_end_to_end():
         "has_data": True, "data_quality_ok": True,
         "last_data_age_seconds": 1.0, "queue_enabled": False,
         "aggressive_trigger_confirmed": False, "now": 1000.0,
+        "trade_lots": 1.0, "recent_volume": 1000.0,
     }
     shot = plan_shot(signal_map, power, 100.0, atr=1.0, spread=0.2,
                      config=CFG, entry_context=entry_context)

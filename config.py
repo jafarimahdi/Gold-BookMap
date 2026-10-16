@@ -308,8 +308,17 @@ def _refresh() -> None:
     g["SHOOT_MIN_REWARD_USD"] = _ffloat("SHOOT_MIN_REWARD_USD", 0.0)
     # Shooting operates on explicit Power-v2 direction; force shares are never confidence.
     g["SHOOT_MIN_RR"] = _ffloat("SHOOT_MIN_RR", 1.2)
-    g["SHOOT_ROAD_RATIO"] = _ffloat("SHOOT_ROAD_RATIO", 6.0)
+    g["SHOOT_ROAD_RATIO"] = _ffloat("SHOOT_ROAD_RATIO", 6.0)  # retired by crowdv2:v1 (kept for .env compat; unread)
     g["SHOOT_QUEUE_MIN_FILL_PROB"] = _ffloat("SHOOT_QUEUE_MIN_FILL_PROB", 0.70)
+    # crowdv2:v1 -- the Three Fair Questions (item 66; research file
+    # CROWD_MATH_V2_RESEARCH_2026-10-16.md).  All dimensionless multiples so
+    # they mean the same thing in every regime; none may be tuned to force a
+    # trade (house law).
+    g["SHOOT_DOOR_MARGIN"] = _ffloat("SHOOT_DOOR_MARGIN", 3.0)
+    g["SHOOT_ROAD_NORMAL_MAX"] = _ffloat("SHOOT_ROAD_NORMAL_MAX", 2.0)
+    g["SHOOT_PARTICIPATION_MAX"] = _ffloat("SHOOT_PARTICIPATION_MAX", 0.10)
+    g["SHOOT_ROAD_HISTORY_MIN"] = _ffloat("SHOOT_ROAD_HISTORY_MIN", 12)
+    g["SHOOT_ROAD_HISTORY_SECONDS"] = _ffloat("SHOOT_ROAD_HISTORY_SECONDS", 2700.0)
     g["POWER_MAX_TICK_AGE_SECONDS"] = _ffloat("POWER_MAX_TICK_AGE_SECONDS", 60.0)
     g["SHOOT_PAPER_LIMIT_TTL_SECONDS"] = _ffloat("SHOOT_PAPER_LIMIT_TTL_SECONDS", 300.0)
     # what counts as ONE BIG ORDER (not a wall). Measured on GC: p99.9 of a single
