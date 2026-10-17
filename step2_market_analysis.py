@@ -4455,6 +4455,12 @@ def analyze_market(market_data: Dict[str, Any],
     _probe_diagnostics = {"status": "NOT_CHECKED"}
     try:
         from power_v2_regime import classify_m5_regime
+        from power_v2_regime import set_bar_seconds as _p2_set_bar_seconds
+        # fusionv1: the regime ladder follows TIMEFRAME from .env.
+        try:
+            _p2_set_bar_seconds(int(getattr(config, "POWER_BAR_SECONDS", 300) or 300))
+        except Exception:
+            pass  # fail closed to the module default (M5)
         _regime_ticks, _probe_diagnostics, _probe_history_bars = _power_probe_startup_history(
             symbol, now, tick_data)
         _regime_v2 = classify_m5_regime(
@@ -4485,6 +4491,7 @@ def analyze_market(market_data: Dict[str, Any],
         _power_v2 = run_power_v2(
             tick_data, now=now, symbol=symbol,
             tick_size=float(getattr(config, "POWER_M5_TICK_SIZE", 0.0) or 0.0),
+            bar_seconds=int(getattr(config, "POWER_BAR_SECONDS", 300) or 300),  # fusionv1
             memory_root=_memory_root,
             market_regime=_regime_v2.get("market_regime", "UNKNOWN"),
             breakout_confirmed=bool(_regime_v2.get("breakout_confirmed", False)),
@@ -4494,7 +4501,8 @@ def analyze_market(market_data: Dict[str, Any],
     except Exception as _pw2_err:
         # Active Power errors fail closed; never fall back to a legacy direction.
         _power_v2 = {
-            "team": "POWER", "version": "2.2.0", "timeframe": "M5",
+            "team": "POWER", "version": "2.2.0",
+            "timeframe": f"M{max(1, int(getattr(config, 'POWER_BAR_SECONDS', 300) or 300) // 60)}",  # fusionv1
             "direction": "NEITHER", "up_power_pct": 50.0,
             "down_power_pct": 50.0, "power_total_pct": 100.0,
             "activity": 0.0, "coverage": 0.0,

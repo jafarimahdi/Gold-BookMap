@@ -669,9 +669,42 @@ def _shooting_execution_gate(decision, snapshot):
                     "DOWN": "DOWNWARD_FORCE_DOMINATES"}.get(_pd)
             if _dom and _rc == _dom:
                 _pc = float(getattr(snapshot, "confidence", 0.0) or 0.0)
-                if _pc >= float(getattr(config, "AI_CONFIDENCE_THRESHOLD", 50.0)):
+                # fusionv1 "power-lead" (2026-10-17, owner-ordered, Option B):
+                # POWER speaks + panel floor (POWER_LEAD_CONF_FLOOR, default 30)
+                # + agreement with the classroom's direction. Evidence 10-15 and
+                # 10-16 (council_shadow): the old 45 floor passed 0 minutes both
+                # days; floor 30 + agreement graded 88-100%. The old
+                # >=AI_CONFIDENCE_THRESHOLD path is kept unchanged; the lead
+                # only EXTENDS coverage below it, fail-closed. Off-switch:
+                # POWER_LEAD_ENABLED=0 in .env.
+                _old_gate = float(getattr(config, "AI_CONFIDENCE_THRESHOLD", 50.0))
+                _floor = float(getattr(config, "POWER_LEAD_CONF_FLOOR", 30.0))
+                _lead_on = bool(getattr(config, "POWER_LEAD_ENABLED", True))
+                _cdir = str(getattr(snapshot, "signal_direction", "") or "").upper()
+                _agree = _cdir not in ("BUY", "SELL") or \
+                    _cdir == ("BUY" if _pd == "UP" else "SELL")
+                _passed = _pc >= _old_gate
+                _via_lead = False
+                if not _passed and _lead_on and _pc >= _floor and _agree:
+                    _passed = True
+                    _via_lead = True
+                if _passed:
                     decision.action = "BUY" if _pd == "UP" else "SELL"
                     decision.confidence = _pc
+                    if _via_lead:
+                        decision.model = "power-lead-v1"
+                        decision.rationale = (
+                            (getattr(decision, "rationale", "") or "AI quiet")
+                            + " | power-lead v1: conf {:.0f} >= floor {:.0f}, "
+                            "agree={}, POWER {} ({})".format(
+                                _pc, _floor, _agree, _pd, _rc))
+                        try:
+                            _record("STEP 3  POWER-LEAD",
+                                    "fusion v1 carries the trade: conf {:.0f} "
+                                    "(floor {:.0f}, agree={}) | POWER {} | {}"
+                                    .format(_pc, _floor, _agree, _pd, _rc))
+                        except Exception:
+                            pass
                     action = decision.action
         except Exception:
             pass

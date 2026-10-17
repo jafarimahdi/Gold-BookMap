@@ -68,15 +68,33 @@ def test_doorman_advisory_when_power_dominant_and_panel_agrees(monkeypatch):
 
 
 def test_doorman_advisory_denies_when_panel_confidence_below_gate(monkeypatch):
+    # fusionv1 (2026-10-17, owner-ordered): this test WAS the old policy's
+    # witness (conf 30 + POWER dominant -> deny). The power-lead advisory now
+    # carries exactly that minute (floor 30 + agreement; evidence:
+    # council_shadow 10-15/10-16). Pinned to the NEW policy below; the old
+    # denial survives one floor lower (29 < 30) and via the off-switch.
     monkeypatch.setattr(main.config, "EXECUTION_MODE", "python")
     monkeypatch.setattr(main.config, "AI_CONFIDENCE_THRESHOLD", 45.0)
-    d = SimpleNamespace(action="HOLD", confidence=0.0)
+    monkeypatch.setattr(main.config, "POWER_LEAD_CONF_FLOOR", 30.0)
+    monkeypatch.setattr(main.config, "POWER_LEAD_ENABLED", True)
+    d = SimpleNamespace(action="HOLD", confidence=0.0, rationale="",
+                        model="none-quiet")
     ok, reason = _shooting_execution_gate(
         d, snap(status="BROKER_READY", direction="UP",
                 reason_code="UPWARD_FORCE_DOMINATES", confidence=30.0))
     assert ok
-    assert "no new-entry action" in reason
-    assert d.action == "HOLD"
+    assert "corridor open" in reason          # NEW: the lead carries conf 30
+    assert d.action == "BUY"
+    assert d.model == "power-lead-v1"
+    # the floor itself still denies below 30
+    d2 = SimpleNamespace(action="HOLD", confidence=0.0, rationale="",
+                         model="none-quiet")
+    ok2, reason2 = _shooting_execution_gate(
+        d2, snap(status="BROKER_READY", direction="UP",
+                 reason_code="UPWARD_FORCE_DOMINATES", confidence=29.0))
+    assert ok2
+    assert "no new-entry action" in reason2
+    assert d2.action == "HOLD"
 
 
 def test_doorman_advisory_requires_dominant_force_reason(monkeypatch):

@@ -314,8 +314,13 @@ def _judge_report_card_block(snapshot=None):
 class AIDecisionEngine:
     """Wraps the Gemini API into a decide(snapshot) -> Decision call."""
 
+    try:  # fusionv1: the Captain's frame follows TIMEFRAME from .env
+        import config as _cfg
+        _TF_LABEL = str(getattr(_cfg, "TIMEFRAME", "M5") or "M5").upper()
+    except Exception:
+        _TF_LABEL = "M5"
     SYSTEM_PROMPT = (
-        "You are Captain 5 of Gold-BookMap v7.0 M5 scalper. 4 other captains vote: "
+        f"You are Captain 5 of Gold-BookMap v7.0 {_TF_LABEL} scalper. 4 other captains vote: "
         "Flow 1.5x boss (CVD weighted small 0.3x big 1.5x last 5min 2x + footprint + OFI + microprice), "
         "Whale 1.4x boss (net flow + iceberg persistence old walls >30min score>50k + distance close 2x + sweep), "
         "Structure 1.2x RANGE/0.6x TREND (VWAP bands +1σ +2σ +2.5σ + POC/VAH/VAL + order blocks), "

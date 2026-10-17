@@ -112,6 +112,7 @@ def build_m5_inputs(
     min_direct_side_ratio: float = 0.80,
     trust_explicit_side: bool = False,
     min_big_print_size: float = 1.0,
+    bar_seconds: int = 300,  # fusionv1: TIMEFRAME-driven window (M3 -> 180)
 ) -> Dict[str, Any]:
     """Return judges, per-judge availability, context, and diagnostics for Power v2.
 
@@ -138,8 +139,10 @@ def build_m5_inputs(
         raise ValueError("max_tick_age_seconds must be positive")
 
     rows = list(tick_data or [])
-    current_start = current_time - timedelta(minutes=5)
-    previous_start = current_time - timedelta(minutes=10)
+    # fusionv1: window length follows POWER_BAR_SECONDS (was hardcoded 5 min).
+    _bar_s = max(60, int(bar_seconds))
+    current_start = current_time - timedelta(seconds=_bar_s)
+    previous_start = current_time - timedelta(seconds=2 * _bar_s)
     current, timestamped_n, current_raw_n = _collect(
         rows, current_start, current_time, trust_explicit_side=trust_explicit_side)
     previous, _prev_ts_n, previous_raw_n = _collect(
@@ -288,7 +291,7 @@ def build_m5_inputs(
             "market_regime": "UNKNOWN",
         },
         "diagnostics": {
-            "timeframe": "M5",
+            "timeframe": f"M{max(1, int(bar_seconds) // 60)}",  # fusionv1
             "window_start_utc": current_start.isoformat().replace("+00:00", "Z"),
             "window_end_utc": current_time.isoformat().replace("+00:00", "Z"),
             "tick_size": step,

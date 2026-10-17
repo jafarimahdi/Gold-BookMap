@@ -28,12 +28,17 @@ def _utc(value: Any) -> datetime:
     return value.astimezone(timezone.utc)
 
 
-def last_completed_m5_end(now: Any, grace_seconds: float = 5.0) -> datetime:
-    """Return the latest M5 boundary safely past its close grace period."""
+def last_completed_m5_end(now: Any, grace_seconds: float = 5.0,
+                         bar_seconds: int = 300) -> datetime:
+    """Return the latest bar boundary safely past its close grace period.
+
+    fusionv1: the bar length follows POWER_BAR_SECONDS (was hardcoded 300s).
+    """
     current = _utc(now)
     grace = max(0.0, min(float(grace_seconds), 60.0))
     epoch = current.timestamp()
-    boundary = math.floor((epoch - grace) / 300.0) * 300.0
+    _bar = float(max(60, int(bar_seconds)))  # fusionv1
+    boundary = math.floor((epoch - grace) / _bar) * _bar
     return datetime.fromtimestamp(boundary, tz=timezone.utc)
 
 
@@ -130,6 +135,7 @@ def run_power_v2(
     high_impact_news: bool = False,
     regime_diagnostics: Optional[Mapping[str, Any]] = None,
     grace_seconds: float = 5.0,
+    bar_seconds: int = 300,  # fusionv1: TIMEFRAME-driven bar length
 ) -> Dict[str, Any]:
     """Evaluate the active v2 Power contract from Step 2 market data.
 
@@ -140,11 +146,14 @@ def run_power_v2(
     """
     if not isinstance(symbol, str) or not symbol.strip():
         raise ValueError("symbol is required")
-    bar_end = last_completed_m5_end(now, grace_seconds=grace_seconds)
+    bar_end = last_completed_m5_end(now, grace_seconds=grace_seconds,
+                                    bar_seconds=bar_seconds)
+    tf_label = f"M{max(1, int(bar_seconds) // 60)}"  # fusionv1
     # Exclude a trade stamped exactly at the next bar boundary.
     evaluation_end = bar_end - timedelta(microseconds=1)
     built = build_m5_inputs(
-        tick_data or [], now=evaluation_end, tick_size=tick_size)
+        tick_data or [], now=evaluation_end, tick_size=tick_size,
+        bar_seconds=bar_seconds)  # fusionv1
     # VOICE FIX (2026-10-15): calibrate the tick judges' vote magnitudes so
     # fish-sized force is audible to POWER's (unchanged) activity gate.
     built["judges"] = _apply_voice_gain(built["judges"])
@@ -168,6 +177,7 @@ def run_power_v2(
     answer["excluded_judges"] = excluded
     answer.update({
         "shadow_only": False,
+        "timeframe": tf_label,  # fusionv1: overrides decide()'s static M5 label
         "bar_end_utc": bar_end.isoformat().replace("+00:00", "Z"),
         "input_judges": built["judges"],
         "judge_availability": availability,
@@ -176,7 +186,7 @@ def run_power_v2(
     })
 
     if memory_root is not None:
-        event_id = f"{symbol.strip()}|M5|{bar_end.isoformat()}|FINAL"
+        event_id = f"{symbol.strip()}|{tf_label}|{bar_end.isoformat()}|FINAL"  # fusionv1
         try:
             from power_memory_book import append_snapshot
             written = append_snapshot(

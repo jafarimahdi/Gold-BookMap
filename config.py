@@ -136,6 +136,22 @@ def _refresh() -> None:
     # regardless of this legacy shadow flag. A nonzero source tick size is required.
     g["POWER_V2_SHADOW_ENABLED"] = _fget("POWER_V2_SHADOW_ENABLED", "0") == "1"
     g["POWER_M5_TICK_SIZE"] = _ffloat("POWER_M5_TICK_SIZE", 0.0)
+
+    # fusionv1 (2026-10-17, owner-ordered): one timeframe knob drives POWER.
+    # TIMEFRAME (M1..H1) -> BASE_TF_MINUTES -> POWER_BAR_SECONDS; the explicit
+    # POWER_BAR_SECONDS env overrides. The classroom follows A1_BASE_TF_MINUTES
+    # (set it to match: M3 -> A1_BASE_TF_MINUTES=3).
+    _tf_minutes = {"M1": 1, "M2": 2, "M3": 3, "M4": 4, "M5": 5, "M6": 6,
+                   "M10": 10, "M12": 12, "M15": 15, "M20": 20, "M30": 30,
+                   "H1": 60}
+    g["BASE_TF_MINUTES"] = _tf_minutes.get(str(g["TIMEFRAME"]).upper(), 5)
+    g["POWER_BAR_SECONDS"] = int(_ffloat(
+        "POWER_BAR_SECONDS", 60.0 * g["BASE_TF_MINUTES"]))
+    # fusionv1: the power-lead advisory (Option B) - POWER speaks + panel floor
+    # + agreement. Evidence: council_shadow 10-15/10-16 (floor 45 passed 0 both
+    # days; floor 30 + agreement graded 88-100%). Off-switch below.
+    g["POWER_LEAD_ENABLED"] = _fget("POWER_LEAD_ENABLED", "1") == "1"
+    g["POWER_LEAD_CONF_FLOOR"] = _ffloat("POWER_LEAD_CONF_FLOOR", 30.0)
     g["POWER_V2_MEMORY_ENABLED"] = _fget("POWER_V2_MEMORY_ENABLED", "0") == "1"
     g["DATA_SOURCE"] = _fget("DATA_SOURCE", "demo").lower()
     # Normalize legacy name: ninjabridge -> bookmapbridge (still supported)

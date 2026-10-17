@@ -22,7 +22,22 @@ __all__ = ["classify_m5_regime", "wilder_adx", "check_price_scale_compatibility"
 PERIOD = 14
 TREND_ADX_MIN = 25.0
 RANGE_ADX_MAX = 20.0
-BAR_SECONDS = 300
+BAR_SECONDS = 300  # default M5; fusionv1: set_bar_seconds() re-times the ladder
+
+
+def set_bar_seconds(seconds: int) -> None:
+    """fusionv1: re-time the regime ladder (TIMEFRAME from .env).
+
+    Sets the module bar length used by bucketing, contiguity and gap math.
+    History bars backfilled from the (currently empty) probe CSV assume 300s
+    buckets; at other lengths the contiguity check refuses them and the ladder
+    fails closed to live-bar warm-up, which is the safe behavior.
+    """
+    global BAR_SECONDS
+    seconds = int(seconds)
+    if seconds < 60:
+        raise ValueError("bar seconds must be >= 60")
+    BAR_SECONDS = seconds
 
 
 def _utc(value: Any) -> Optional[datetime]:
