@@ -410,9 +410,80 @@ def plan_shot(signal_map: Dict[str, Any], power: Dict[str, Any],
         aggressive_allowed = False
         aggressive_reason = "aggressive trigger has no audit reason"
 
+    # NEW STANDING INSTRUCTION (added 2026-10-19): full visibility of every veto/open reason
+    # Capture the specific sub-check that caused the veto (crowd, geometry, trigger, queue)
+    veto_sub_checks = []
+    # Crowd sub-check (from crowd dict)
+    if not crowd.get("verdict") == "PASS":
+        crowd_reason = crowd.get("reason", "")
+        crowd_parts = []
+        if "Q1 SERVED" in crowd_reason:
+            crowd_parts.append("crowd Q1 SERVED failed")
+        elif "Q2 NORMAL ROAD" in crowd_reason:
+            crowd_parts.append("crowd Q2 NORMAL ROAD failed")
+        elif "Q3 SMALL FOOTPRINT" in crowd_reason:
+            crowd_parts.append("crowd Q3 SMALL FOOTPRINT failed")
+        elif crowd_reason:
+            crowd_parts.append(f"crowd failed ({crowd_reason[:60]})")
+        else:
+            crowd_parts.append("crowd veto (reason unknown from receipt)")
+        veto_sub_checks.append("; ".join(crowd_parts))
+    # Geometry / cost sub-check (from passive/aggressive reasons)
+    geo_reasons = []
+    if passive_reason and passive_reason != "passive limit is not eligible":
+        geo_reasons.append(f"geometry/passive: {passive_reason}")
+    if aggressive_reason and aggressive_reason not in ("aggressive market is not eligible", "no separately confirmed aggressive-entry trigger is wired", "aggressive trigger has no audit reason"):
+        geo_reasons.append(f"geometry/aggressive: {aggressive_reason}")
+    if geo_reasons:
+        veto_sub_checks.append("; ".join(geo_reasons))
+    # Trigger sub-check
+    if not trigger:
+        veto_sub_checks.append("trigger failed: no confirmed aggressive-entry trigger (A2 not fired)")
+    elif trigger_reason and aggressive_reason == "aggressive trigger has no audit reason":
+        veto_sub_checks.append("trigger failed: trigger has no audit reason")
+    # Queue sub-check
+    if queue_blocks_limit:
+        veto_sub_checks.append(f"queue failed: fill probability {queue_prob:.2f} below floor {queue_floor:.2f}")
+    elif not queue_known and passive_reason and "unknown" in (queue_validation_reason or "").lower():
+        veto_sub_checks.append("queue failed: estimate unknown/stale")
+    # Execution mode
+    exec_mode = []
+    if not bool(getattr(config, "LIMIT_ORDER_ENABLED", False)):
+        exec_mode.append("LIMIT_ORDER_ENABLED=0 (aggressive-only mode disabled)")
+    else:
+        exec_mode.append("LIMIT_ORDER_ENABLED=1")
+    # Build the full visible veto message
+    full_why = [
+        f"POWER v2 direction={str(power.get('direction', 'NEITHER') or 'NEITHER').upper()}; "
+        f"force shares UP={power.get('up_power_pct', 'none')} DOWN={power.get('down_power_pct', 'none')}; "
+        f"regime={str(entry_context.get('regime', 'UNKNOWN')).upper()}; "
+        f"conf={_num(entry_context.get('signal_confidence', 0))}; "
+    ]
+    if veto_sub_checks:
+        full_why.append(f"SHOOTING veto sub-checks: {' | '.join(veto_sub_checks)}")
+    else:
+        full_why.append("SHOOTING veto: reason not fully captured from sub-checks (visibility gap)")
+    full_why.extend([
+        f"AI model: {_num(power.get('ai_model', 'none'))}; "
+        f"session: {_num(entry_context.get('session_state', 'UNKNOWN'))}; "
+        f"execution mode: {', '.join(exec_mode)}; "
+        f"plan TTL: {plan_ttl:.0f}s; "
+        f"reference price: {p:.2f}; spread: {sp:.2f}; ATR: {a:.2f}"
+    ])
+    if queue_known:
+        full_why.append(f"queue valid: fill_prob={queue_prob:.2f}, age={now - stamp:.1f}s")
+    else:
+        full_why.append("queue unknown/untrusted")
+
     if not passive_allowed and not aggressive_allowed:
-        why = [passive_reason or "passive limit is not eligible",
-               aggressive_reason or "aggressive market is not eligible"]
+        why = [
+            f"PASSIVE: {passive_reason or 'not eligible (reason missing)'}",
+            f"AGGRESSIVE: {aggressive_reason or 'not eligible (reason missing)'}",
+            f"POWER direction: {str(power.get('direction', 'NEITHER')).upper()}; regime: {str(entry_context.get('regime', 'UNKNOWN')).upper()}; conf: {_num(entry_context.get('signal_confidence', 0)):.2f}",
+            f"VETO SUB-CHECKS: {' | '.join(veto_sub_checks) if veto_sub_checks else 'NOT FULLY RECORDED (visibility gap)'}",
+            f"EXECUTION MODE: {', '.join(exec_mode)}",
+            f"FULL RECEIPT: {''.join(full_why)}"
+        ]
         return {"shot": "WAIT", "side": None, "why": why, "entry": p,
                 "target": None, "stop": None, "rr": 0.0, "door": dict(target_door),
                 "entry_style": None, "execution_status": "PLAN_ONLY",
@@ -421,13 +492,20 @@ def plan_shot(signal_map: Dict[str, Any], power: Dict[str, Any],
                 "entry_options": {
                     "PASSIVE_LIMIT": {**passive, "order_type": "LIMIT",
                                        "eligible": passive_allowed,
-                                       "planning_only": True, "reason": passive_reason},
+                                       "planning_only": True, "reason": passive_reason,
+                                       "sub_check": veto_sub_checks[0] if veto_sub_checks else "unknown"},
                     "AGGRESSIVE_MARKET": {**aggressive, "order_type": "MARKET",
                                            "geometry_eligible": aggressive_geometry_ok,
                                            "eligible": aggressive_allowed,
                                            "planning_only": True,
                                            "trigger_reason": trigger_reason or None,
-                                           "reason": aggressive_reason}}}
+                                           "reason": aggressive_reason,
+                                           "sub_check": veto_sub_checks[0] if veto_sub_checks else "unknown"}},
+                "veto_details": {
+                    "sub_checks": veto_sub_checks,
+                    "full_why_string": ''.join(full_why),
+                    "visibility_gap_fixed": bool(veto_sub_checks)
+                }}
 
     # Patient limit is preferred whenever the queue is acceptable/unknown. Use market
     # entry only if independently triggered and the limit queue is demonstrably poor
