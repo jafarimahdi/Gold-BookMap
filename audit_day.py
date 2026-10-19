@@ -1553,6 +1553,12 @@ def test_5_guards(text, decisions, feed):
             why.append(f"JUDGES THAT CRASHED: none - no 'error:' note in any of the "
                        f"{len(DIARY_FOR_DAY)} diary record(s) this day")
         _fb = _fallback_stats(decisions, DIARY_FOR_DAY)
+        if _fb.get("power-lead"):
+            why.append(f"POWER-LEAD CARRIES: {_fb['power-lead']} trade(s) carried by the "
+                       f"POWER-lead (fusion v1) - the AI was quiet, POWER spoke with "
+                       f"dominance and the class floor was met. Receipts: ai_model="
+                       f"power-lead-v1 rows in the decision log; per-call detail in "
+                       f"power_report_card.py and council_shadow.py for this day")
         if _fb["total"]:
             if _fb["fallback"]:
                 why.append(f"WHO ANSWERED: {_fb['ai']} answer(s) from the AI, "
@@ -3280,6 +3286,8 @@ def _fallback_stats(decisions, diary):
             continue
         if m.startswith("fallback"):
             models["fallback"] += 1
+        elif m.startswith("power-lead"):
+            models["power-lead"] += 1   # fusion v1: POWER carried it, AI was quiet
         elif m.startswith("none") or m == "unknown":
             models["none"] += 1          # 24m/A1b: nobody answered - not the AI, not a rule
             none_why[m] += 1
@@ -3296,9 +3304,11 @@ def _fallback_stats(decisions, diary):
         src = "diary ai_rationale (pre-24k rows have no ai_model column)"
     else:
         src = "ai_model column"
-    total = models.get("ai", 0) + models.get("fallback", 0) + models.get("none", 0)
+    total = (models.get("ai", 0) + models.get("fallback", 0)
+             + models.get("none", 0) + models.get("power-lead", 0))
     return {"ai": models.get("ai", 0), "fallback": models.get("fallback", 0),
             "none": models.get("none", 0), "cached": models.get("cached", 0),
+            "power-lead": models.get("power-lead", 0),
             "none_why": none_why.most_common(),
             "total": total, "source": src}
 

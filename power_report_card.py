@@ -32,7 +32,7 @@ from pathlib import Path
 
 VOTE_NAMES = ("footprint_delta", "l3_aggr_limit", "cvd_momentum",
               "big_prints", "footprint_levels")
-HORIZONS = {"+15m": 3, "+30m": 6, "+60m": 12}  # M5 bars ahead
+HORIZON_MINUTES = {"+15m": 15, "+30m": 30, "+60m": 60}  # true minutes; steps derived from the diary's own bar interval
 DOMINANCE_BUCKETS = ((60.0, 70.0), (70.0, 80.0), (80.0, 101.0))
 CLASS_BRAVE_CONF = 45.0
 
@@ -185,6 +185,15 @@ def main() -> int:
         return 2
     n = len(bars)
     first, last = bars[0]["ts"], bars[-1]["ts"]
+    # fusionv1: derive horizons from the diary's own bar interval (M3/M5/...)
+    deltas = [(bars[i]["ts"] - bars[i - 1]["ts"]).total_seconds()
+              for i in range(1, n)]
+    deltas = [d for d in deltas if d > 0]
+    bar_interval = statistics.median(deltas) if deltas else 300.0
+    bar_interval = min(max(bar_interval, 60.0), 3600.0)
+
+    def _steps(minutes):
+        return max(1, int(round(minutes * 60.0 / bar_interval)))
 
     # frozen-feed flags: a bar with no activity whose price repeats the previous
     # bar's price (dead/frozen feed stretch - marks through it are fictitious)
@@ -199,6 +208,7 @@ def main() -> int:
     print("=" * 74)
     print(f"POWER v2 REPORT CARD (v3, per-symbol) - {args.day}")
     print(f"graded symbol: {chosen}   bars: {n}   window: {first:%H:%M} - {last:%H:%M} UTC")
+    print(f"bar interval: {bar_interval:.0f}s (M{bar_interval / 60.0:.0f}) - horizons are true minutes")
     if len(inventory) > 1:
         others = ", ".join(f"{s} x{c}" for s, c in sorted(twins.items()))
         print(f"twins in same diary (NOT graded): {others}")
@@ -234,7 +244,8 @@ def main() -> int:
     else:
         print(f"  directional calls: {len(calls)} of {n} bars "
               f"({100.0 * len(calls) / n:.0f}% speak rate)")
-        for label, step in HORIZONS.items():
+        for label, minutes in HORIZON_MINUTES.items():
+            step = _steps(minutes)
             marks = []
             flagged = []
             for i, rec in calls:
@@ -272,7 +283,7 @@ def main() -> int:
             for i, rec in calls:
                 dom = max(num(rec["up"]) or 0.0, num(rec["down"]) or 0.0)
                 if lo <= dom < hi:
-                    j = i + HORIZONS["+30m"]
+                    j = i + _steps(30)
                     if j >= n:
                         continue
                     fwd, ref = num(bars[j]["ref"]), num(rec["ref"])
@@ -354,6 +365,15 @@ def compare_classroom(log_path: Path, bars: list, day: str) -> None:
     day_start = datetime.fromisoformat(day).replace(tzinfo=timezone.utc)
     day_end = day_start + timedelta(days=1)
     bar_ends = [rec["ts"] for rec in bars]
+    # fusionv1: alignment window from the diary's own bar interval
+    deltas = [(bars[i]["ts"] - bars[i - 1]["ts"]).total_seconds()
+              for i in range(1, len(bars))]
+    deltas = [d for d in deltas if d > 0]
+    bar_interval = statistics.median(deltas) if deltas else 300.0
+    bar_interval = min(max(bar_interval, 60.0), 3600.0)
+
+    def _steps(minutes):
+        return max(1, int(round(minutes * 60.0 / bar_interval)))
 
     minutes_total = class_brave = power_spoke = co_brave = agree = disagree = 0
     conf_when_power = []
@@ -364,10 +384,10 @@ def compare_classroom(log_path: Path, bars: list, day: str) -> None:
         conf = num(row.get(conf_col))
         if ts is None or conf is None or not (day_start <= ts < day_end):
             continue
-        # find the diary bar whose [end-5m, end] contains this minute
+        # find the diary bar whose [end-interval, end] contains this minute
         bar_idx = None
         for i, end in enumerate(bar_ends):
-            if end - timedelta(minutes=5) <= ts <= end:
+            if end - timedelta(seconds=bar_interval) <= ts <= end:
                 bar_idx = i
                 break
         if bar_idx is None:
@@ -394,7 +414,7 @@ def compare_classroom(log_path: Path, bars: list, day: str) -> None:
             else:
                 disagree += 1
                 # who was right? use the +30m forward reference of this bar
-                j = bar_idx + HORIZONS["+30m"]
+                j = bar_idx + _steps(30)
                 if j < len(bars):
                     fwd, ref = num(bars[j]["ref"]), num(rec["ref"])
                     if fwd is not None and ref is not None and fwd > 0 and ref > 0:

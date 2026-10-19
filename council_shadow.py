@@ -44,8 +44,8 @@ SWEEP_FLOORS = (45, 40, 35, 30, 25, 20)
 COUNCIL_CONF_FLOOR = 30.0
 COUNCIL_DOM_FLOOR = 55.0
 COUNCIL_GATE = 45.0
-HORIZON_30 = 6   # M5 bars
-HORIZON_60 = 12
+# horizons are TRUE minutes; steps are derived in main() from the
+# diary's own bar interval (M3/M5/...), so labels never lie.
 
 
 def parse_ts(raw):
@@ -193,6 +193,7 @@ def main() -> int:
     conf_col = find_col(cols, "signal_confidence", "confidence", "conf")
     dir_col = find_col(cols, "signal_direction", "direction", "signal")
     stren_col = find_col(cols, "signal_strength", "strength")
+    model_col = find_col(cols, "ai_model", "model")
     if not (ts_col and conf_col):
         print(f"ERROR: log columns not recognised (need timestamp + confidence);"
               f" found: {', '.join(list(cols)[:10])}")
@@ -201,6 +202,19 @@ def main() -> int:
     day_start = datetime.fromisoformat(args.day).replace(tzinfo=timezone.utc)
     day_end = day_start + timedelta(days=1)
     bar_ends = [rec["ts"] for rec in bars]
+    # fusionv1: derive horizon steps + alignment window from the diary's
+    # own bar interval (M3/M5/...), not a hardcoded M5 assumption.
+    deltas = [(bars[i]["ts"] - bars[i - 1]["ts"]).total_seconds()
+              for i in range(1, n)]
+    deltas = [d for d in deltas if d > 0]
+    bar_interval = statistics.median(deltas) if deltas else 300.0
+    bar_interval = min(max(bar_interval, 60.0), 3600.0)
+
+    def _steps(minutes):
+        return max(1, int(round(minutes * 60.0 / bar_interval)))
+
+    HORIZON_30 = _steps(30)
+    HORIZON_60 = _steps(60)
 
     minutes = []   # aligned decision minutes
     for row in rows:
@@ -210,7 +224,7 @@ def main() -> int:
             continue
         idx = None
         for i, end in enumerate(bar_ends):
-            if end - timedelta(minutes=5) <= ts <= end:
+            if end - timedelta(seconds=bar_interval) <= ts <= end:
                 idx = i
                 break
         if idx is None:
@@ -244,6 +258,32 @@ def main() -> int:
     print("=" * 74)
     print(f"COUNCIL SHADOW - fusion evidence - {args.day}")
     print(f"graded symbol: {chosen}   bars: {n}   aligned minutes: {len(minutes)}")
+    print(f"bar interval: {bar_interval:.0f}s (M{bar_interval / 60.0:.0f}) - horizons are true minutes")
+
+    # fusionv1: power-lead receipts census (what carried the day's trades)
+    print()
+    print("0. POWER-LEAD RECEIPTS (decisions_log ai_model)")
+    if model_col:
+        carried = ai = fallback = quiet = other = 0
+        for row in rows:
+            ts = parse_ts(row.get(ts_col))
+            if ts is None or not (day_start <= ts < day_end):
+                continue
+            m = str(row.get(model_col) or "").strip().lower()
+            if m.startswith("power-lead"):
+                carried += 1
+            elif m.startswith("fallback"):
+                fallback += 1
+            elif m.startswith("gemini"):
+                ai += 1
+            elif m.startswith("none") or m == "":
+                quiet += 1
+            else:
+                other += 1
+        print(f"  carried: {carried} (ai_model=power-lead-v1) | ai: {ai} | "
+              f"fallback: {fallback} | none/quiet: {quiet} | other: {other}")
+    else:
+        print("  ai_model column not found in decisions_log - skipped")
     if twins:
         others = ", ".join(f"{s} x{c}" for s, c in sorted(twins.items()))
         print(f"twins filtered (not graded): {others}")

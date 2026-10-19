@@ -139,11 +139,100 @@ checks = [
     "twins in same diary (NOT graded): XAUUSD x40",
     "frozen-window caveats: 1 (10:15 +60m)",
     "frozen-window caveats: 1 (10:35 +30m)",
-
+    "bar interval: 300s (M5) - horizons are true minutes",
 ]
 ok = all(c in result.stdout for c in checks)
-print("RIG:", "PASS" if ok else "FAIL")
+
+# ---------------------------------------------------------------- M3 day
+# 2026-10-19: 40 bars, 180s apart (M3 diary like Monday's robot).
+# ref rises +1.5/bar except a one-bar dip to 4090.0 at i=8.
+# Refs rise monotonically, so every UP call is right and every DOWN call
+# is wrong. With TRUE-minute horizons (steps 5/10/20): +15m N=6 right=3,
+# +30m N=5 right=3, +60m N=3 right=3. The old hardcoded M5 steps (3/6/12)
+# would land call 5 on the dip at i=8 (+15m right=2) and mislabel every
+# horizon (N=6/6/5) - this scenario locks the interval-aware fix.
+DAY2 = "2026-10-19"
+START2 = datetime(2026, 10, 19, 8, 0, 0, tzinfo=timezone.utc)
+
+
+def ref2(i):
+    if i == 8:
+        return 4090.0
+    return 4100.0 + 1.5 * i
+
+
+rows2 = []
+k2 = 0
+for i in range(N):
+    end = START2 + timedelta(seconds=180 * (i + 1))
+    if i in CALLS:
+        d, dom = CALLS[i]
+        up, down = (dom, 100.0 - dom) if d == "UP" else (100.0 - dom, dom)
+        reason = ("UPWARD_FORCE_DOMINATES" if d == "UP"
+                  else "DOWNWARD_FORCE_DOMINATES")
+        votes = {"footprint_delta": {"value": 0.8 if d == "UP" else -0.8, "quality": 1.0},
+                 "big_prints": {"value": 0.7 if d == "UP" else -0.7, "quality": 1.0}}
+    else:
+        d, up, down = "NEITHER", 50.0, 50.0
+        reason = NEITHER_REASONS[k2 % len(NEITHER_REASONS)]
+        k2 += 1
+        votes = {"footprint_delta": {"value": 0.05, "quality": 1.0}}
+    record = {
+        "schema_version": 1,
+        "record_id": f"RIG|M3|{end.isoformat()}|FINAL",
+        "timestamp_utc": end.isoformat().replace("+00:00", "Z"),
+        "symbol": "RIG", "timeframe": "M3", "phase": "FINAL",
+        "reference_price": ref2(i),
+        "judges": votes, "context": {},
+        "result": {"direction": d, "reason_code": reason,
+                   "up_power_pct": up, "down_power_pct": down,
+                   "input_judges": votes},
+    }
+    rows2.append(record)
+
+with (MEM / f"power_{DAY2}.jsonl").open("w", encoding="utf-8") as out:
+    for record in rows2:
+        out.write(json.dumps(record) + "\n")
+        out.write(json.dumps(phantom(record)) + "\n")
+        out.write(json.dumps(twin(record)) + "\n")
+
+# day-2 decisions log rows (APPEND: one log serves both days):
+#   08:16 conf50 SELL -> bar5 (UP spoke) co-brave DISAGREE: +30m POWER wins
+#       (ref15 4122.5 - ref5 4107.5 = +15 up, class said SELL)
+#   08:25 conf50 BUY  -> bar8 (UP spoke) co-brave agree
+#   08:20 conf22 HOLD -> quiet minute on bar6 (NEITHER)
+with (BASE / "decisions_log.csv").open("a", encoding="utf-8", newline="") as out:
+    out.write("2026-10-19T08:20:00Z,HOLD,22,HOLD\n")
+    out.write("2026-10-19T08:16:00Z,HOLD,50,SELL\n")
+    out.write("2026-10-19T08:25:00Z,HOLD,50,BUY\n")
+
+result2 = subprocess.run(
+    [sys.executable, str(Path(__file__).resolve().parent / "power_report_card.py"), DAY2,
+     "--root", str(MEM)],
+    capture_output=True, text=True)
+print(result2.stdout)
+print(result2.stderr)
+
+checks2 = [
+    "bar interval: 180s (M3) - horizons are true minutes",
+    "graded symbol: RIG",
+    "+15m: N=6   right=3",
+    "+30m: N=5   right=3",
+    "+60m: N=3   right=3",
+    "matched minutes: 3",
+    "class brave (conf >= 45): 2 (67%)",
+    "BOTH brave on the same minute: 2",
+    "of those: agreeing 1, disagreeing 1",
+    "disagreement winners (+30m): POWER 1, CLASS 0, neither 0",
+]
+ok2 = all(c in result2.stdout for c in checks2)
+
+print("RIG day1 (M5):", "PASS" if ok else "FAIL")
 for c in checks:
     if c not in result.stdout:
         print("  missing:", c)
-sys.exit(0 if ok else result.returncode or 1)
+print("RIG day2 (M3):", "PASS" if ok2 else "FAIL")
+for c in checks2:
+    if c not in result2.stdout:
+        print("  missing:", c)
+sys.exit(0 if (ok and ok2) else 1)

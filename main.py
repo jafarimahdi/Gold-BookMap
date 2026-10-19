@@ -444,6 +444,27 @@ def run_step1():
     return data
 
 
+def _record_power_line(snapshot) -> None:
+    """fusionv1 (visibility pack): one console line per cycle - POWER's own state.
+
+    Shows timeframe, direction, activity, dominance and reason every cycle so
+    the new design is observable live, not only in the night diary.
+    """
+    try:
+        _pw = getattr(snapshot, "power", None) or {}
+        if _pw:
+            _record("STEP 2  POWER",
+                    "{} {} act {:.2f} dom {:.0f}% ({})".format(
+                        str(_pw.get("timeframe", "?")),
+                        str(_pw.get("direction", "?")),
+                        float(_pw.get("activity", 0.0) or 0.0),
+                        max(float(_pw.get("up_power_pct", 0.0) or 0.0),
+                            float(_pw.get("down_power_pct", 0.0) or 0.0)),
+                        str(_pw.get("reason_code", ""))))
+    except Exception:
+        pass
+
+
 def run_step2(data):
     from step2_market_analysis import (analyze_market, format_snapshot,
                                        snapshot_to_json)
@@ -536,6 +557,7 @@ def run_step2(data):
             f"OK -> {snapshot.signal_direction} "
             f"(strength {snapshot.signal_strength:.1f}, "
             f"confidence {snapshot.confidence:.1f})")
+    _record_power_line(snapshot)  # fusionv1 visibility pack
     return snapshot
 
 
@@ -706,6 +728,18 @@ def _shooting_execution_gate(decision, snapshot):
                         except Exception:
                             pass
                     action = decision.action
+                else:
+                    if _lead_on:
+                        # fusionv1 visibility pack: near-misses are never silent
+                        try:
+                            _why = ("conf {:.0f} < floor {:.0f}".format(_pc, _floor)
+                                    if _pc < _floor
+                                    else "class disagrees (conf {:.0f})".format(_pc))
+                            _record("STEP 3  POWER-LEAD",
+                                    "holds: {} | POWER {} | {}".format(
+                                        _why, _pd, _rc))
+                        except Exception:
+                            pass
         except Exception:
             pass
         if action in {"HOLD", "WAIT", "NONE", "NO_TRADE", "NEUTRAL"}:

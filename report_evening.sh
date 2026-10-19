@@ -60,6 +60,22 @@ echo "[chief of staff] desk 3/7: the Shadow (the robot's own wall logic)..."
 "$PY" shadow_replay.py --date "$DATE" | sed 's/^/  /'
 hr
 
+# ---- fusion v1: the POWER desks (what POWER said, and what it carried) ---------
+echo "[chief of staff] desk 9: the POWER card (what POWER said all day)..."
+if [ -f power_report_card.py ]; then
+  "$PY" power_report_card.py "$DATE" | sed 's/^/  /'
+else
+  echo "  (power_report_card.py not installed - skipping)"
+fi
+hr
+echo "[chief of staff] desk 10: the Council shadow (what fusion would have carried)..."
+if [ -f council_shadow.py ]; then
+  "$PY" council_shadow.py "$DATE" | sed 's/^/  /'
+else
+  echo "  (council_shadow.py not installed - skipping)"
+fi
+hr
+
 # ---- v1.2: the measurement desks (skip with --fast) ----------------------------
 if [ "$FAST" = 1 ]; then
   echo "[chief of staff] desks 4-5 skipped (--fast: the quick paper)"

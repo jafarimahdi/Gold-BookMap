@@ -353,3 +353,56 @@ def test_captain_prompt_follows_timeframe(monkeypatch):
         monkeypatch.delenv("TIMEFRAME")
         config._refresh()
         importlib.reload(step3_ai_decision)
+
+
+# --------------------------------------------------------------------------
+# 4. VISIBILITY PACK (owner's law: nothing hidden, loop + night)
+# --------------------------------------------------------------------------
+def test_power_line_every_cycle(monkeypatch):
+    """One console line per cycle: POWER's own state, live in the loop."""
+    recorded = []
+    monkeypatch.setattr(main, "_record", lambda *a, **k: recorded.append(a))
+    main._record_power_line(SimpleNamespace(power={
+        "timeframe": "M3", "direction": "UP", "activity": 0.31,
+        "up_power_pct": 71.0, "down_power_pct": 29.0,
+        "reason_code": "UPWARD_FORCE_DOMINATES"}))
+    assert recorded == [("STEP 2  POWER",
+                         "M3 UP act 0.31 dom 71% (UPWARD_FORCE_DOMINATES)")]
+
+
+def test_power_line_silent_without_power(monkeypatch):
+    recorded = []
+    monkeypatch.setattr(main, "_record", lambda *a, **k: recorded.append(a))
+    main._record_power_line(SimpleNamespace(power={}))
+    main._record_power_line(SimpleNamespace())
+    assert recorded == []
+
+
+def test_lead_hold_line_below_floor(monkeypatch):
+    """Near-miss is never silent: conf below floor prints WHY it held."""
+    open_corridor(monkeypatch)
+    monkeypatch.setattr(main.config, "AI_CONFIDENCE_THRESHOLD", 45.0)
+    monkeypatch.setattr(main.config, "POWER_LEAD_CONF_FLOOR", 30.0)
+    monkeypatch.setattr(main.config, "POWER_LEAD_ENABLED", True)
+    recorded = []
+    monkeypatch.setattr(main, "_record", lambda *a, **k: recorded.append(a))
+    decision = hold_decision()
+    ok, reason = _shooting_execution_gate(
+        decision, snap(confidence=22.0, direction="UP", class_direction="BUY"))
+    assert decision.action == "HOLD"
+    holds = [a for a in recorded if "POWER-LEAD" in str(a[0])]
+    assert holds and "holds: conf 22 < floor 30" in holds[0][1]
+
+
+def test_lead_hold_line_on_disagreement(monkeypatch):
+    open_corridor(monkeypatch)
+    monkeypatch.setattr(main.config, "AI_CONFIDENCE_THRESHOLD", 45.0)
+    monkeypatch.setattr(main.config, "POWER_LEAD_CONF_FLOOR", 30.0)
+    monkeypatch.setattr(main.config, "POWER_LEAD_ENABLED", True)
+    recorded = []
+    monkeypatch.setattr(main, "_record", lambda *a, **k: recorded.append(a))
+    decision = hold_decision()
+    _shooting_execution_gate(
+        decision, snap(confidence=35.0, direction="UP", class_direction="SELL"))
+    holds = [a for a in recorded if "POWER-LEAD" in str(a[0])]
+    assert holds and "holds: class disagrees" in holds[0][1]
