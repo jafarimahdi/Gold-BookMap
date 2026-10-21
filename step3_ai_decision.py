@@ -213,6 +213,9 @@ class Decision:
     # An unlabelled decision must LOOK unlabelled; every real path sets this explicitly.
     model: str = ""
     timestamp: Optional[datetime] = None
+    # The model field remains the actual responding model. Rule/Power handoffs
+    # are recorded separately so a carried action cannot masquerade as AI output.
+    decision_source: str = "STEP3"
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)

@@ -32,7 +32,17 @@ class FallbackStatsPowerLeadTest(unittest.TestCase):
         self.assertEqual(stats["none"], 1)
         self.assertEqual(stats["power-lead"], 2)
         self.assertEqual(stats["total"], 5)
-        self.assertEqual(stats["source"], "ai_model column")
+        self.assertEqual(stats["source"], "ai_model column (legacy source attribution)")
+
+    def test_configured_power_carry_uses_source_not_ai_model_label(self):
+        stats = _fallback_stats(
+            [{"ai_model": "none-quiet",
+              "decision_source": "POWER_V2_CONFIGURED_THRESHOLD_CARRY"}], [])
+        self.assertEqual(stats["power-lead"], 1)
+        self.assertEqual(stats["ai"], 0)
+        self.assertEqual(stats["none"], 0)
+        self.assertEqual(stats["total"], 1)
+        self.assertEqual(stats["source"], "decision_source + ai_model columns")
 
     def test_pre24k_diary_path_unchanged(self):
         stats = _fallback_stats(

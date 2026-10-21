@@ -6,9 +6,11 @@ authorise live orders (Law 7) — they mark the homework before paper validation
 """
 import os
 import unittest
+from datetime import datetime, timezone
 from types import SimpleNamespace
+from unittest.mock import patch
 
-from aggressive_trigger import evaluate_aggressive_trigger
+from aggressive_trigger import a2_serve_eval, evaluate_aggressive_trigger
 
 CONFIG = SimpleNamespace(MAX_SPREAD_PCT=0.05, POWER_MAX_TICK_AGE_SECONDS=60.0,
                          AGGRESSIVE_ENTRY_ENABLED=1)
@@ -164,6 +166,43 @@ class TriggerMarketTests(unittest.TestCase):
         self.assertTrue(result["confirmed"])
         self.assertGreater(len(result["reason"]), 20)
         self.assertIn("aggressive UP impulse confirmed", result["reason"])
+
+
+class A2ServeVisibilityTests(unittest.TestCase):
+    def test_serve_lane_passes_decision_session_and_policy_context(self):
+        served = SimpleNamespace(
+            power_v2={"direction": "UP", "context": {"market_regime": "TREND"}},
+            order_flow={}, signal_direction="BUY", signal_map={},
+            confidence=68.0, signal_strength=74.0, regime="TREND",
+            ai_model="fixture-model", news=SimpleNamespace(news_state="QUIET"))
+        config = SimpleNamespace(
+            AGGRESSIVE_ENTRY_ENABLED=1, EXECUTION_MODE="python",
+            TRADING_ENABLED=False, ALLOW_LIVE_TRADING=False,
+            LIMIT_ORDER_ENABLED=False)
+        now = datetime(2026, 10, 21, 12, 0, tzinfo=timezone.utc)
+        with patch.dict(os.environ, {"AGGRESSIVE_ENTRY_ENABLED": "1"}, clear=False), \
+                patch("aggressive_trigger.a2_eval",
+                      return_value={"fire": True, "reason": "fixture fire"}), \
+                patch("shooting_team.plan_shot",
+                      return_value={"shot": "WAIT", "why": ["fixture plan refusal"]}) as planner:
+            result, notes = a2_serve_eval(
+                served, {"has_data": True, "data_quality_ok": True,
+                          "last_data_age_seconds": 1.0}, now, 100.0, 0.2,
+                config, bid=99.9, ask=100.1, atr=1.0)
+
+        context = planner.call_args.kwargs["entry_context"]
+        self.assertIsNone(result)
+        self.assertTrue(notes)
+        self.assertEqual(context["regime"], "TREND")
+        self.assertEqual(context["signal_direction"], "BUY")
+        self.assertEqual(context["signal_confidence"], 68.0)
+        self.assertEqual(context["signal_strength"], 74.0)
+        self.assertEqual(context["ai_model"], "fixture-model")
+        self.assertIn("market_open=", context["session_state"])
+        self.assertEqual(context["execution_mode"], "python")
+        self.assertFalse(context["trading_enabled"])
+        self.assertFalse(context["allow_live_trading"])
+        self.assertFalse(context["limit_order_enabled"])
 
 
 class ProductionShapeTests(unittest.TestCase):

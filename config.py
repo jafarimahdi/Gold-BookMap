@@ -147,11 +147,25 @@ def _refresh() -> None:
     g["BASE_TF_MINUTES"] = _tf_minutes.get(str(g["TIMEFRAME"]).upper(), 5)
     g["POWER_BAR_SECONDS"] = int(_ffloat(
         "POWER_BAR_SECONDS", 60.0 * g["BASE_TF_MINUTES"]))
-    # fusionv1: the power-lead advisory (Option B) - POWER speaks + panel floor
-    # + agreement. Evidence: council_shadow 10-15/10-16 (floor 45 passed 0 both
-    # days; floor 30 + agreement graded 88-100%). Off-switch below.
+    # Power-lead floor 30 is shadow-only until the required evidence/design
+    # review and owner-approved one-switch. The legacy POWER_LEAD_ENABLED key is
+    # retained for .env compatibility but no longer authorizes sub-threshold
+    # execution; POWER_LEAD_SHADOW_ENABLED controls candidate recording only.
     g["POWER_LEAD_ENABLED"] = _fget("POWER_LEAD_ENABLED", "1") == "1"
     g["POWER_LEAD_CONF_FLOOR"] = _ffloat("POWER_LEAD_CONF_FLOOR", 30.0)
+    g["POWER_LEAD_SHADOW_ENABLED"] = _fget("POWER_LEAD_SHADOW_ENABLED", "1") == "1"
+    # Effective A2 values are exposed for config receipts; aggressive_trigger
+    # still gives explicit environment values first priority. Defaults match its
+    # own reviewed fallback and do not enable the A2 lane.
+    g["AGGRESSIVE_ENTRY_ENABLED"] = _fget("AGGRESSIVE_ENTRY_ENABLED", "0") == "1"
+    g["A2_LEAN_MIN"] = _ffloat("A2_LEAN_MIN", 0.25)
+    g["A2_LEAN_HOLD_SECONDS"] = _ffloat("A2_LEAN_HOLD_SECONDS", 60.0)
+    g["A2_PANEL_WINDOW_SECONDS"] = _ffloat("A2_PANEL_WINDOW_SECONDS", 300.0)
+    g["A2_BURST_MAX_PER_DAY"] = _fint("A2_BURST_MAX_PER_DAY", 10)
+    g["A2_BURST_COOLDOWN_MINUTES"] = _ffloat("A2_BURST_COOLDOWN_MINUTES", 5.0)
+    g["A2_BURST_SL_PTS"] = _ffloat("A2_BURST_SL_PTS", 1.8)
+    g["A2_BURST_TP_PTS"] = _ffloat("A2_BURST_TP_PTS", 1.8)
+    g["A2_MIN_RR"] = _ffloat("A2_MIN_RR", 1.0)
     g["POWER_V2_MEMORY_ENABLED"] = _fget("POWER_V2_MEMORY_ENABLED", "0") == "1"
     g["DATA_SOURCE"] = _fget("DATA_SOURCE", "demo").lower()
     # Normalize legacy name: ninjabridge -> bookmapbridge (still supported)

@@ -623,9 +623,37 @@ def a2_serve_eval(served: Any, market_data: Mapping[str, Any], now: datetime,
                 notes.append(f"A2 burst: {_eyes_state(v)} -> refused: {v['reason']}")
             return None, notes
 
+        session_state = "UNKNOWN"
+        try:
+            from session import session_context
+            session = session_context(now)
+            session_state = (
+                f"{session.get('session', 'UNKNOWN')} | "
+                f"market_open={session.get('market_open', 'UNKNOWN')} | "
+                f"budapest_trading={session.get('budapest_trading', 'UNKNOWN')}")
+        except Exception:
+            pass
+        power_context = power.get("context", {})
+        if not isinstance(power_context, Mapping):
+            power_context = {}
+        signal_confidence = getattr(served, "confidence", None)
+        if signal_confidence is None:
+            signal_confidence = getattr(served, "signal_confidence", None)
+        ai_model = getattr(served, "ai_model", None) or "NOT_AVAILABLE_ON_A2_SERVE"
         ctx: Dict[str, Any] = {
             "bid": bid,
             "ask": ask,
+            "regime": (getattr(served, "regime", None)
+                       or power_context.get("market_regime", "UNKNOWN")),
+            "signal_direction": getattr(served, "signal_direction", "UNKNOWN"),
+            "signal_confidence": signal_confidence,
+            "signal_strength": getattr(served, "signal_strength", None),
+            "ai_model": ai_model,
+            "session_state": session_state,
+            "execution_mode": getattr(config, "EXECUTION_MODE", "UNKNOWN"),
+            "trading_enabled": getattr(config, "TRADING_ENABLED", None),
+            "allow_live_trading": getattr(config, "ALLOW_LIVE_TRADING", None),
+            "limit_order_enabled": getattr(config, "LIMIT_ORDER_ENABLED", None),
             "news_state": getattr(getattr(served, "news", None), "news_state", ""),
             "has_data": market_data.get("has_data", True),
             "last_data_age_seconds": market_data.get("last_data_age_seconds", 0.0),

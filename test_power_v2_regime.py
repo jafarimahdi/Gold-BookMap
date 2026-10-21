@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from power_v2_regime import (
     _label_adx,
     classify_m5_regime,
+    set_bar_seconds,
     wilder_adx,
 )
 
@@ -102,6 +103,81 @@ class PowerV2RegimeTests(unittest.TestCase):
 
     def test_adx_needs_sufficient_bars(self):
         self.assertIsNone(wilder_adx([], period=14))
+
+    def test_m3_completion_boundary_uses_active_180_second_clock(self):
+        set_bar_seconds(180)
+        try:
+            now = datetime(2026, 10, 21, 12, 7, 30, tzinfo=timezone.utc)
+            boundary = datetime(2026, 10, 21, 12, 6, 0, tzinfo=timezone.utc)
+            first_start = boundary - timedelta(minutes=3 * 36)
+            ticks = []
+            for i in range(36):
+                start = first_start + timedelta(minutes=3 * i)
+                center = 4300.0 + i * 0.5
+                for offset, price in ((10, center), (60, center + 0.2),
+                                      (120, center - 0.2), (170, center + 0.15)):
+                    ticks.append({"timestamp": start + timedelta(seconds=offset),
+                                  "price": price})
+            # Fresh feed proof belongs to the unfinished bar, not the ADX input.
+            ticks.append({"timestamp": now - timedelta(seconds=1), "price": 4318.0})
+
+            result = classify_m5_regime(ticks, now=now)
+
+            self.assertEqual(result["timeframe"], "M3")
+            self.assertEqual(result["bar_seconds"], 180)
+            self.assertEqual(result["bar_end_utc"], "2026-10-21T12:06:00Z")
+            self.assertEqual(result["market_regime"], "TREND")
+            self.assertEqual(result["reason"], "ADX_TREND")
+            self.assertEqual(result["bars_used"], 28)
+            self.assertFalse(result["breakout_confirmed"])
+        finally:
+            set_bar_seconds(300)
+
+    def test_m3_gap_fails_closed_on_the_active_clock(self):
+        set_bar_seconds(180)
+        try:
+            now = datetime(2026, 10, 21, 12, 7, 30, tzinfo=timezone.utc)
+            boundary = datetime(2026, 10, 21, 12, 6, 0, tzinfo=timezone.utc)
+            first_start = boundary - timedelta(minutes=3 * 36)
+            ticks = []
+            for i in range(36):
+                if i == 30:
+                    continue
+                start = first_start + timedelta(minutes=3 * i)
+                center = 4300.0 + i * 0.5
+                for offset, price in ((10, center), (60, center + 0.2),
+                                      (120, center - 0.2), (170, center + 0.15)):
+                    ticks.append({"timestamp": start + timedelta(seconds=offset),
+                                  "price": price})
+            ticks.append({"timestamp": now - timedelta(seconds=1), "price": 4318.0})
+            result = classify_m5_regime(ticks, now=now)
+            self.assertEqual(result["market_regime"], "UNKNOWN")
+            self.assertEqual(result["reason"], "GAP_IN_COMPLETED_M3_HISTORY")
+        finally:
+            set_bar_seconds(300)
+
+    def test_m3_classifier_refuses_untyped_fixed_m5_probe_rows(self):
+        set_bar_seconds(180)
+        try:
+            now = datetime(2026, 10, 21, 12, 7, 30, tzinfo=timezone.utc)
+            m5_start = datetime(2026, 10, 21, 12, 0, 0, tzinfo=timezone.utc)
+            history = [{"start": m5_start.timestamp(), "open": 4300.0,
+                        "high": 4301.0, "low": 4299.0, "close": 4300.5}]
+            ticks = [{"timestamp": now - timedelta(seconds=1), "price": 4300.0}]
+
+            result = classify_m5_regime(ticks, now=now, history_bars=history)
+
+            self.assertTrue(result["history_timeframe_mismatch"])
+            self.assertTrue(result["history_bars_refused"])
+            self.assertEqual(result["bars_available"], 0)
+            self.assertEqual(result["reason"], "NO_TRADE_IN_LATEST_COMPLETED_M3_BAR")
+
+            malformed = classify_m5_regime(
+                ticks, now=now, history_bars=[None])
+            self.assertTrue(malformed["history_timeframe_mismatch"])
+            self.assertTrue(malformed["history_bars_refused"])
+        finally:
+            set_bar_seconds(300)
 
 
 if __name__ == "__main__":

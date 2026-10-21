@@ -1,11 +1,12 @@
-"""Conservative, Power-v2-only M5 regime gate from timestamped trade prints.
+"""Conservative, Power-v2-only regime gate from timestamped trade prints.
 
-The classifier consumes completed 5-minute OHLC bars built from print prices.
-It does not read legacy POWER/Shooting/Escort decisions or infer bars from MBO
-and depth updates. Missing history, gaps, a stale tape, a history/live price
-scale mismatch, or the ADX gray zone all return UNKNOWN. Range breakouts are
-intentionally not authorized in this first pass: breakout_confirmed is always
-False, so RANGE fails closed to NEITHER.
+The classifier consumes completed POWER-timeframe OHLC bars (M5 by default;
+Fusion may set M3) built from print prices. It does not read legacy
+POWER/Shooting/Escort decisions or infer bars from MBO and depth updates.
+Missing history, gaps, a stale tape, a history/live price-scale mismatch, or
+the ADX gray zone all return UNKNOWN. Range breakouts are intentionally not
+authorized in this first pass: breakout_confirmed is always False, so RANGE
+fails closed to NEITHER.
 """
 from __future__ import annotations
 
@@ -26,12 +27,12 @@ BAR_SECONDS = 300  # default M5; fusionv1: set_bar_seconds() re-times the ladder
 
 
 def set_bar_seconds(seconds: int) -> None:
-    """fusionv1: re-time the regime ladder (TIMEFRAME from .env).
+    """Set the active POWER interval (M5 by default; e.g. 180 for M3).
 
-    Sets the module bar length used by bucketing, contiguity and gap math.
-    History bars backfilled from the (currently empty) probe CSV assume 300s
-    buckets; at other lengths the contiguity check refuses them and the ladder
-    fails closed to live-bar warm-up, which is the safe behavior.
+    The interval governs bucketing, completion boundaries, contiguity and gap
+    math. The current probe format is fixed at 300s; Step 2 rejects those rows
+    when this interval differs, and the classifier independently refuses
+    fixed-M5 history at non-M5 intervals.
     """
     global BAR_SECONDS
     seconds = int(seconds)
@@ -65,7 +66,7 @@ def _finite_positive(value: Any) -> Optional[float]:
 def _completed_bars(
     tick_data: List[Dict[str, Any]], boundary: datetime
 ) -> tuple[List[Dict[str, float]], Optional[datetime]]:
-    """Aggregate timestamped print prices into closed UTC M5 bars only."""
+    """Aggregate timestamped print prices into closed active-timeframe bars."""
     boundary_epoch = boundary.timestamp()
     points = []
     for order, row in enumerate(tick_data or []):
@@ -106,7 +107,7 @@ def _completed_bars(
 
 
 def _latest_valid_tick(tick_data: List[Dict[str, Any]], as_of: datetime) -> Optional[datetime]:
-    """Latest valid incoming tick, including the unfinished M5 bar, for freshness only."""
+    """Latest valid tick, including the unfinished active bar, for freshness only."""
     latest: Optional[datetime] = None
     for row in tick_data or []:
         if not isinstance(row, Mapping):
@@ -188,14 +189,14 @@ def classify_m5_regime(
     max_tick_age_seconds: float = 60.0,
     grace_seconds: float = 5.0,
 ) -> Dict[str, Any]:
-    """Return a fail-closed regime label and diagnostics from completed M5 bars.
+    """Return a fail-closed regime label from completed active-timeframe bars.
 
-    Labels: ADX >= 25 => TREND; ADX < 20 => RANGE; 20..25 => UNKNOWN.
-    No side direction is produced here. RANGE breakout authorization is disabled.
-    Before any history bar is merged with live bars, the two price levels are
-    compared (check_price_scale_compatibility); if they are not the same scale
-    the history is refused and the call fails closed with reason
-    HISTORY_PRICE_SCALE_MISMATCH (market_regime stays UNKNOWN).
+    The public ``classify_m5_regime`` name is retained for compatibility; its
+    interval follows BAR_SECONDS. Labels: ADX >= 25 => TREND; ADX < 20 =>
+    RANGE; 20..25 => UNKNOWN. No side direction is produced here. RANGE
+    breakout authorization is disabled. Before probe history is merged, price
+    scale and timeframe compatibility are checked; neither source is silently
+    rescaled or relabeled.
     """
     current = _utc(now)
     if current is None:
@@ -205,7 +206,12 @@ def classify_m5_regime(
     if not (0 <= range_adx_max < trend_adx_min <= 100):
         raise ValueError("ADX thresholds must satisfy 0 <= range < trend <= 100")
 
-    boundary = last_completed_m5_end(current, grace_seconds=grace_seconds)
+    # TIMEFRAME unification must govern BOTH tick bucketing and bar completion.
+    # Omitting BAR_SECONDS here leaves the classifier on a hidden 300s clock
+    # while POWER may be running M3/180s, causing a false fail-closed veto.
+    boundary = last_completed_m5_end(
+        current, grace_seconds=grace_seconds, bar_seconds=BAR_SECONDS)
+    timeframe = f"M{max(1, BAR_SECONDS // 60)}"
     live_bars, _latest_completed_tick = _completed_bars(tick_data or [], boundary)
     # Fail closed on history/live price-scale disagreement. Probe bars and live
     # prints must quote the same price units before they may share one OHLC
@@ -225,12 +231,17 @@ def classify_m5_regime(
                                     raw.get("low"), raw.get("close"))]
     scale_check = check_price_scale_compatibility(history_price_pool, live_prices)
     use_history = scale_check["status"] == "OK"
-    history_bars_refused = bool(history_price_pool) and not use_history
+    # The probe's compact OHLC format is fixed M5/300s. Without explicit source
+    # metadata, never reinterpret those candles as a different active interval.
+    history_timeframe_compatible = not bool(history_bars) or BAR_SECONDS == 300
+    history_bars_refused = bool(history_bars) and (
+        not history_timeframe_compatible or (bool(history_price_pool) and not use_history))
     # The bounded probe supplies verified historical OHLC bars directly. Merge
     # these only into regime classification, only after the scale gate passes;
     # live tick_data remains independently responsible for freshness and is
     # still passed unchanged to run_power_v2.
-    accepted_history = history_bars if use_history else []
+    accepted_history = (history_bars if use_history and history_timeframe_compatible
+                        else [])
     bars_by_start: Dict[int, Dict[str, float]] = {}
     for raw in accepted_history:
         if not isinstance(raw, Mapping):
@@ -279,6 +290,7 @@ def classify_m5_regime(
                 "next_bar_start_utc": datetime.fromtimestamp(
                     int(following["start"]), tz=timezone.utc
                 ).isoformat().replace("+00:00", "Z"),
+                "missing_bar_intervals": max(0, delta_seconds // BAR_SECONDS - 1),
                 "missing_m5_intervals": max(0, delta_seconds // BAR_SECONDS - 1),
             })
 
@@ -295,6 +307,8 @@ def classify_m5_regime(
         "breakout_confirmed": False,
         "adx": None,
         "period": period,
+        "timeframe": timeframe,
+        "bar_seconds": BAR_SECONDS,
         "bars_used": len(recent),
         "bars_available": len(bars),
         "bars_required": needed,
@@ -308,6 +322,8 @@ def classify_m5_regime(
         "latest_tick_age_seconds": None,
         "reason": "UNKNOWN",
         "price_scale_check": scale_check,
+        "history_timeframe_compatible": history_timeframe_compatible,
+        "history_timeframe_mismatch": bool(history_bars) and not history_timeframe_compatible,
         "history_bars_refused": history_bars_refused,
     }
     if scale_check["status"] == "MISMATCH":
@@ -322,14 +338,14 @@ def classify_m5_regime(
         return result
 
     # Freshness is measured against wall-clock now, not the historical bar close;
-    # otherwise a stalled feed could look fresh throughout the next M5 interval.
+    # otherwise a stalled feed could look fresh throughout the next bar interval.
     tick_age = max(0.0, (current - latest_tick).total_seconds())
     result["latest_tick_age_seconds"] = round(tick_age, 3)
     if tick_age > max_tick_age_seconds:
         result["reason"] = "STALE_FEED"
         return result
     if not bars or int(bars[-1]["start"]) + BAR_SECONDS != int(boundary.timestamp()):
-        result["reason"] = "NO_TRADE_IN_LATEST_COMPLETED_M5_BAR"
+        result["reason"] = f"NO_TRADE_IN_LATEST_COMPLETED_{timeframe}_BAR"
         return result
     if len(recent) < needed:
         result["bars_used"] = len(recent)
@@ -341,11 +357,11 @@ def classify_m5_regime(
         except Exception:
             _prev = {"informational_only": True, "bars": len(recent)}
         result["provisional"] = _prev
-        result["reason"] = "INSUFFICIENT_COMPLETED_M5_HISTORY"
+        result["reason"] = f"INSUFFICIENT_COMPLETED_{timeframe}_HISTORY"
         return result
     if recent_gaps:
         result["bars_used"] = len(recent)
-        result["reason"] = "GAP_IN_COMPLETED_M5_HISTORY"
+        result["reason"] = f"GAP_IN_COMPLETED_{timeframe}_HISTORY"
         return result
 
     adx = wilder_adx(recent, period=period)

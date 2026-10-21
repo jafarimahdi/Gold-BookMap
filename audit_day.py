@@ -1554,11 +1554,12 @@ def test_5_guards(text, decisions, feed):
                        f"{len(DIARY_FOR_DAY)} diary record(s) this day")
         _fb = _fallback_stats(decisions, DIARY_FOR_DAY)
         if _fb.get("power-lead"):
-            why.append(f"POWER-LEAD CARRIES: {_fb['power-lead']} trade(s) carried by the "
-                       f"POWER-lead (fusion v1) - the AI was quiet, POWER spoke with "
-                       f"dominance and the class floor was met. Receipts: ai_model="
-                       f"power-lead-v1 rows in the decision log; per-call detail in "
-                       f"power_report_card.py and council_shadow.py for this day")
+            why.append(f"POWER-ORIGIN DECISIONS: {_fb['power-lead']} decision(s) attributed "
+                       f"to POWER carry logic (legacy ai_model=power-lead-v1 or current "
+                       f"decision_source=POWER_V2_CONFIGURED_THRESHOLD_CARRY). The actual "
+                       f"AI model remains in ai_model; below-threshold candidates are "
+                       f"shadow-only, not carries. This count is source attribution, not "
+                       f"an executed-trade count")
         if _fb["total"]:
             if _fb["fallback"]:
                 why.append(f"WHO ANSWERED: {_fb['ai']} answer(s) from the AI, "
@@ -3269,27 +3270,31 @@ def _decision_source_line():
 def _fallback_stats(decisions, diary):
     """How many of the day's answers came from the AI, and how many from the backup rule.
 
-    Two sources, because the truth must also be available for days recorded before the
-    ai_model column existed (build 24k):
-      - decisions rows: the ai_model column ("gemini-..." vs "fallback-...")
-      - diary records : ai_rationale, whose fallback text has always contained "FALLBACK"
+    Three compatible sources keep attribution honest across schema generations:
+      - current decisions rows: decision_source + actual ai_model
+      - legacy decisions rows: ai_model (including the historical power-lead-v1 label)
+      - pre-24k diary records : ai_rationale, whose fallback text contains "FALLBACK"
 
     This matters because AI_FALLBACK_CONFIDENCE defaults to 70, which is ABOVE the 50%
-    gate: a rule-made answer can pass a gate the real AI never cleared, and every earlier
-    report presented it as "the AI was confident".
+    gate: a rule-made answer can pass a gate the real AI never cleared. POWER carries are
+    attributed separately and do not overwrite the actual responding AI/model label.
     """
     models = Counter()
     none_why = Counter()
+    has_decision_source = any("decision_source" in d for d in (decisions or []))
     for d in decisions or []:
         m = str(d.get("ai_model") or "").strip().lower()
+        source = str(d.get("decision_source") or "").strip().upper()
+        if (source == "POWER_V2_CONFIGURED_THRESHOLD_CARRY"
+                or m.startswith("power-lead")):
+            models["power-lead"] += 1  # source attribution; not an AI model label
+            continue
         if not m:
             continue
         if m.startswith("fallback"):
             models["fallback"] += 1
-        elif m.startswith("power-lead"):
-            models["power-lead"] += 1   # fusion v1: POWER carried it, AI was quiet
         elif m.startswith("none") or m == "unknown":
-            models["none"] += 1          # 24m/A1b: nobody answered - not the AI, not a rule
+            models["none"] += 1          # nobody answered - not the AI, not a rule
             none_why[m] += 1
         else:
             models["ai"] += 1
@@ -3301,9 +3306,11 @@ def _fallback_stats(decisions, diary):
             if not raw:
                 continue
             models["fallback" if "FALLBACK" in raw.upper() else "ai"] += 1
-        src = "diary ai_rationale (pre-24k rows have no ai_model column)"
+        src = "diary ai_rationale (pre-24k rows have no decision/model columns)"
+    elif has_decision_source:
+        src = "decision_source + ai_model columns"
     else:
-        src = "ai_model column"
+        src = "ai_model column (legacy source attribution)"
     total = (models.get("ai", 0) + models.get("fallback", 0)
              + models.get("none", 0) + models.get("power-lead", 0))
     return {"ai": models.get("ai", 0), "fallback": models.get("fallback", 0),

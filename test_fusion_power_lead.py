@@ -1,13 +1,8 @@
-"""FUSION v1 tests - the power-lead advisory + TIMEFRAME unification.
+"""Regression tests for shadow-only Power lead and TIMEFRAME unification.
 
-Owner-ordered 2026-10-17 (Option B evidence: council_shadow 10-15/10-16).
-
-Covers:
-  - the advisory gate: floor 30 + agreement carries POWER's trade when the AI
-    is quiet; disagreement blocks; the old >=45 path unchanged; the off-switch
-  - receipts: decision.model="power-lead-v1", rationale stamp, loop _record
-  - TIMEFRAME plumbing: config map, adapter windows, boundary math, regime
-    re-timing, run_power_v2 labels (M3 end to end)
+The configured execution threshold remains authoritative. POWER candidates
+between the shadow floor and live threshold are recorded but never authorize an
+order. M3 boundary, probe compatibility and time-frame plumbing are tested too.
 """
 import math
 from datetime import datetime, timedelta, timezone
@@ -49,38 +44,47 @@ def open_corridor(monkeypatch):
 
 
 # --------------------------------------------------------------------------
-# 1. the power-lead advisory (fusion v1)
+# 1. shadow-only Power lead; configured-threshold carry remains separate
 # --------------------------------------------------------------------------
-def test_lead_carries_at_floor_with_agreement(monkeypatch):
+def test_lead_at_shadow_floor_is_recorded_but_not_carried(monkeypatch):
     open_corridor(monkeypatch)
     monkeypatch.setattr(main.config, "AI_CONFIDENCE_THRESHOLD", 45.0)
     monkeypatch.setattr(main.config, "POWER_LEAD_CONF_FLOOR", 30.0)
     monkeypatch.setattr(main.config, "POWER_LEAD_ENABLED", True)
+    monkeypatch.setattr(main.config, "POWER_LEAD_SHADOW_ENABLED", True)
     recorded = []
     monkeypatch.setattr(main, "_record", lambda *a, **k: recorded.append(a))
     decision = hold_decision()
-    ok, reason = _shooting_execution_gate(
-        decision, snap(confidence=35.0, direction="UP",
-                       class_direction="BUY", side="BUY"))
-    assert decision.action == "BUY"
-    assert decision.model == "power-lead-v1"
-    assert "power-lead v1" in decision.rationale
-    assert "conf 35 >= floor 30" in decision.rationale
-    assert any("POWER-LEAD" in str(a) for a in recorded), recorded
-    assert ok and "corridor open" in reason
+    snapshot = snap(confidence=35.0, direction="UP",
+                    class_direction="BUY", side="BUY")
+    snapshot.shadow_candidates = {}
+    ok, reason = _shooting_execution_gate(decision, snapshot)
+    assert decision.action == "HOLD"
+    assert decision.model == "none-quiet"
+    assert any("POWER-LEAD SHADOW" in str(a) for a in recorded), recorded
+    candidate = snapshot.shadow_candidates["power_lead"]
+    assert candidate["eligible"] is True
+    assert candidate["shadow_only"] is True
+    assert candidate["execution_enabled"] is False
+    assert not ok and "shadow candidate only" in reason
 
 
-def test_lead_blocked_on_classroom_disagreement(monkeypatch):
+def test_lead_shadow_records_classroom_disagreement_as_a_blocker(monkeypatch):
     open_corridor(monkeypatch)
     monkeypatch.setattr(main.config, "AI_CONFIDENCE_THRESHOLD", 45.0)
     monkeypatch.setattr(main.config, "POWER_LEAD_CONF_FLOOR", 30.0)
-    monkeypatch.setattr(main.config, "POWER_LEAD_ENABLED", True)
+    monkeypatch.setattr(main.config, "POWER_LEAD_SHADOW_ENABLED", True)
+    monkeypatch.setattr(main, "_record", lambda *_a, **_k: None)
     decision = hold_decision()
-    ok, reason = _shooting_execution_gate(
-        decision, snap(confidence=35.0, direction="UP",
-                       class_direction="SELL", side="BUY"))
+    snapshot = snap(confidence=35.0, direction="UP",
+                    class_direction="SELL", side="BUY")
+    snapshot.shadow_candidates = {}
+    ok, reason = _shooting_execution_gate(decision, snapshot)
     assert decision.action == "HOLD"
     assert ok is True and reason == "no new-entry action"
+    candidate = snapshot.shadow_candidates["power_lead"]
+    assert candidate["eligible"] is False
+    assert "SIGNAL_DIRECTION_DISAGREES_WITH_POWER" in candidate["blockers"]
 
 
 def test_lead_respects_floor(monkeypatch):
@@ -104,18 +108,25 @@ def test_old_gate_still_fires_without_agreement(monkeypatch):
         decision, snap(confidence=50.0, direction="UP",
                        class_direction="SELL", side="BUY"))
     assert decision.action == "BUY"
-    assert decision.model == "none-quiet"  # old path: not via the lead
+    assert decision.model == "none-quiet"  # actual Step3/AI label is not overwritten
+    assert decision.decision_source == "POWER_V2_CONFIGURED_THRESHOLD_CARRY"
     assert ok
 
 
-def test_lead_off_switch_restores_old_behavior(monkeypatch):
+def test_legacy_lead_switch_cannot_make_subthreshold_candidate_executable(monkeypatch):
     open_corridor(monkeypatch)
     monkeypatch.setattr(main.config, "AI_CONFIDENCE_THRESHOLD", 45.0)
     monkeypatch.setattr(main.config, "POWER_LEAD_CONF_FLOOR", 30.0)
-    monkeypatch.setattr(main.config, "POWER_LEAD_ENABLED", False)
+    monkeypatch.setattr(main.config, "POWER_LEAD_ENABLED", True)
+    monkeypatch.setattr(main.config, "POWER_LEAD_SHADOW_ENABLED", True)
+    monkeypatch.setattr(main, "_record", lambda *_a, **_k: None)
     decision = hold_decision()
-    _shooting_execution_gate(decision, snap(confidence=35.0))
+    snapshot = snap(confidence=35.0)
+    snapshot.shadow_candidates = {}
+    ok, reason = _shooting_execution_gate(decision, snapshot)
     assert decision.action == "HOLD"
+    assert not ok and "shadow candidate only" in reason
+    assert snapshot.shadow_candidates["power_lead"]["execution_enabled"] is False
 
 
 def test_lead_requires_dominant_power_reason(monkeypatch):
@@ -148,6 +159,20 @@ def test_config_timeframe_drives_power_bar_seconds(monkeypatch):
     config._refresh()
     assert config.POWER_BAR_SECONDS == 300
     monkeypatch.delenv("TIMEFRAME")
+    config._refresh()
+
+
+def test_config_refresh_exposes_a2_planner_env_overrides(monkeypatch):
+    with monkeypatch.context() as patcher:
+        patcher.setenv("AGGRESSIVE_ENTRY_ENABLED", "0")
+        patcher.setenv("A2_BURST_SL_PTS", "2.1")
+        patcher.setenv("A2_BURST_TP_PTS", "2.4")
+        patcher.setenv("A2_MIN_RR", "1.15")
+        config._refresh()
+        assert config.AGGRESSIVE_ENTRY_ENABLED is False
+        assert config.A2_BURST_SL_PTS == 2.1
+        assert config.A2_BURST_TP_PTS == 2.4
+        assert config.A2_MIN_RR == 1.15
     config._refresh()
 
 
@@ -228,14 +253,17 @@ def test_regime_set_bar_seconds_buckets_at_m3():
     try:
         set_bar_seconds(180)
         result = classify_m5_regime(ticks, now=now)
+        assert result["timeframe"] == "M3"
+        assert result["bar_seconds"] == 180
+        assert result["bar_end_utc"] == "2026-10-19T11:57:00Z"
         assert result.get("bars_available", 0) >= 2
-        assert result.get("bar_end_utc") is not None
     finally:
         set_bar_seconds(300)
     result5 = classify_m5_regime(ticks, now=now)
-    # with 180s bars re-read as 300s the available count must differ
-    assert result5.get("bars_available", 0) != result.get("bars_available", 0) or \
-        result5.get("bars_available", 0) >= 2
+    assert result5["timeframe"] == "M5"
+    assert result5["bar_seconds"] == 300
+    assert result5["bar_end_utc"] == "2026-10-19T11:55:00Z"
+    assert result5["bar_end_utc"] != result["bar_end_utc"]
 
 
 def test_regime_rejects_tiny_bars():
@@ -266,35 +294,40 @@ def test_run_power_v2_m3_end_to_end():
 # --------------------------------------------------------------------------
 # 3. REVERSE-ENGINEERING CORNERS (audit pass 2, owner-ordered)
 # --------------------------------------------------------------------------
-def test_lead_down_direction_mirror(monkeypatch):
-    """The lead must be side-symmetric: POWER DOWN + class SELL -> carried."""
+def test_lead_down_direction_mirror_is_shadow_only(monkeypatch):
+    """POWER DOWN + class SELL produces a record, never a subthreshold order."""
     open_corridor(monkeypatch)
     monkeypatch.setattr(main.config, "AI_CONFIDENCE_THRESHOLD", 45.0)
     monkeypatch.setattr(main.config, "POWER_LEAD_CONF_FLOOR", 30.0)
-    monkeypatch.setattr(main.config, "POWER_LEAD_ENABLED", True)
+    monkeypatch.setattr(main.config, "POWER_LEAD_SHADOW_ENABLED", True)
+    monkeypatch.setattr(main, "_record", lambda *_a, **_k: None)
     decision = hold_decision()
-    ok, reason = _shooting_execution_gate(
-        decision, snap(confidence=38.0, direction="DOWN",
-                       reason_code="DOWNWARD_FORCE_DOMINATES",
-                       class_direction="SELL", side="SELL"))
-    assert decision.action == "SELL"
-    assert decision.model == "power-lead-v1"
-    assert ok and "corridor open" in reason
+    snapshot = snap(confidence=38.0, direction="DOWN",
+                    reason_code="DOWNWARD_FORCE_DOMINATES",
+                    class_direction="SELL", side="SELL")
+    snapshot.shadow_candidates = {}
+    ok, reason = _shooting_execution_gate(decision, snapshot)
+    assert decision.action == "HOLD"
+    assert not ok and "shadow candidate only" in reason
+    assert snapshot.shadow_candidates["power_lead"]["eligible"] is True
+    assert snapshot.shadow_candidates["power_lead"]["power_direction"] == "DOWN"
 
 
-def test_lead_with_quiet_class_direction(monkeypatch):
-    """Class direction absent (HOLD) -> agreement is vacuous -> carried."""
+def test_lead_with_quiet_class_direction_is_shadow_only(monkeypatch):
+    """Class direction absent (HOLD) is visible as agreement, not authorized."""
     open_corridor(monkeypatch)
     monkeypatch.setattr(main.config, "AI_CONFIDENCE_THRESHOLD", 45.0)
     monkeypatch.setattr(main.config, "POWER_LEAD_CONF_FLOOR", 30.0)
-    monkeypatch.setattr(main.config, "POWER_LEAD_ENABLED", True)
+    monkeypatch.setattr(main.config, "POWER_LEAD_SHADOW_ENABLED", True)
+    monkeypatch.setattr(main, "_record", lambda *_a, **_k: None)
     decision = hold_decision()
-    ok, _ = _shooting_execution_gate(
-        decision, snap(confidence=32.0, direction="UP",
-                       class_direction="HOLD", side="BUY"))
-    assert decision.action == "BUY"
-    assert decision.model == "power-lead-v1"
-    assert ok
+    snapshot = snap(confidence=32.0, direction="UP",
+                    class_direction="HOLD", side="BUY")
+    snapshot.shadow_candidates = {}
+    ok, reason = _shooting_execution_gate(decision, snapshot)
+    assert decision.action == "HOLD"
+    assert not ok and "shadow candidate only" in reason
+    assert snapshot.shadow_candidates["power_lead"]["agreement"] is True
 
 
 def test_m3_diary_roundtrip(tmp_path):
@@ -378,31 +411,33 @@ def test_power_line_silent_without_power(monkeypatch):
     assert recorded == []
 
 
-def test_lead_hold_line_below_floor(monkeypatch):
-    """Near-miss is never silent: conf below floor prints WHY it held."""
+def test_lead_hold_line_below_shadow_floor(monkeypatch):
+    """Near-miss is never silent: sub-floor confidence prints its exact floor."""
     open_corridor(monkeypatch)
     monkeypatch.setattr(main.config, "AI_CONFIDENCE_THRESHOLD", 45.0)
     monkeypatch.setattr(main.config, "POWER_LEAD_CONF_FLOOR", 30.0)
-    monkeypatch.setattr(main.config, "POWER_LEAD_ENABLED", True)
     recorded = []
     monkeypatch.setattr(main, "_record", lambda *a, **k: recorded.append(a))
     decision = hold_decision()
     ok, reason = _shooting_execution_gate(
         decision, snap(confidence=22.0, direction="UP", class_direction="BUY"))
     assert decision.action == "HOLD"
+    assert ok is True and reason == "no new-entry action"
     holds = [a for a in recorded if "POWER-LEAD" in str(a[0])]
-    assert holds and "holds: conf 22 < floor 30" in holds[0][1]
+    assert holds and "holds below shadow floor: signal_conf=22.0 floor=30.0" in holds[0][1]
 
 
-def test_lead_hold_line_on_disagreement(monkeypatch):
+def test_lead_shadow_receipt_identifies_disagreement_blocker(monkeypatch):
     open_corridor(monkeypatch)
     monkeypatch.setattr(main.config, "AI_CONFIDENCE_THRESHOLD", 45.0)
     monkeypatch.setattr(main.config, "POWER_LEAD_CONF_FLOOR", 30.0)
-    monkeypatch.setattr(main.config, "POWER_LEAD_ENABLED", True)
+    monkeypatch.setattr(main.config, "POWER_LEAD_SHADOW_ENABLED", True)
     recorded = []
     monkeypatch.setattr(main, "_record", lambda *a, **k: recorded.append(a))
     decision = hold_decision()
-    _shooting_execution_gate(
-        decision, snap(confidence=35.0, direction="UP", class_direction="SELL"))
-    holds = [a for a in recorded if "POWER-LEAD" in str(a[0])]
-    assert holds and "holds: class disagrees" in holds[0][1]
+    snapshot = snap(confidence=35.0, direction="UP", class_direction="SELL")
+    snapshot.shadow_candidates = {}
+    _shooting_execution_gate(decision, snapshot)
+    receipts = [a for a in recorded if "POWER-LEAD SHADOW" in str(a[0])]
+    assert receipts and "SIGNAL_DIRECTION_DISAGREES_WITH_POWER" in receipts[0][1]
+    assert snapshot.shadow_candidates["power_lead"]["eligible"] is False

@@ -360,9 +360,23 @@ def _a1_cache_store(snapshot, market_data, now, spread_now=0.0):
 
 
 
-def _power_probe_startup_history(symbol, now, live_ticks):
+def _power_probe_startup_history(symbol, now, live_ticks, bar_seconds=300):
+    """Load the fixed-M5 probe only when it matches the active POWER clock.
+
+    The BookMap add-on currently writes M5/300s OHLC. At M3 (or any other
+    interval) those rows cannot be relabeled/resampled into valid bars, so the
+    loader reports the mismatch and the regime ladder warms from live bars only.
+    """
     import os
 
+    try:
+        bar_seconds = int(bar_seconds)
+        if bar_seconds < 60:
+            raise ValueError("bar interval must be >=60 seconds")
+    except (TypeError, ValueError, OverflowError):
+        bar_seconds = 300  # same fail-closed M5 fallback as set_bar_seconds()
+    regime_tf = f"M{max(1, bar_seconds // 60)}"
+    probe_tf = "M5"
     symbol_key = str(symbol or "").strip()
     directory_key = os.environ.get("POWER_HISTORY_PROBE_DIR", "").strip()
     max_age_key = os.environ.get("POWER_HISTORY_PROBE_MAX_AGE_SECONDS", "21600").strip()
@@ -374,7 +388,7 @@ def _power_probe_startup_history(symbol, now, live_ticks):
     except OSError:
         snapshot_mtime_ns = None
     # A long-running analysis process notices a newly atomically replaced snapshot.
-    key = (symbol_key, directory_key, max_age_key, snapshot_mtime_ns)
+    key = (symbol_key, directory_key, max_age_key, snapshot_mtime_ns, bar_seconds)
     cached = _POWER_PROBE_STARTUP_CACHE.get(key)
     if cached is None:
         try:
@@ -391,14 +405,35 @@ def _power_probe_startup_history(symbol, now, live_ticks):
         _POWER_PROBE_STARTUP_CACHE[key] = cached
 
     diagnostics = dict(cached.get("diagnostics", {}))
-    history_bars = cached.get("history_bars", [])
-    diagnostics["probe_completed_m5_buckets"] = len(history_bars)
-    diagnostics["probe_latest_contiguous_m5_bars"] = len(history_bars)
-    diagnostics["loaded_bars"] = len(history_bars)
-    # Return the original live tick list untouched. Probe OHLC is passed as a
-    # separate regime-only argument; run_power_v2 still receives original tick_data.
-    # A1: bound the POWER probe history ring (POWER_HISTORY_MAX_BARS).
+    history_bars = list(cached.get("history_bars", []) or [])
+    loaded_m5_bars = len(history_bars)
+    diagnostics["probe_timeframe"] = probe_tf
+    diagnostics["probe_bar_seconds"] = 300
+    diagnostics["regime_timeframe"] = regime_tf
+    diagnostics["regime_bar_seconds"] = bar_seconds
+    diagnostics["probe_completed_m5_buckets"] = loaded_m5_bars
+    diagnostics["probe_latest_contiguous_m5_bars"] = loaded_m5_bars
+    diagnostics["loaded_bars"] = loaded_m5_bars  # parsed probe rows, not usable regime bars
+    diagnostics["loaded_m5_bars"] = loaded_m5_bars
+    diagnostics["probe_compatible"] = bar_seconds == 300
+    diagnostics["timeframe_mismatch"] = False
+    if bar_seconds != 300:
+        if loaded_m5_bars:
+            diagnostics["status"] = f"TIMEFRAME_MISMATCH:{probe_tf}_probe_for_{regime_tf}_regime"
+            diagnostics["timeframe_mismatch"] = True
+            diagnostics["rejected_probe_bars"] = loaded_m5_bars
+        else:
+            diagnostics["rejected_probe_bars"] = 0
+        diagnostics["usable_bars"] = 0
+        history_bars = []
+    else:
+        diagnostics["usable_bars"] = loaded_m5_bars
+        diagnostics["rejected_probe_bars"] = 0
+    # Return the original live tick list untouched. Probe OHLC is regime-only;
+    # run_power_v2 still receives original tick_data. The M5 probe is never
+    # relabeled as M3; at M3 the regime ladder warms from contiguous live bars.
     history_bars, diagnostics = _a1_cap_history_bars(history_bars, diagnostics)
+    diagnostics["usable_bars"] = len(history_bars)
     return live_ticks or [], diagnostics, history_bars
 
 
@@ -620,6 +655,8 @@ class MarketSnapshot:
     # Data-quality labels prevent estimated CFD flow from being mistaken for
     # exchange trade prints or Level 3 data.
     data_quality: Dict[str, str] = field(default_factory=dict)
+    # Non-executable alternatives retained for the evidence/shadow review.
+    shadow_candidates: Dict[str, Any] = field(default_factory=dict)
 
 
 # ----------------------------------------------------------------------------- #
@@ -2472,13 +2509,13 @@ class SignalEngine:
                 # Budapest daytime 08-23 includes London + NY overlap = high activity
                 # Boost trend votes during London (07-16 UTC = 09-18 Budapest) and NY (12-21 UTC = 14-23 Budapest)
                 if tod == "LONDON":
-                    notes.append(f"BUDAPEST trading {b_hour:02d}:00 Budapest = {now_utc.hour:02d}:00 UTC LONDON session (clock: usually high-volume; live loudness = POWER M5 activity)")
+                    notes.append(f"BUDAPEST trading {b_hour:02d}:00 Budapest = {now_utc.hour:02d}:00 UTC LONDON session (clock: usually high-volume; live loudness = POWER {getattr(config, 'TIMEFRAME', 'M5')} activity)")
                 elif tod == "NEW_YORK":
-                    notes.append(f"BUDAPEST trading {b_hour:02d}:00 Budapest = {now_utc.hour:02d}:00 UTC NEW_YORK session (clock: usually news-driven; live loudness = POWER M5 activity)")
+                    notes.append(f"BUDAPEST trading {b_hour:02d}:00 Budapest = {now_utc.hour:02d}:00 UTC NEW_YORK session (clock: usually news-driven; live loudness = POWER {getattr(config, 'TIMEFRAME', 'M5')} activity)")
                 else:
-                    notes.append(f"BUDAPEST trading {b_hour:02d}:00 Budapest = {now_utc.hour:02d}:00 UTC {sess} (clock label; live loudness = POWER M5 activity)")
+                    notes.append(f"BUDAPEST trading {b_hour:02d}:00 Budapest = {now_utc.hour:02d}:00 UTC {sess} (clock label; live loudness = POWER {getattr(config, 'TIMEFRAME', 'M5')} activity)")
                 if overlap and "LONDON+NEW_YORK" in overlap:
-                    notes.append("BUDAPEST LONDON+NEW_YORK overlap (14:00-18:00 Budapest) (clock: usually the loudest hours; live loudness = POWER M5 activity)")
+                    notes.append(f"BUDAPEST LONDON+NEW_YORK overlap (14:00-18:00 Budapest) (clock: usually the loudest hours; live loudness = POWER {getattr(config, 'TIMEFRAME', 'M5')} activity)")
         except Exception as be:
             notes.append(f"Budapest session check error: {be}")
 
@@ -4445,7 +4482,7 @@ def analyze_market(market_data: Dict[str, Any],
     # value for old diary readers; POWER v2 is the sole active Power result.
     _power_legacy = {}
 
-    # Active POWER v2 uses timestamped M5 prints and completed-bar ADX. The
+    # Active POWER v2 uses timestamped prints and completed configured bars. The
     # Scout map remains separate; its levels are not blended into force shares.
     _regime_v2 = {
         "market_regime": "UNKNOWN",
@@ -4454,17 +4491,29 @@ def analyze_market(market_data: Dict[str, Any],
     }
     _probe_diagnostics = {"status": "NOT_CHECKED"}
     try:
+        _power_bar_seconds = int(getattr(config, "POWER_BAR_SECONDS", 300) or 300)
+    except (TypeError, ValueError, OverflowError):
+        _power_bar_seconds = 300
+    try:
         from power_v2_regime import classify_m5_regime
         from power_v2_regime import set_bar_seconds as _p2_set_bar_seconds
-        # fusionv1: the regime ladder follows TIMEFRAME from .env.
+        # fusionv1: one verified interval drives bucketing, boundary, probe use,
+        # and warm-up estimates. Invalid settings fail closed to the M5 default.
         try:
-            _p2_set_bar_seconds(int(getattr(config, "POWER_BAR_SECONDS", 300) or 300))
+            _power_bar_seconds = int(getattr(config, "POWER_BAR_SECONDS", 300) or 300)
+            _p2_set_bar_seconds(_power_bar_seconds)
         except Exception:
-            pass  # fail closed to the module default (M5)
+            _power_bar_seconds = 300
+            _p2_set_bar_seconds(_power_bar_seconds)
         _regime_ticks, _probe_diagnostics, _probe_history_bars = _power_probe_startup_history(
-            symbol, now, tick_data)
+            symbol, now, tick_data, bar_seconds=_power_bar_seconds)
         _regime_v2 = classify_m5_regime(
             _regime_ticks, now=now, history_bars=_probe_history_bars)
+        _probe_diagnostics["regime_completed_buckets"] = _regime_v2.get("bars_available", 0)
+        _probe_diagnostics["regime_latest_contiguous_bars"] = _regime_v2.get(
+            "latest_contiguous_bars", 0)
+        # Backward-compatible field names retain their values; they now mean
+        # the active configured bar length, not necessarily M5.
         _probe_diagnostics["regime_completed_m5_buckets"] = _regime_v2.get("bars_available", 0)
         _probe_diagnostics["regime_latest_contiguous_m5_bars"] = _regime_v2.get(
             "latest_contiguous_bars", 0)
@@ -4475,6 +4524,8 @@ def analyze_market(market_data: Dict[str, Any],
         # wrong price units is visible here and never silently merged.
         _probe_diagnostics["price_scale_check"] = _regime_v2.get("price_scale_check")
         _probe_diagnostics["history_bars_refused"] = bool(
+            _probe_diagnostics.get("history_bars_refused", False) or
+            _probe_diagnostics.get("rejected_probe_bars", 0) or
             _regime_v2.get("history_bars_refused", False))
         _regime_v2["history_probe"] = _probe_diagnostics
     except Exception as _rg2_err:
@@ -4491,7 +4542,7 @@ def analyze_market(market_data: Dict[str, Any],
         _power_v2 = run_power_v2(
             tick_data, now=now, symbol=symbol,
             tick_size=float(getattr(config, "POWER_M5_TICK_SIZE", 0.0) or 0.0),
-            bar_seconds=int(getattr(config, "POWER_BAR_SECONDS", 300) or 300),  # fusionv1
+            bar_seconds=_power_bar_seconds,  # same clock as regime and warm-up
             memory_root=_memory_root,
             market_regime=_regime_v2.get("market_regime", "UNKNOWN"),
             breakout_confirmed=bool(_regime_v2.get("breakout_confirmed", False)),
@@ -4502,7 +4553,7 @@ def analyze_market(market_data: Dict[str, Any],
         # Active Power errors fail closed; never fall back to a legacy direction.
         _power_v2 = {
             "team": "POWER", "version": "2.2.0",
-            "timeframe": f"M{max(1, int(getattr(config, 'POWER_BAR_SECONDS', 300) or 300) // 60)}",  # fusionv1
+            "timeframe": f"M{max(1, _power_bar_seconds // 60)}",
             "direction": "NEITHER", "up_power_pct": 50.0,
             "down_power_pct": 50.0, "power_total_pct": 100.0,
             "activity": 0.0, "coverage": 0.0,
@@ -4518,35 +4569,44 @@ def analyze_market(market_data: Dict[str, Any],
         (_power.get("regime_diagnostics") or {}).get("history_probe")
         or _probe_diagnostics
     )
-    _probe_loaded = int(_probe_diagnostics.get("loaded_bars", 0) or 0)
-    _probe_available = int(_probe_diagnostics.get("available_bars", 0) or 0)
-    _probe_count = max(_probe_loaded, _probe_available)
+    _regime_timeframe = str(_regime_v2.get("timeframe") or
+                             f"M{max(1, _power_bar_seconds // 60)}")
+    _regime_tail = int(_regime_v2.get("latest_contiguous_bars", 0) or 0)
+    _warmup_required = int(_regime_v2.get("bars_required", 28) or 28)
+    _warmup_count = min(_regime_tail, _warmup_required)
     _warmup_text = ""
-    if 0 < _probe_count < 28:
+    if _warmup_count < _warmup_required:
         try:
-            _eta = now + timedelta(seconds=(28 - _probe_count) * 300)
-            _warmup_text = (f" | WARM-UP {_probe_count}/28 bars"
+            _eta = now + timedelta(
+                seconds=(_warmup_required - _warmup_count) * _power_bar_seconds)
+            _warmup_text = (f" | LIVE WARM-UP {_warmup_count}/{_warmup_required} "
+                            f"{_regime_timeframe} bars"
                             f" eta_fill_utc={_eta.strftime('%H:%M')}Z")
         except Exception:
-            _warmup_text = f" | WARM-UP {_probe_count}/28 bars"
+            _warmup_text = (f" | LIVE WARM-UP {_warmup_count}/{_warmup_required} "
+                            f"{_regime_timeframe} bars")
     notes.append(
         "POWER HISTORY PROBE | "
         f"status={_probe_diagnostics.get('status', 'NOT_CHECKED')} "
-        f"loaded_bars={_probe_diagnostics.get('loaded_bars', 0)} "
-        f"probe_tail={_probe_diagnostics.get('probe_latest_contiguous_m5_bars', 0)} "
-        f"regime_tail={_probe_diagnostics.get('regime_latest_contiguous_m5_bars', 0)} "
+        f"probe_tf={_probe_diagnostics.get('probe_timeframe', 'M5')} "
+        f"regime_tf={_regime_timeframe} "
+        f"loaded_probe_bars={_probe_diagnostics.get('loaded_m5_bars', _probe_diagnostics.get('loaded_bars', 0))} "
+        f"usable_probe_bars={_probe_diagnostics.get('usable_bars', 0)} "
+        f"probe_compatible={_probe_diagnostics.get('probe_compatible', 'UNKNOWN')} "
+        f"regime_tail={_regime_tail}/{_warmup_required} "
         f"scale={(_probe_diagnostics.get('price_scale_check') or {}).get('status', 'NOT_CHECKED')} "
         f"history_refused={bool(_probe_diagnostics.get('history_bars_refused', False))}"
         f"{_warmup_text}"
     )
     _prov = (_regime_v2.get("provisional") or {}) if isinstance(_regime_v2, dict) else {}
     if _prov.get("informational_only") and int(_prov.get("bars", 0) or 0) > 0:
+        _prov_count = int(_prov.get("bars", 0) or 0)
         notes.append(
-            "POWER WARM-UP (info only, no decision weight) | "
-            f"bars={_prov.get('bars')} last_close={_prov.get('last_close')} "
+            f"POWER WARM-UP (info only, no decision weight) | {_regime_timeframe} "
+            f"bars={_prov_count} last_close={_prov.get('last_close')} "
             f"window={_prov.get('window_low')}-{_prov.get('window_high')} | "
-            f"need {28 - int(_prov.get('bars', 0) or 0)} more completed M5 bars "
-            "before POWER may answer UP/DOWN"
+            f"need {max(0, _warmup_required - _prov_count)} more completed "
+            f"{_regime_timeframe} bars before POWER may answer UP/DOWN"
         )
     _force_diag = _power.get("trend_force_diagnostics") or {}
     _rg_diag = _power.get("regime_diagnostics") or _regime_v2
@@ -4583,7 +4643,7 @@ def analyze_market(market_data: Dict[str, Any],
     except Exception:
         _fam_txt = "n/a"
     notes.append(
-        "POWER M5 | "
+        f"POWER {_regime_timeframe} | "
         f"decision={_power.get('direction', 'NEITHER')} "
         f"force={_power.get('up_power_pct', 50.0):.1f}/{_power.get('down_power_pct', 50.0):.1f} "
         f"activity={_power.get('activity', 0.0):.3f} coverage={_power.get('coverage', 0.0):.2f} | "
@@ -4690,8 +4750,25 @@ def analyze_market(market_data: Dict[str, Any],
                              for t in _crowd_ticks if isinstance(t, dict))
         except Exception:
             _crowd_vol = 0.0
+        try:
+            from session import session_context as _session_context
+            _shot_session = _session_context(now)
+        except Exception:
+            _shot_session = {}
         _shot_context = {
             "bid": _raw_bid,
+            "regime": _regime_v2.get("market_regime", "UNKNOWN"),
+            "signal_confidence": confidence,
+            "signal_strength": strength,
+            "ai_model": "NOT_RUN_STEP3",
+            "session_state": (
+                f"{_shot_session.get('session', 'UNKNOWN')} | "
+                f"market_open={_shot_session.get('market_open', 'UNKNOWN')} | "
+                f"budapest_trading={_shot_session.get('budapest_trading', 'UNKNOWN')}"),
+            "execution_mode": str(getattr(config, "EXECUTION_MODE", "UNKNOWN")),
+            "trading_enabled": getattr(config, "TRADING_ENABLED", None),
+            "allow_live_trading": getattr(config, "ALLOW_LIVE_TRADING", None),
+            "limit_order_enabled": getattr(config, "LIMIT_ORDER_ENABLED", None),
             "ask": _raw_ask,
             # crowdv2:v1 -- inputs for the Three Fair Questions
             "trade_lots": float(getattr(config, "LOT_SIZE", 1.0) or 1.0),
@@ -4754,6 +4831,8 @@ def analyze_market(market_data: Dict[str, Any],
         signal_map=_signal_map, power=_power_v2, power_v2=_power_v2,
         power_legacy={},
         shot=_shot, entry_simulation=_entry_simulation, escort=_escort,
+        shadow_candidates=dict(_shot.get("shadow_candidates") or {})
+        if isinstance(_shot, dict) else {},
         news=news, signal_strength=strength, signal_direction=direction,
         confidence=confidence, regime=regime, divergence=divergence,
         macro_bias=macro_bias_now,
@@ -4924,6 +5003,40 @@ def format_snapshot(snapshot: MarketSnapshot) -> str:
         f"  Zones: support {snapshot.nearest_support:.2f} | resistance none",
         _session_line(),
     ]
+    _shot = snapshot.shot if isinstance(snapshot.shot, dict) else {}
+    _receipt = _shot.get("visibility") or _shot.get("veto_details") or {}
+    if isinstance(_receipt, dict) and _receipt:
+        _exec = _receipt.get("execution") or {}
+        _exec = _exec if isinstance(_exec, dict) else {}
+        _force = _receipt.get("force_shares") or {}
+        _force = _force if isinstance(_force, dict) else {}
+        lines.append(
+            "  SHOOTING RECEIPT: "
+            f"status={_receipt.get('status', 'UNKNOWN')} "
+            f"direction={_receipt.get('direction', 'UNKNOWN')} "
+            f"force={_force.get('up', 'UNKNOWN')}/{_force.get('down', 'UNKNOWN')} "
+            f"regime={_receipt.get('regime', 'UNKNOWN')} "
+            f"confidence={_receipt.get('signal_confidence', 'UNKNOWN')} "
+            f"strength={_receipt.get('signal_strength', 'UNKNOWN')} "
+            f"AI={_receipt.get('ai_model', 'UNKNOWN')} "
+            f"session={_receipt.get('session_state', 'UNKNOWN')} "
+            f"execution={_exec.get('mode', 'UNKNOWN')}/"
+            f"trading_enabled={_exec.get('trading_enabled', 'UNKNOWN')} "
+            f"allow_live={_exec.get('allow_live_trading', 'UNKNOWN')} "
+            f"passive_limit={_exec.get('limit_order_enabled', 'UNKNOWN')} "
+            f"outcome={_receipt.get('outcome', 'UNKNOWN')} "
+            f"replay={_receipt.get('replay_status', 'UNKNOWN')} "
+            f"reason={_receipt.get('primary_reason', 'UNKNOWN')}"
+        )
+        _subchecks = _receipt.get("sub_checks") or []
+        if isinstance(_subchecks, (list, tuple)) and _subchecks:
+            lines.append("  SHOOTING VETO SUB-CHECKS: " + "; ".join(map(str, _subchecks)))
+        elif isinstance(_subchecks, str) and _subchecks.strip():
+            lines.append("  SHOOTING VETO SUB-CHECKS: " + _subchecks.strip())
+    _shadow = getattr(snapshot, "shadow_candidates", {}) or {}
+    if isinstance(_shadow, dict) and _shadow:
+        lines.append("  SHADOW CANDIDATES: " + json.dumps(
+            _shadow, sort_keys=True, default=str, separators=(",", ":")))
     if snapshot.notes:
         lines.append(f"  notes: {'; '.join(snapshot.notes)}")
     lines.append("=" * 72)

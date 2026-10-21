@@ -359,18 +359,97 @@ _DECISION_LOG_FIELDS = [
     "signal_confidence", "regime", "divergence", "ai_action", "ai_confidence",
     # 24k: WHO answered. "gemini-3.5-flash-lite" is the AI; anything starting with
     # "fallback" is this robot's own rule stamped at AI_FALLBACK_CONFIDENCE (70 by
-    # default, i.e. above the 50 gate). Without this column a rule and the AI are
-    # indistinguishable in every report ever written.
-    "ai_model",
-    "exec_status", "order_id", "news_state", "minutes_to_event",
+    # default); downstream configured execution gates still apply. Without this
+    # column a rule and the AI are indistinguishable in every report ever written.
+    "ai_model", "decision_source",
+    "power_direction", "power_reason_code", "session_state", "execution_mode",
+    "shooting_status", "shooting_reason", "shooting_sub_checks",
+    "paper_entry_status", "exec_status", "outcome", "replay_status", "order_id",
+    "news_state", "minutes_to_event", "next_event_title",
+    "shadow_candidates", "ai_rationale", "reason",
+]
+
+
+_LEGACY_DECISION_FIELDS_17 = [
+    "timestamp", "symbol", "price", "signal_direction", "signal_strength",
+    "signal_confidence", "regime", "divergence", "ai_action", "ai_confidence",
+    "ai_model", "exec_status", "order_id", "news_state", "minutes_to_event",
     "next_event_title", "reason",
 ]
+
+
+def _decision_csv_schema(path):
+    """Migrate old journal headers atomically while preserving every old column/row."""
+    if not path.exists() or path.stat().st_size == 0:
+        return list(_DECISION_LOG_FIELDS), True
+    with path.open("r", newline="", encoding="utf-8-sig") as source:
+        reader = csv.reader(source)
+        existing = list(next(reader, []) or [])
+    if not existing:
+        raise ValueError(f"decision journal has data but no readable header: {path}")
+    fields = list(existing)
+    fields.extend(name for name in _DECISION_LOG_FIELDS if name not in fields)
+    if fields == existing:
+        return fields, False
+
+    # Read historical rows only when a migration is necessary. Repair the known
+    # pre-24k stale header (16 names, 17 emitted values) using its verified field
+    # order; refuse unknown extra-column shapes rather than shifting/losing data.
+    with path.open("r", newline="", encoding="utf-8-sig") as source:
+        reader = csv.reader(source)
+        next(reader, None)
+        raw_rows = [values for values in reader if values]
+    migrated_rows = []
+    known_stale_header_16 = [
+        name for name in _LEGACY_DECISION_FIELDS_17 if name != "ai_model"]
+    for values in raw_rows:
+        if (existing == known_stale_header_16
+                and len(values) == len(_LEGACY_DECISION_FIELDS_17)):
+            old_row = dict(zip(_LEGACY_DECISION_FIELDS_17, values))
+        elif len(values) <= len(existing):
+            padded = values + [""] * (len(existing) - len(values))
+            old_row = dict(zip(existing, padded))
+        else:
+            raise ValueError(
+                f"unrecognized decision journal row width ({len(values)} values, "
+                f"{len(existing)} header columns); left unchanged: {path}")
+        migrated_rows.append({name: old_row.get(name, "") for name in fields})
+
+    temporary = path.with_name(path.name + ".schema.tmp")
+    with temporary.open("w", newline="", encoding="utf-8") as target:
+        writer = csv.DictWriter(target, fieldnames=fields, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(migrated_rows)
+    os.replace(temporary, path)
+    return fields, False
 
 
 def log_decision(snapshot, decision, exec_result) -> None:
     """Append one row to data/decisions_log.csv (a decision journal)."""
     path = DATA_DIR / "decisions_log.csv"
-    write_header = not path.exists() or path.stat().st_size == 0
+    try:
+        _decision_fields, write_header = _decision_csv_schema(path)
+    except (OSError, csv.Error, ValueError) as exc:
+        logger.warning("Could not prepare decision journal schema: %s", exc)
+        return
+    _shot = getattr(snapshot, "shot", None) or {}
+    _shot = _shot if isinstance(_shot, dict) else {}
+    _receipt = _shot.get("visibility") or _shot.get("veto_details") or {}
+    _receipt = _receipt if isinstance(_receipt, dict) else {}
+    _power = getattr(snapshot, "power", None) or {}
+    _power = _power if isinstance(_power, dict) else {}
+    _paper_entry = getattr(snapshot, "entry_simulation", None) or {}
+    _paper_entry = _paper_entry if isinstance(_paper_entry, dict) else {}
+    _session_state = _receipt.get("session_state", "UNKNOWN")
+    try:
+        from session import session_context as _session_context
+        _session = _session_context(getattr(snapshot, "timestamp", None))
+        _session_state = (
+            f"{_session.get('session', 'UNKNOWN')} | "
+            f"market_open={_session.get('market_open', 'UNKNOWN')} | "
+            f"budapest_trading={_session.get('budapest_trading', 'UNKNOWN')}")
+    except Exception:
+        pass
     row = {
         # 24k: tz-aware UTC. A bare "2026-09-24T17:14:29" means nothing on its own -
         # every reader had to guess a timezone. "+00:00" removes the guess forever.
@@ -385,23 +464,40 @@ def log_decision(snapshot, decision, exec_result) -> None:
         "ai_action": getattr(decision, "action", ""),
         "ai_confidence": getattr(decision, "confidence", 0.0),
         "ai_model": (getattr(decision, "model", "") or "unknown"),
+        "decision_source": getattr(decision, "decision_source", "STEP3"),
+        "power_direction": _power.get("direction", ""),
+        "power_reason_code": _power.get("reason_code", ""),
+        "session_state": _session_state,
+        "execution_mode": getattr(config, "EXECUTION_MODE", "UNKNOWN"),
+        "shooting_status": _receipt.get("status", "UNKNOWN"),
+        "shooting_reason": _receipt.get("primary_reason", ""),
+        "shooting_sub_checks": json.dumps(
+            _receipt.get("sub_checks", []) or [], default=str,
+            separators=(",", ":")),
+        "paper_entry_status": _paper_entry.get("status", "UNKNOWN"),
         "exec_status": getattr(exec_result, "status", ""),
+        "outcome": getattr(exec_result, "status", ""),
+        "replay_status": "NOT_RUN_IN_LIVE_CYCLE",
         "order_id": getattr(exec_result, "order_id", ""),
         "news_state": getattr(getattr(snapshot, "news", None), "news_state", ""),
         "minutes_to_event": getattr(getattr(snapshot, "news", None),
                                     "minutes_to_next_event", ""),
         "next_event_title": getattr(getattr(snapshot, "news", None),
                                     "next_event_title", ""),
+        "shadow_candidates": json.dumps(
+            getattr(snapshot, "shadow_candidates", {}) or {},
+            sort_keys=True, default=str, separators=(",", ":")),
+        "ai_rationale": getattr(decision, "rationale", ""),
         "reason": getattr(exec_result, "reason", ""),
     }
     try:
         with open(path, "a", newline="", encoding="utf-8") as fh:
-            writer = csv.DictWriter(fh, fieldnames=_DECISION_LOG_FIELDS)
+            writer = csv.DictWriter(fh, fieldnames=_decision_fields, extrasaction="ignore")
             if write_header:
                 writer.writeheader()
             writer.writerow(row)
         logger.info("Decision logged -> %s", path)
-    except OSError as exc:
+    except (OSError, csv.Error, ValueError) as exc:
         logger.warning("Could not write decision log: %s", exc)
 
     # 24k (A2): the day's own copy. decisions_log.csv is capped at
@@ -412,13 +508,13 @@ def log_decision(snapshot, decision, exec_result) -> None:
     # gradeable forever. Same idea as diary_YYYYMMDD.jsonl, which has done this since 24f.
     try:
         _day_path = DATA_DIR / f"decisions_{datetime.now(timezone.utc):%Y%m%d}.csv"
-        _day_header = not _day_path.exists() or _day_path.stat().st_size == 0
+        _day_fields, _day_header = _decision_csv_schema(_day_path)
         with open(_day_path, "a", newline="", encoding="utf-8") as fh:
-            writer = csv.DictWriter(fh, fieldnames=_DECISION_LOG_FIELDS)
+            writer = csv.DictWriter(fh, fieldnames=_day_fields, extrasaction="ignore")
             if _day_header:
                 writer.writeheader()
             writer.writerow(row)
-    except OSError as exc:
+    except (OSError, csv.Error, ValueError) as exc:
         logger.warning("Could not write per-day decision mirror: %s", exc)
 
 
@@ -670,19 +766,17 @@ def run_step3(snapshot):
 
 
 def _shooting_execution_gate(decision, snapshot):
-    """gates:v1 (2026-10-15, owner-ordered reviewed change).
+    """Fail closed to owner-configured thresholds; shadow never authorizes orders.
 
-    - The doorman (AI) is ADVISORY WHEN ABSENT: on HOLD/WAIT, if POWER speaks
-      with dominant force and the panel's own confidence clears the gate, the
-      trade proceeds on POWER's side. A confidently-opposite doorman still vetoes.
-    - THE CORRIDOR: with EXECUTION_MODE=python and TRADING_ENABLED, a GO plan
-      that POWER agrees with routes to the EXISTING MT5Executor, which keeps
-      every one of its own gates (confidence, blackout, spread, risk, caps).
-      DEMO FIRST. Everything else stays refused, fail-closed.
+    A Power-lead candidate below AI_CONFIDENCE_THRESHOLD is recorded for
+    offline/paper review only. Executable routing still requires the configured
+    threshold, a GO plan, canonical POWER agreement, and the existing Python
+    executor's independent gates. EXECUTION_MODE ownership is unchanged.
     """
     action = str(getattr(decision, "action", "HOLD") or "HOLD").upper()
     if action in {"HOLD", "WAIT", "NONE", "NO_TRADE", "NEUTRAL"}:
-        # gates:v1: doorman advisory when absent -- POWER may carry the trade
+        # The prior sub-threshold extension is now shadow-only; configured-threshold
+        # Power carry remains distinct from the non-executable candidate path below.
         try:
             _pw = getattr(snapshot, "power", None) or {}
             _pd = str(_pw.get("direction", "NEITHER")).upper()
@@ -690,56 +784,194 @@ def _shooting_execution_gate(decision, snapshot):
             _dom = {"UP": "UPWARD_FORCE_DOMINATES",
                     "DOWN": "DOWNWARD_FORCE_DOMINATES"}.get(_pd)
             if _dom and _rc == _dom:
-                _pc = float(getattr(snapshot, "confidence", 0.0) or 0.0)
-                # fusionv1 "power-lead" (2026-10-17, owner-ordered, Option B):
-                # POWER speaks + panel floor (POWER_LEAD_CONF_FLOOR, default 30)
-                # + agreement with the classroom's direction. Evidence 10-15 and
-                # 10-16 (council_shadow): the old 45 floor passed 0 minutes both
-                # days; floor 30 + agreement graded 88-100%. The old
-                # >=AI_CONFIDENCE_THRESHOLD path is kept unchanged; the lead
-                # only EXTENDS coverage below it, fail-closed. Off-switch:
-                # POWER_LEAD_ENABLED=0 in .env.
-                _old_gate = float(getattr(config, "AI_CONFIDENCE_THRESHOLD", 50.0))
-                _floor = float(getattr(config, "POWER_LEAD_CONF_FLOOR", 30.0))
-                _lead_on = bool(getattr(config, "POWER_LEAD_ENABLED", True))
+                import math as _math
+                def _safe_percent(value, fallback):
+                    if isinstance(value, bool):
+                        return fallback
+                    try:
+                        parsed = float(value)
+                        return parsed if _math.isfinite(parsed) else fallback
+                    except (TypeError, ValueError, OverflowError):
+                        return fallback
+
+                _pc = _safe_percent(
+                    getattr(snapshot, "confidence", 0.0), float("nan"))
+                _old_gate = _safe_percent(
+                    getattr(config, "AI_CONFIDENCE_THRESHOLD", 50.0), float("nan"))
+                _floor = _safe_percent(
+                    getattr(config, "POWER_LEAD_CONF_FLOOR", 30.0), float("nan"))
+                _live_threshold_valid = (
+                    _math.isfinite(_old_gate) and 0.0 <= _old_gate <= 100.0)
+                _shadow_floor_valid = _math.isfinite(_floor) and 0.0 <= _floor <= 100.0
+                # Invalid thresholds fail closed rather than silently lowering a gate.
+                _old_gate = _old_gate if _live_threshold_valid else 100.0
+                _floor = _floor if _shadow_floor_valid else 100.0
+                _power_confidence_valid = _math.isfinite(_pc) and 0.0 <= _pc <= 100.0
+                def _as_flag(value, default=True):
+                    if value is None:
+                        return default
+                    if isinstance(value, str):
+                        return value.strip().lower() in {"1", "true", "yes", "on"}
+                    return bool(value)
+
+                _legacy_lead_on = _as_flag(
+                    getattr(config, "POWER_LEAD_ENABLED", True))
+                _shadow_on = _as_flag(
+                    getattr(config, "POWER_LEAD_SHADOW_ENABLED", True))
                 _cdir = str(getattr(snapshot, "signal_direction", "") or "").upper()
-                _agree = _cdir not in ("BUY", "SELL") or \
-                    _cdir == ("BUY" if _pd == "UP" else "SELL")
-                _passed = _pc >= _old_gate
-                _via_lead = False
-                if not _passed and _lead_on and _pc >= _floor and _agree:
-                    _passed = True
-                    _via_lead = True
+                _expected_action = "BUY" if _pd == "UP" else "SELL"
+                _agree = _cdir not in ("BUY", "SELL") or _cdir == _expected_action
+                _passed = (_power_confidence_valid and _live_threshold_valid
+                           and _pc >= _old_gate)
+
                 if _passed:
-                    decision.action = "BUY" if _pd == "UP" else "SELL"
+                    # Preserve the pre-existing configured-threshold carry path;
+                    # only the former sub-threshold extension becomes shadow-only.
+                    try:
+                        decision.decision_source = "POWER_V2_CONFIGURED_THRESHOLD_CARRY"
+                    except Exception:
+                        pass
+                    decision.rationale = (
+                        (getattr(decision, "rationale", "") or "AI quiet")
+                        + " | POWER carry at configured confidence threshold: "
+                        "conf {:.1f} >= {:.1f}; POWER {} ({})".format(
+                            _pc, _old_gate, _pd, _rc))
                     decision.confidence = _pc
-                    if _via_lead:
-                        decision.model = "power-lead-v1"
-                        decision.rationale = (
-                            (getattr(decision, "rationale", "") or "AI quiet")
-                            + " | power-lead v1: conf {:.0f} >= floor {:.0f}, "
-                            "agree={}, POWER {} ({})".format(
-                                _pc, _floor, _agree, _pd, _rc))
+                    # Commit the action last. If an earlier receipt assignment
+                    # fails, the original HOLD remains untouched (fail closed).
+                    try:
+                        decision.action = _expected_action
+                    except Exception:
+                        return False, "Power carry action assignment failed; fail closed"
+                    try:
+                        _record("STEP 3  POWER-LEAD",
+                                "configured-threshold carry: conf {:.1f} >= {:.1f} "
+                                "| POWER {} | {}".format(
+                                    _pc, _old_gate, _pd, _rc))
+                    except Exception:
+                        pass
+                    action = _expected_action
+                elif (_power_confidence_valid and _live_threshold_valid
+                      and _shadow_floor_valid and _pc >= _floor):
+                    _plan = getattr(snapshot, "shot", None) or {}
+                    _plan = _plan if isinstance(_plan, dict) else {}
+                    _plan_side = str(_plan.get("side", "")).upper()
+                    _plan_shot = str(_plan.get("shot", "")).upper()
+                    _plan_style = str(_plan.get("entry_style", "")).upper()
+                    _plan_visibility = _plan.get("visibility") or {}
+                    _plan_visibility = (_plan_visibility
+                                        if isinstance(_plan_visibility, dict) else {})
+                    _plan_reason = str(
+                        _plan_visibility.get("primary_reason") or
+                        _plan.get("reason") or _plan.get("why") or "")
+                    _plan_shadows = _plan.get("shadow_candidates") or {}
+                    _passive_shadow = (_plan_shadows.get("passive_limit")
+                                       if isinstance(_plan_shadows, dict) else None)
+                    _passive_shadow_ok = (
+                        isinstance(_passive_shadow, dict) and
+                        _passive_shadow.get("candidate") is True and
+                        _passive_shadow.get("candidate_eligible") is True and
+                        _passive_shadow.get("execution_enabled") is False)
+                    _plan_go_ok = (
+                        _plan_shot == "GO" and _plan_side == _expected_action and
+                        _plan_style in {"PASSIVE_LIMIT", "AGGRESSIVE_MARKET"})
+                    # A WAIT caused solely by the disabled passive policy can
+                    # still contribute a *shadow* route candidate when its
+                    # own geometry/queue checks passed. It never becomes GO.
+                    _plan_shadow_ok = (_plan_shot == "WAIT" and _passive_shadow_ok)
+                    _plan_ok = _plan_go_ok or _plan_shadow_ok
+                    _blockers = []
+                    if not _shadow_on:
+                        _blockers.append("POWER_LEAD_SHADOW_DISABLED")
+                    if not _agree:
+                        _blockers.append("SIGNAL_DIRECTION_DISAGREES_WITH_POWER")
+                    if not _plan_ok:
+                        _blockers.append("SHOOTING_PLAN_NOT_GO_OR_SHADOW_ROUTE_INELIGIBLE")
+                    _eligible = not _blockers
+                    _candidate = {
+                        "kind": "POWER_LEAD",
+                        "status": ("ELIGIBLE_SHADOW_CANDIDATE" if _eligible
+                                   else "SHADOW_REJECTED"),
+                        "shadow_only": True,
+                        "execution_enabled": False,
+                        "eligible": _eligible,
+                        "candidate_reason": (
+                            ("meets shadow floor and agreement checks; below the owner-configured "
+                             "live confidence threshold; passive policy route remains disabled"
+                             if _plan_shadow_ok else
+                             "meets shadow floor and current plan/agreement checks; "
+                             "below owner-configured live confidence threshold")
+                            if _eligible else ";".join(_blockers)),
+                        "blockers": _blockers,
+                        "power_direction": _pd,
+                        "power_reason_code": _rc,
+                        "signal_direction": _cdir or "UNKNOWN",
+                        "signal_confidence": _pc,
+                        "shadow_confidence_floor": _floor,
+                        "live_confidence_threshold": _old_gate,
+                        "legacy_power_lead_enabled": _legacy_lead_on,
+                        "shadow_recording_enabled": _shadow_on,
+                        "agreement": _agree,
+                        "plan_status": _plan_shot or "UNKNOWN",
+                        "plan_side": _plan_side or "UNKNOWN",
+                        "plan_entry_style": _plan_style or "UNKNOWN",
+                        "plan_shadow_only": _plan_shadow_ok,
+                        "passive_route_candidate": dict(_passive_shadow)
+                        if _passive_shadow_ok else None,
+                        "plan_reason": _plan_reason,
+                        "execution_outcome": ("BLOCKED_SHADOW_ONLY" if _eligible
+                                              else "NOT_AUTHORIZED_SHADOW_REJECTED"),
+                    }
+                    if _shadow_on:
                         try:
-                            _record("STEP 3  POWER-LEAD",
-                                    "fusion v1 carries the trade: conf {:.0f} "
-                                    "(floor {:.0f}, agree={}) | POWER {} | {}"
-                                    .format(_pc, _floor, _agree, _pd, _rc))
+                            _shadow = getattr(snapshot, "shadow_candidates", None)
+                            if not isinstance(_shadow, dict):
+                                _shadow = {}
+                                setattr(snapshot, "shadow_candidates", _shadow)
+                            _shadow["power_lead"] = _candidate
+                            if isinstance(_plan, dict):
+                                _plan_shadow = _plan.setdefault("shadow_candidates", {})
+                                if isinstance(_plan_shadow, dict):
+                                    _plan_shadow["power_lead"] = _candidate
+                            _record(
+                                "STEP 3  POWER-LEAD SHADOW",
+                                f"{_candidate['status']} | signal_conf={_pc:.1f} "
+                                f"floor={_floor:.1f} live_threshold={_old_gate:.1f} "
+                                f"POWER={_pd} reason={_rc} agreement={_agree} "
+                                f"plan={_plan_shot}/{_plan_side} "
+                                f"blockers={','.join(_blockers) or 'none'}; not executable")
                         except Exception:
                             pass
-                    action = decision.action
+                    else:
+                        try:
+                            _record(
+                                "STEP 3  POWER-LEAD",
+                                f"shadow recording disabled; no candidate stored | "
+                                f"signal_conf={_pc:.1f} floor={_floor:.1f} "
+                                f"live_threshold={_old_gate:.1f} POWER={_pd} reason={_rc}")
+                        except Exception:
+                            pass
+                    if _eligible:
+                        # Do not let a shadow candidate reach the executor, even
+                        # as HOLD; expose a distinct fail-closed gate result.
+                        return False, (
+                            "POWER-LEAD shadow candidate only; confidence "
+                            f"{_pc:.1f} is below owner-configured threshold "
+                            f"{_old_gate:.1f}")
                 else:
-                    if _lead_on:
-                        # fusionv1 visibility pack: near-misses are never silent
-                        try:
-                            _why = ("conf {:.0f} < floor {:.0f}".format(_pc, _floor)
-                                    if _pc < _floor
-                                    else "class disagrees (conf {:.0f})".format(_pc))
-                            _record("STEP 3  POWER-LEAD",
-                                    "holds: {} | POWER {} | {}".format(
-                                        _why, _pd, _rc))
-                        except Exception:
-                            pass
+                    if not _power_confidence_valid:
+                        _hold_reason = f"invalid signal confidence {_pc!r}; expected 0..100"
+                    elif not _live_threshold_valid:
+                        _hold_reason = "owner confidence threshold invalid; fail closed"
+                    elif not _shadow_floor_valid:
+                        _hold_reason = "shadow confidence floor invalid; no candidate recorded"
+                    else:
+                        _hold_reason = ("holds below shadow floor: signal_conf={:.1f} "
+                                        "floor={:.1f}".format(_pc, _floor))
+                    try:
+                        _record("STEP 3  POWER-LEAD", f"{_hold_reason} | POWER {_pd} | {_rc}")
+                    except Exception:
+                        pass
         except Exception:
             pass
         if action in {"HOLD", "WAIT", "NONE", "NO_TRADE", "NEUTRAL"}:
@@ -748,8 +980,33 @@ def _shooting_execution_gate(decision, snapshot):
         return False, f"unrecognized Step-3 action {action!r}"
     if snapshot is None:
         return False, "no market snapshot"
+    import math as _math
+    _raw_threshold = getattr(config, "AI_CONFIDENCE_THRESHOLD", 50.0)
+    _raw_confidence = getattr(decision, "confidence", float("nan"))
+    if isinstance(_raw_threshold, bool) or isinstance(_raw_confidence, bool):
+        return False, "decision confidence/owner threshold is invalid"
+    try:
+        _live_threshold = float(_raw_threshold)
+        _live_confidence = float(_raw_confidence)
+    except (TypeError, ValueError, OverflowError):
+        return False, "decision confidence/owner threshold is invalid"
+    if (not _math.isfinite(_live_threshold) or
+            not 0.0 <= _live_threshold <= 100.0):
+        return False, "owner confidence threshold is invalid; fail closed"
+    if not _math.isfinite(_live_confidence):
+        return False, "decision confidence is missing or invalid"
+    if not 0.0 <= _live_confidence <= 100.0:
+        return False, "decision confidence is outside the valid 0..100 range"
+    if _live_confidence < _live_threshold:
+        return False, (
+            f"decision confidence {_live_confidence:.1f} is below owner-configured "
+            f"threshold {_live_threshold:.1f}")
     plan = getattr(snapshot, "shot", None) or {}
     power = getattr(snapshot, "power", None) or {}
+    if not isinstance(plan, dict):
+        return False, "Shooting plan is malformed or missing"
+    if not isinstance(power, dict):
+        return False, "POWER v2 receipt is malformed or missing"
     expected_power = "UP" if action == "BUY" else "DOWN"
     if str(power.get("direction", "NEITHER")).upper() != expected_power:
         return False, "AI side does not agree with canonical POWER v2"
@@ -1584,6 +1841,23 @@ def _env_snapshot() -> dict:
         "GEMINI_MODELS": ",".join(gm) if isinstance(gm, (list, tuple)) else gm,
         "EXECUTION_MODE": g("EXECUTION_MODE"),
         "TRADING_ENABLED": g("TRADING_ENABLED"),
+        "ALLOW_LIVE_TRADING": g("ALLOW_LIVE_TRADING"),
+        "POWER_BAR_SECONDS": g("POWER_BAR_SECONDS"),
+        "POWER_LEAD_ENABLED": g("POWER_LEAD_ENABLED"),
+        "POWER_LEAD_CONF_FLOOR": g("POWER_LEAD_CONF_FLOOR"),
+        "POWER_LEAD_SHADOW_ENABLED": g("POWER_LEAD_SHADOW_ENABLED"),
+        "LIMIT_ORDER_ENABLED": g("LIMIT_ORDER_ENABLED"),
+        "AGGRESSIVE_ENTRY_ENABLED": g("AGGRESSIVE_ENTRY_ENABLED"),
+        "A2_LEAN_MIN": g("A2_LEAN_MIN"),
+        "A2_LEAN_HOLD_SECONDS": g("A2_LEAN_HOLD_SECONDS"),
+        "A2_PANEL_WINDOW_SECONDS": g("A2_PANEL_WINDOW_SECONDS"),
+        "A2_BURST_MAX_PER_DAY": g("A2_BURST_MAX_PER_DAY"),
+        "A2_BURST_COOLDOWN_MINUTES": g("A2_BURST_COOLDOWN_MINUTES"),
+        "A2_BURST_SL_PTS": g("A2_BURST_SL_PTS"),
+        "A2_BURST_TP_PTS": g("A2_BURST_TP_PTS"),
+        "A2_MIN_RR": g("A2_MIN_RR"),
+        "V6_4TEAMS_ENABLED": g("V6_4TEAMS_ENABLED"),
+        "AI_AS_VOTE": g("AI_AS_VOTE"),
         "MT5_SYMBOL": g("MT5_SYMBOL"),
         "DATA_SOURCE": g("DATA_SOURCE"),
     }

@@ -292,7 +292,76 @@ def test_missing_scout_route_data_fails_closed():
     assert "route obstruction data is missing" in out["why"][0]
 
 
+def test_boolean_price_is_not_accepted_as_numeric_market_data():
+    out = plan_shot(smap(), power(), True, 1.0, 0.2, CFG,
+                    entry_context=ctx())
+    assert out["shot"] == "WAIT"
+    assert "invalid" in out["why"][0]
+    assert out["visibility"]["reference_price"] is None
+
+
 def test_bad_quotes_do_not_pass():
     out = plan_shot(smap(), power(), 100, 1, 0.2, CFG,
                     entry_context=ctx(ask=99.8))
     assert out["shot"] == "WAIT"
+
+
+def test_early_wait_paths_share_typed_visibility_receipts():
+    context = ctx(regime="TREND", signal_confidence=67.0, signal_strength=81.0,
+                  ai_model="NOT_RUN_STEP3", session_state="LONDON | market_open=yes",
+                  execution_mode="python")
+    cases = [
+        plan_shot(smap(), power("NEITHER"), 100, 1, 0.2, CFG,
+                  entry_context=context),
+        plan_shot(smap(), power(), 100, 1, 0.0, CFG,
+                  entry_context=context),
+        plan_shot(smap(), power(), 100, 1, 0.2, CFG,
+                  entry_context=ctx(**{**context, "ask": 99.8})),
+        plan_shot({}, power(), 100, 1, 0.2, CFG, entry_context=context),
+    ]
+    for plan in cases:
+        receipt = plan["visibility"]
+        assert plan["shot"] == "WAIT"
+        assert plan["veto_details"] is receipt
+        assert receipt["status"] == "WAIT"
+        assert receipt["plan_ttl_seconds"] == 30.0
+        assert receipt["ai_model"] == "NOT_RUN_STEP3"
+        assert receipt["session_state"] == "LONDON | market_open=yes"
+        assert receipt["execution"]["mode"] == "python"
+        assert receipt["signal_confidence"] == 67.0
+        assert receipt["signal_strength"] == 81.0
+        assert receipt["sub_checks"]
+        assert "AI model=NOT_RUN_STEP3" in receipt["full_why_string"]
+
+
+def test_disabled_passive_route_is_recorded_as_shadow_only_and_not_paper_filled():
+    from paper_entry_simulator import reset_entry_simulator, simulate_entry
+
+    config = SimpleNamespace(**vars(CFG))
+    config.LIMIT_ORDER_ENABLED = False
+    plan = plan_shot(smap(), power(), 100, 1, 0.2, config,
+                     entry_context=ctx())
+
+    assert plan["shot"] == "WAIT"
+    passive = plan["entry_options"]["PASSIVE_LIMIT"]
+    assert passive["eligible"] is False
+    assert passive["candidate_eligible"] is True
+    assert passive["shadow_only"] is True
+    assert passive["policy_enabled"] is False
+    assert passive["execution_enabled"] is False
+    assert "SHADOW_ONLY" in passive["sub_check"]
+    assert "A2 trigger not confirmed" in plan["entry_options"]["AGGRESSIVE_MARKET"]["sub_check"]
+    candidate = plan["shadow_candidates"]["passive_limit"]
+    assert candidate["candidate"] is True
+    assert candidate["mode"] == "SHADOW_ONLY"
+    assert candidate["executable"] is False
+    assert candidate["entry"] is not None
+    assert any("SHADOW_ONLY" in check
+               for check in plan["visibility"]["sub_checks"])
+
+    reset_entry_simulator()
+    paper = simulate_entry(plan, 100.0, config=config, now=time.time())
+    assert paper["status"] == "NO_PLAN"
+    assert paper["pending"] is None
+    assert paper["filled_plan"] is None
+    reset_entry_simulator()

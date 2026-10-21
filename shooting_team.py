@@ -18,6 +18,8 @@ __all__ = ["plan_shot", "describe"]
 
 
 def _num(value: Any) -> Optional[float]:
+    if isinstance(value, bool):
+        return None
     try:
         out = float(value)
     except (TypeError, ValueError, OverflowError):
@@ -30,13 +32,103 @@ def _cfg(config: Any, key: str, default: float) -> float:
     return value if value is not None else default
 
 
-def _wait(reason: str, price: Any = 0.0, extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def _text(value: Any, default: str = "UNKNOWN") -> str:
+    """Render a receipt value without converting labels to numeric None."""
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value.strip() or default
+    return str(value)
+
+
+def _visibility_receipt(reason: str, price: Any, atr: Any, spread: Any,
+                        power: Any, context: Mapping[str, Any], config: Any,
+                        plan_ttl: float, extra: Optional[Mapping[str, Any]] = None,
+                        status: str = "WAIT") -> Dict[str, Any]:
+    """Structured, fail-closed receipt shared by every early and late branch."""
+    pwr = power if isinstance(power, Mapping) else {}
+    ctx = context if isinstance(context, Mapping) else {}
+    extra = extra if isinstance(extra, Mapping) else {}
+    direction = _text(pwr.get("direction"), "NEITHER").upper()
+    regime_diag = pwr.get("regime_diagnostics") or {}
+    power_ctx = pwr.get("context") or {}
+    if not isinstance(regime_diag, Mapping):
+        regime_diag = {}
+    if not isinstance(power_ctx, Mapping):
+        power_ctx = {}
+    regime = _text(ctx.get("regime") or regime_diag.get("market_regime")
+                   or power_ctx.get("market_regime"), "UNKNOWN").upper()
+    confidence = _num(ctx.get("signal_confidence"))
+    strength = _num(ctx.get("signal_strength"))
+    ai_model = _text(ctx.get("ai_model") or pwr.get("ai_model"), "PENDING_STEP3")
+    session_state = _text(ctx.get("session_state"), "UNKNOWN")
+    execution_mode = _text(ctx.get("execution_mode") or
+                           getattr(config, "EXECUTION_MODE", None), "UNKNOWN")
+    sub_checks = [str(reason)] if reason else []
+    crowd = extra.get("crowd_v2")
+    if isinstance(crowd, Mapping):
+        crowd_reason = _text(crowd.get("reason"), "crowd check failed without reason")
+        sub_checks = [crowd_reason]
+    details = {
+        "status": status,
+        "primary_reason": str(reason),
+        "sub_checks": sub_checks,
+        "direction": direction,
+        "force_shares": {
+            "up": _num(pwr.get("up_power_pct")),
+            "down": _num(pwr.get("down_power_pct")),
+        },
+        "regime": regime,
+        "signal_confidence": confidence,
+        "signal_strength": strength,
+        "ai_model": ai_model,
+        "session_state": session_state,
+        "execution": {
+            "mode": execution_mode,
+            "trading_enabled": getattr(config, "TRADING_ENABLED", None),
+            "allow_live_trading": getattr(config, "ALLOW_LIVE_TRADING", None),
+            "limit_order_enabled": getattr(config, "LIMIT_ORDER_ENABLED", None),
+        },
+        "execution_status": "PLAN_ONLY",
+        "plan_ttl_seconds": float(plan_ttl),
+        "reference_price": _num(price),
+        "spread": _num(spread),
+        "atr": _num(atr),
+        "crowd_v2": dict(crowd) if isinstance(crowd, Mapping) else None,
+        "outcome": "NOT_EXECUTED_IN_STEP2",
+        "replay_status": "NOT_RUN",
+    }
+    details["full_why_string"] = (
+        f"POWER v2 direction={direction}; force shares UP={details['force_shares']['up']} "
+        f"DOWN={details['force_shares']['down']}; regime={regime}; "
+        f"signal_confidence={confidence}; signal_strength={strength}; "
+        f"AI model={ai_model}; session={session_state}; execution_mode={execution_mode}; "
+        f"trading_enabled={details['execution']['trading_enabled']}; "
+        f"allow_live_trading={details['execution']['allow_live_trading']}; "
+        f"limit_order_enabled={details['execution']['limit_order_enabled']}; "
+        f"plan_ttl={plan_ttl:.0f}s; status={status}; reason={reason}; "
+        f"outcome={details['outcome']}; replay={details['replay_status']}"
+    )
+    details["visibility_gap_fixed"] = bool(sub_checks)
+    return details
+
+
+def _wait(reason: str, price: Any = 0.0, extra: Optional[Dict[str, Any]] = None,
+          *, power: Any = None, context: Optional[Mapping[str, Any]] = None,
+          config: Any = None, atr: Any = None, spread: Any = None,
+          plan_ttl: float = 30.0) -> Dict[str, Any]:
     p = _num(price)
     result = {"shot": "WAIT", "side": None, "why": [reason],
               "entry": p, "target": None, "stop": None, "rr": 0.0,
               "entry_style": None, "execution_status": "PLAN_ONLY"}
     if extra:
         result.update(extra)
+    receipt = _visibility_receipt(reason, p, atr, spread, power,
+                                  context or {}, config, plan_ttl, extra,
+                                  status="WAIT")
+    result["veto_details"] = receipt
+    result["visibility"] = receipt
+    result.setdefault("shadow_candidates", {})
     return result
 
 
@@ -87,7 +179,7 @@ def _crowd_v2(door_size, road_lots, shot_lots, recent_volume, config):
                      else None)
     out = {"verdict": "WAIT", "reason": "",
            "door_size": _num(door_size), "shot_lots": _num(shot_lots),
-           "door_margin": None if door_margin is math.inf else door_margin,
+           "door_margin": door_margin if math.isfinite(door_margin) else None,
            "road_lots": _num(road_lots), "road_normal": road_normal,
            "road_ratio": road_ratio,
            "participation": participation,
@@ -110,7 +202,7 @@ def _crowd_v2(door_size, road_lots, shot_lots, recent_volume, config):
         out["reason"] = (f"crowd v2 Q2 road history warming up "
                          f"({len(_ROAD_HISTORY)}/{hist_min} samples) - fail closed")
         return out
-    if road_ratio is math.inf or road_ratio > normal_max:
+    if (road_ratio is not None and math.isinf(road_ratio)) or road_ratio > normal_max:
         out["reason"] = (f"crowd v2 Q2 NORMAL ROAD failed: road "
                          f"{(road_lots or 0):.0f} lots > {normal_max:.1f}x its "
                          f"own normal {road_normal:.0f}")
@@ -288,23 +380,33 @@ def plan_shot(signal_map: Dict[str, Any], power: Dict[str, Any],
     The current pipeline intentionally provides no such trigger yet.
     """
     ctx = dict(entry_context or {})
+    plan_ttl = max(1.0, _cfg(config, "SHOOT_PLAN_TTL_SECONDS", 30.0))
     bad_power = _power_gate(power, ctx, config)
     if bad_power:
-        return _wait(bad_power, price)
+        return _wait(bad_power, price, power=power, context=ctx, config=config,
+                     atr=atr, spread=spread, plan_ttl=plan_ttl)
 
     p, a, sp = _num(price), _num(atr), _num(spread)
     if p is None or p <= 0 or a is None or a <= 0 or sp is None or sp <= 0:
-        return _wait("price, ATR, or spread is missing/invalid; wait", price)
+        return _wait("price, ATR, or spread is missing/invalid; wait", price,
+                     power=power, context=ctx, config=config, atr=atr,
+                     spread=spread, plan_ttl=plan_ttl)
     bid, ask = _num(ctx.get("bid")), _num(ctx.get("ask"))
     if bid is None or ask is None or bid <= 0 or ask <= 0 or ask < bid or (ask - bid) <= 0:
-        return _wait("valid, uncrossed bid/ask quotes are required", price)
+        return _wait("valid, uncrossed bid/ask quotes are required", price,
+                     power=power, context=ctx, config=config, atr=a, spread=sp,
+                     plan_ttl=plan_ttl)
     if abs((ask - bid) - sp) > max(0.02, sp * 0.20):
-        return _wait("reported spread and bid/ask quotes disagree", price)
+        return _wait("reported spread and bid/ask quotes disagree", price,
+                     power=power, context=ctx, config=config, atr=a, spread=sp,
+                     plan_ttl=plan_ttl)
 
     direction = str(power.get("direction")).upper()
     target_door = _nearest_door(signal_map or {}, direction, p)
     if not target_door:
-        return _wait(f"no valid Scout door on the POWER v2 {direction} side", p)
+        return _wait(f"no valid Scout door on the POWER v2 {direction} side", p,
+                     power=power, context=ctx, config=config, atr=a, spread=sp,
+                     plan_ttl=plan_ttl)
 
     target_px = _num(target_door.get("price"))
     target_size = _num(target_door.get("size")) or 0.0
@@ -313,7 +415,8 @@ def plan_shot(signal_map: Dict[str, Any], power: Dict[str, Any],
     if (raw_road_count is None or raw_road_lots is None
             or raw_road_count < 0 or raw_road_lots < 0):
         return _wait("Scout route obstruction data is missing or invalid", p,
-                     {"door": dict(target_door)})
+                     {"door": dict(target_door)}, power=power, context=ctx,
+                     config=config, atr=a, spread=sp, plan_ttl=plan_ttl)
     road_count = int(raw_road_count)
     road_lots = raw_road_lots
     route_clear = target_door.get("road_clear") is True
@@ -327,7 +430,9 @@ def plan_shot(signal_map: Dict[str, Any], power: Dict[str, Any],
                   else math.inf)
     if crowd["verdict"] != "PASS":
         return _wait(crowd["reason"], p,
-                     {"door": dict(target_door), "crowd_v2": crowd})
+                     {"door": dict(target_door), "crowd_v2": crowd},
+                     power=power, context=ctx, config=config, atr=a, spread=sp,
+                     plan_ttl=plan_ttl)
 
     is_buy = direction == "UP"
     side = "BUY" if is_buy else "SELL"
@@ -388,7 +493,7 @@ def plan_shot(signal_map: Dict[str, Any], power: Dict[str, Any],
                 return "estimated monetary reward is below the configured USD floor"
         return None
 
-    passive_reason = cost_check(passive)
+    passive_geometry_reason = cost_check(passive)
     aggressive_reason = cost_check(aggressive)
     trigger = ctx.get("aggressive_trigger_confirmed") is True
     trigger_reason = str(ctx.get("aggressive_trigger_reason") or "").strip()
@@ -396,93 +501,146 @@ def plan_shot(signal_map: Dict[str, Any], power: Dict[str, Any],
     aggressive_allowed = (trigger and bool(trigger_reason) and aggressive_geometry_ok)
     if trigger and trigger_reason and aggressive_reason is None and not route_clear:
         aggressive_reason = "Scout has not confirmed a clear route for aggressive entry"
-    passive_allowed = passive_reason is None and not queue_blocks_limit
-    if not bool(getattr(config, "LIMIT_ORDER_ENABLED", False)):
-        passive_allowed = False
+
+    limit_order_enabled = bool(getattr(config, "LIMIT_ORDER_ENABLED", False))
+    passive_candidate_eligible = (passive_geometry_reason is None
+                                  and not queue_blocks_limit)
+    passive_allowed = passive_candidate_eligible and limit_order_enabled
+    if passive_geometry_reason:
+        passive_reason = passive_geometry_reason
+    elif queue_blocks_limit:
+        passive_reason = (f"estimated limit fill probability {queue_prob:.2f} "
+                          f"is below {queue_floor:.2f}")
+    elif not limit_order_enabled:
         passive_reason = ("passive limit entries disabled "
                           "(LIMIT_ORDER_ENABLED=0, aggressive-only mode)")
-
-    if queue_blocks_limit:
-        passive_reason = f"estimated limit fill probability {queue_prob:.2f} is below {queue_floor:.2f}"
+    else:
+        passive_reason = None
+    passive_shadow_only = passive_candidate_eligible and not limit_order_enabled
+    passive_shadow = {
+        "candidate": passive_shadow_only,
+        "mode": "SHADOW_ONLY" if passive_shadow_only else "NOT_SHADOWED",
+        "executable": passive_allowed,
+        "execution_enabled": passive_allowed,
+        "policy_enabled": limit_order_enabled,
+        "candidate_eligible": passive_candidate_eligible,
+        "reason": ("passive route is policy-disabled; candidate recorded only"
+                   if passive_shadow_only else (passive_reason or "not a shadow candidate")),
+        "entry": _num(passive.get("entry")),
+        "stop": _num(passive.get("stop")),
+        "target": _num(passive.get("target")),
+        "risk": _num(passive.get("risk")),
+        "reward": _num(passive.get("reward")),
+        "rr": _num(passive.get("rr")),
+        "queue_validation": "VALID" if queue_known else
+                            (queue_validation_reason or "UNKNOWN"),
+    }
+    shadow_candidates = {"passive_limit": passive_shadow}
     if not trigger:
         aggressive_reason = "no separately confirmed aggressive-entry trigger is wired"
     elif not trigger_reason:
         aggressive_allowed = False
         aggressive_reason = "aggressive trigger has no audit reason"
 
-    # NEW STANDING INSTRUCTION (added 2026-10-19): full visibility of every veto/open reason
-    # Capture the specific sub-check that caused the veto (crowd, geometry, trigger, queue)
-    veto_sub_checks = []
-    # Crowd sub-check (from crowd dict)
-    if not crowd.get("verdict") == "PASS":
-        crowd_reason = crowd.get("reason", "")
-        crowd_parts = []
-        if "Q1 SERVED" in crowd_reason:
-            crowd_parts.append("crowd Q1 SERVED failed")
-        elif "Q2 NORMAL ROAD" in crowd_reason:
-            crowd_parts.append("crowd Q2 NORMAL ROAD failed")
-        elif "Q3 SMALL FOOTPRINT" in crowd_reason:
-            crowd_parts.append("crowd Q3 SMALL FOOTPRINT failed")
-        elif crowd_reason:
-            crowd_parts.append(f"crowd failed ({crowd_reason[:60]})")
-        else:
-            crowd_parts.append("crowd veto (reason unknown from receipt)")
-        veto_sub_checks.append("; ".join(crowd_parts))
-    # Geometry / cost sub-check (from passive/aggressive reasons)
-    geo_reasons = []
-    if passive_reason and passive_reason != "passive limit is not eligible":
-        geo_reasons.append(f"geometry/passive: {passive_reason}")
-    if aggressive_reason and aggressive_reason not in ("aggressive market is not eligible", "no separately confirmed aggressive-entry trigger is wired", "aggressive trigger has no audit reason"):
-        geo_reasons.append(f"geometry/aggressive: {aggressive_reason}")
-    if geo_reasons:
-        veto_sub_checks.append("; ".join(geo_reasons))
-    # Trigger sub-check
-    if not trigger:
-        veto_sub_checks.append("trigger failed: no confirmed aggressive-entry trigger (A2 not fired)")
-    elif trigger_reason and aggressive_reason == "aggressive trigger has no audit reason":
-        veto_sub_checks.append("trigger failed: trigger has no audit reason")
-    # Queue sub-check
-    if queue_blocks_limit:
-        veto_sub_checks.append(f"queue failed: fill probability {queue_prob:.2f} below floor {queue_floor:.2f}")
-    elif not queue_known and passive_reason and "unknown" in (queue_validation_reason or "").lower():
-        veto_sub_checks.append("queue failed: estimate unknown/stale")
-    # Execution mode
-    exec_mode = []
-    if not bool(getattr(config, "LIMIT_ORDER_ENABLED", False)):
-        exec_mode.append("LIMIT_ORDER_ENABLED=0 (aggressive-only mode disabled)")
+    if passive_geometry_reason:
+        passive_sub_check = f"passive geometry/cost failed: {passive_geometry_reason}"
+    elif queue_blocks_limit:
+        passive_sub_check = (
+            f"passive queue fill probability {queue_prob:.2f} < {queue_floor:.2f}")
+    elif passive_shadow_only:
+        passive_sub_check = (
+            "passive policy disabled; route eligible for SHADOW_ONLY evaluation")
+    elif passive_allowed:
+        passive_sub_check = "passive route passed configured policy and geometry"
     else:
-        exec_mode.append("LIMIT_ORDER_ENABLED=1")
-    # Build the full visible veto message
-    full_why = [
-        f"POWER v2 direction={str(power.get('direction', 'NEITHER') or 'NEITHER').upper()}; "
-        f"force shares UP={power.get('up_power_pct', 'none')} DOWN={power.get('down_power_pct', 'none')}; "
-        f"regime={str(entry_context.get('regime', 'UNKNOWN')).upper()}; "
-        f"conf={_num(entry_context.get('signal_confidence', 0))}; "
-    ]
-    if veto_sub_checks:
-        full_why.append(f"SHOOTING veto sub-checks: {' | '.join(veto_sub_checks)}")
-    else:
-        full_why.append("SHOOTING veto: reason not fully captured from sub-checks (visibility gap)")
-    full_why.extend([
-        f"AI model: {_num(power.get('ai_model', 'none'))}; "
-        f"session: {_num(entry_context.get('session_state', 'UNKNOWN'))}; "
-        f"execution mode: {', '.join(exec_mode)}; "
-        f"plan TTL: {plan_ttl:.0f}s; "
-        f"reference price: {p:.2f}; spread: {sp:.2f}; ATR: {a:.2f}"
-    ])
-    if queue_known:
-        full_why.append(f"queue valid: fill_prob={queue_prob:.2f}, age={now - stamp:.1f}s")
-    else:
-        full_why.append("queue unknown/untrusted")
+        passive_sub_check = passive_reason or "passive route not eligible"
 
-    if not passive_allowed and not aggressive_allowed:
+    if aggressive_allowed:
+        aggressive_sub_check = "A2 aggressive route passed; independent trigger confirmed"
+    elif not trigger:
+        aggressive_sub_check = "A2 trigger not confirmed; aggressive entry unavailable"
+    elif not trigger_reason:
+        aggressive_sub_check = "A2 trigger missing audit reason; aggressive entry blocked"
+    elif not aggressive_geometry_ok:
+        aggressive_sub_check = aggressive_reason or "aggressive geometry/route failed"
+    else:
+        aggressive_sub_check = aggressive_reason or "aggressive route not selected"
+
+    # Full visibility: every branch carries the actual sub-check and context.
+    veto_sub_checks = []
+    if crowd.get("verdict") != "PASS":
+        veto_sub_checks.append(str(crowd.get("reason") or
+                                   "crowd v2 failed without a reason"))
+    if passive_geometry_reason:
+        veto_sub_checks.append(f"passive geometry/cost: {passive_geometry_reason}")
+    elif queue_blocks_limit:
+        veto_sub_checks.append(
+            f"passive queue: fill probability {queue_prob:.2f} < {queue_floor:.2f}")
+    elif passive_shadow_only:
+        veto_sub_checks.append(
+            "passive policy: LIMIT_ORDER_ENABLED=0; eligible route recorded SHADOW_ONLY")
+    if aggressive_reason and aggressive_reason not in (
+            "aggressive market is not eligible",
+            "no separately confirmed aggressive-entry trigger is wired",
+            "aggressive trigger has no audit reason"):
+        veto_sub_checks.append(f"aggressive geometry/route: {aggressive_reason}")
+    if not trigger:
+        veto_sub_checks.append("A2 trigger: not confirmed; aggressive market entry unavailable")
+    elif not trigger_reason:
+        veto_sub_checks.append("A2 trigger: missing audit reason; aggressive entry blocked")
+    if queue_blocks_limit:
+        veto_sub_checks.append(
+            f"queue guard: fill probability {queue_prob:.2f} below {queue_floor:.2f}")
+    elif not queue_known:
+        veto_sub_checks.append(
+            f"queue estimate: UNKNOWN ({queue_validation_reason or 'unavailable'}); "
+            "not itself a passive veto")
+
+    blocked = not passive_allowed and not aggressive_allowed
+    receipt_reason = ("no executable entry style passed" if blocked
+                      else "Shooting plan passed; Step 3/4 must still approve")
+    receipt = _visibility_receipt(
+        receipt_reason, p, a, sp, power, ctx, config, plan_ttl,
+        {"crowd_v2": crowd}, status="WAIT" if blocked else "GO")
+    receipt["sub_checks"] = veto_sub_checks or [
+        "POWER, regime, Crowd v2, geometry and at least one entry style PASS"]
+    receipt["shadow_candidates"] = shadow_candidates
+    receipt["queue"] = {
+        "status": "VALID" if queue_known else "UNKNOWN",
+        "fill_probability": queue_prob,
+        "validation": queue_validation_reason,
+        "blocks_passive": queue_blocks_limit,
+    }
+    receipt["outcome"] = "NO_EXECUTABLE_PLAN" if blocked else "PENDING_STEP3_STEP4"
+    if queue_known:
+        queue_now = _epoch(ctx.get("now")) or time.time()
+        queue_stamp = _epoch(queue.get("timestamp"))
+        queue_age = max(0.0, queue_now - queue_stamp) if queue_stamp is not None else None
+        receipt["queue"]["age_seconds"] = queue_age
+    receipt["full_why_string"] = (
+        f"POWER v2 direction={receipt['direction']}; "
+        f"force shares UP={receipt['force_shares']['up']} "
+        f"DOWN={receipt['force_shares']['down']}; regime={receipt['regime']}; "
+        f"signal_confidence={receipt['signal_confidence']}; "
+        f"signal_strength={receipt['signal_strength']}; "
+        f"AI model={receipt['ai_model']}; session={receipt['session_state']}; "
+        f"execution_mode={receipt['execution']['mode']}; "
+        f"LIMIT_ORDER_ENABLED={receipt['execution']['limit_order_enabled']}; "
+        f"plan_ttl={plan_ttl:.0f}s; outcome={receipt['outcome']}; "
+        f"sub_checks={' | '.join(veto_sub_checks) if veto_sub_checks else 'PASS'}"
+    )
+    receipt["visibility_gap_fixed"] = True
+
+    if blocked:
         why = [
             f"PASSIVE: {passive_reason or 'not eligible (reason missing)'}",
             f"AGGRESSIVE: {aggressive_reason or 'not eligible (reason missing)'}",
-            f"POWER direction: {str(power.get('direction', 'NEITHER')).upper()}; regime: {str(entry_context.get('regime', 'UNKNOWN')).upper()}; conf: {_num(entry_context.get('signal_confidence', 0)):.2f}",
-            f"VETO SUB-CHECKS: {' | '.join(veto_sub_checks) if veto_sub_checks else 'NOT FULLY RECORDED (visibility gap)'}",
-            f"EXECUTION MODE: {', '.join(exec_mode)}",
-            f"FULL RECEIPT: {''.join(full_why)}"
+            f"POWER direction: {receipt['direction']}; regime: {receipt['regime']}; "
+            f"signal_confidence: {receipt['signal_confidence']}",
+            f"VETO SUB-CHECKS: {' | '.join(veto_sub_checks) if veto_sub_checks else 'none'}",
+            f"EXECUTION MODE: {receipt['execution']['mode']}; "
+            f"limit_enabled={receipt['execution']['limit_order_enabled']}",
+            f"FULL RECEIPT: {receipt['full_why_string']}"
         ]
         return {"shot": "WAIT", "side": None, "why": why, "entry": p,
                 "target": None, "stop": None, "rr": 0.0, "door": dict(target_door),
@@ -492,20 +650,22 @@ def plan_shot(signal_map: Dict[str, Any], power: Dict[str, Any],
                 "entry_options": {
                     "PASSIVE_LIMIT": {**passive, "order_type": "LIMIT",
                                        "eligible": passive_allowed,
+                                       "candidate_eligible": passive_candidate_eligible,
+                                       "shadow_only": passive_shadow_only,
+                                       "policy_enabled": limit_order_enabled,
+                                       "execution_enabled": passive_allowed,
                                        "planning_only": True, "reason": passive_reason,
-                                       "sub_check": veto_sub_checks[0] if veto_sub_checks else "unknown"},
+                                       "sub_check": passive_sub_check},
                     "AGGRESSIVE_MARKET": {**aggressive, "order_type": "MARKET",
                                            "geometry_eligible": aggressive_geometry_ok,
                                            "eligible": aggressive_allowed,
                                            "planning_only": True,
                                            "trigger_reason": trigger_reason or None,
                                            "reason": aggressive_reason,
-                                           "sub_check": veto_sub_checks[0] if veto_sub_checks else "unknown"}},
-                "veto_details": {
-                    "sub_checks": veto_sub_checks,
-                    "full_why_string": ''.join(full_why),
-                    "visibility_gap_fixed": bool(veto_sub_checks)
-                }}
+                                           "sub_check": aggressive_sub_check}},
+                "shadow_candidates": shadow_candidates,
+                "veto_details": receipt,
+                "visibility": receipt}
 
     # Patient limit is preferred whenever the queue is acceptable/unknown. Use market
     # entry only if independently triggered and the limit queue is demonstrably poor
@@ -537,16 +697,21 @@ def plan_shot(signal_map: Dict[str, Any], power: Dict[str, Any],
     if choose_aggressive:
         why.append(f"aggressive trigger: {trigger_reason}")
     created_at = _epoch(ctx.get("now")) or time.time()
-    plan_ttl = max(1.0, _cfg(config, "SHOOT_PLAN_TTL_SECONDS", 30.0))
     passive_option = {**passive, "order_type": "LIMIT", "reason": passive_reason,
-                      "eligible": passive_reason is None and not queue_blocks_limit,
-                      "planning_only": True}
+                      "eligible": passive_allowed,
+                      "candidate_eligible": passive_candidate_eligible,
+                      "shadow_only": passive_shadow_only,
+                      "policy_enabled": limit_order_enabled,
+                      "execution_enabled": passive_allowed,
+                      "planning_only": True,
+                      "sub_check": passive_sub_check}
     aggressive_option = {**aggressive, "order_type": "MARKET",
                          "geometry_eligible": aggressive_geometry_ok,
                          "eligible": aggressive_allowed,
                          "reason": aggressive_reason,
                          "trigger_reason": trigger_reason or None,
-                         "planning_only": True}
+                         "planning_only": True,
+                         "sub_check": aggressive_sub_check}
     return {"shot": "GO", "side": side, "why": why,
             "entry": round(chosen["entry"], 6), "target": round(chosen["target"], 6),
             "stop": round(chosen["stop"], 6), "rr": round(chosen["rr"], 4),
@@ -558,6 +723,8 @@ def plan_shot(signal_map: Dict[str, Any], power: Dict[str, Any],
             "order_type": "MARKET" if choose_aggressive else "LIMIT",
             "entry_options": {"PASSIVE_LIMIT": passive_option,
                               "AGGRESSIVE_MARKET": aggressive_option},
+            "shadow_candidates": shadow_candidates,
+            "visibility": receipt,
             "queue_estimate": dict(queue) if queue else None,
             "queue_validation": "VALID" if queue_known else (queue_validation_reason or "UNKNOWN"),
             "power_force_shares": force_shares,

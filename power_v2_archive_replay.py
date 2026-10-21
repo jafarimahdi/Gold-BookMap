@@ -6,9 +6,9 @@ Buy/Sell side labels as direct only when explicitly present; it never infers a
 side from MBO/depth or price changes. It does not import Step 2/main, write
 memory, access a broker, or modify the source archive.
 
-The regime is deliberately UNKNOWN so every replay decision fails closed to
-NEITHER. This checks archived feed parsing and M5 force/quality diagnostics,
-not regime classification or predictive performance.
+Regime is classified with the Power-v2 M5 ADX gate from completed bars; range
+breakout authorization remains disabled. This checks archived feed parsing and
+M5 force/quality/regime diagnostics, not predictive performance.
 """
 from __future__ import annotations
 
@@ -25,6 +25,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from power_m5_adapter import build_m5_inputs
 from power_team_v2 import decide
 from power_v2_regime import classify_m5_regime
+import power_v2_regime as _power_regime
 
 _SIDE_MAP = {
     "BUY": "BUY", "B": "BUY", "BID": "BUY",
@@ -116,42 +117,49 @@ def replay(
     first_end = math.ceil((first_epoch + 600.0) / 300.0) * 300
     last_end = math.ceil(last_epoch / 300.0) * 300
     results: List[Dict[str, Any]] = []
-
-    for end_epoch in range(int(first_end), int(last_end) + 1, 300):
-        end = datetime.fromtimestamp(end_epoch, tz=timezone.utc)
-        evaluation_time = end - timedelta(microseconds=1)
-        window_start = evaluation_time - timedelta(minutes=10)
-        left = bisect.bisect_left(times, window_start)
-        right = bisect.bisect_right(times, evaluation_time)
-        window = ticks[left:right]
-        if not window:
-            continue
-        built = build_m5_inputs(
-            window,
-            now=evaluation_time,
-            tick_size=tick_size,
-            min_trades=min_trades,
-            max_tick_age_seconds=max_tick_age_seconds,
-        )
-        # Regime uses a Power-v2-only ADX gate from completed M5 bars. Pass up
-        # to 29 prior bars; the classifier itself rejects gaps/insufficient history.
-        regime_left = bisect.bisect_left(
-            times, end - timedelta(seconds=(2 * 14 + 1) * 300))
-        regime_ticks = ticks[regime_left:right]
-        regime = classify_m5_regime(
-            regime_ticks,
-            now=end + timedelta(seconds=5),
-        )
-        context = dict(built["context"])
-        context["market_regime"] = regime["market_regime"]
-        context["breakout_confirmed"] = bool(regime["breakout_confirmed"])
-        answer = decide(built["judges"], context=context)
-        answer["regime_diagnostics"] = regime
-        results.append({
-            "bar_end_utc": end,
-            "answer": answer,
-            "diagnostics": built["diagnostics"],
-        })
+    # This replay contract is deliberately M5. Step 2 changes the classifier's
+    # module clock for the active app; pin M5 during replay and restore the caller's
+    # interval afterward so an in-process audit cannot leak a timeframe change.
+    previous_bar_seconds = _power_regime.BAR_SECONDS
+    _power_regime.set_bar_seconds(300)
+    try:
+        for end_epoch in range(int(first_end), int(last_end) + 1, 300):
+            end = datetime.fromtimestamp(end_epoch, tz=timezone.utc)
+            evaluation_time = end - timedelta(microseconds=1)
+            window_start = evaluation_time - timedelta(minutes=10)
+            left = bisect.bisect_left(times, window_start)
+            right = bisect.bisect_right(times, evaluation_time)
+            window = ticks[left:right]
+            if not window:
+                continue
+            built = build_m5_inputs(
+                window,
+                now=evaluation_time,
+                tick_size=tick_size,
+                min_trades=min_trades,
+                max_tick_age_seconds=max_tick_age_seconds,
+            )
+            # Regime uses a Power-v2-only ADX gate from completed M5 bars. Pass up
+            # to 29 prior bars; the classifier itself rejects gaps/insufficient history.
+            regime_left = bisect.bisect_left(
+                times, end - timedelta(seconds=(2 * 14 + 1) * 300))
+            regime_ticks = ticks[regime_left:right]
+            regime = classify_m5_regime(
+                regime_ticks,
+                now=end + timedelta(seconds=5),
+            )
+            context = dict(built["context"])
+            context["market_regime"] = regime["market_regime"]
+            context["breakout_confirmed"] = bool(regime["breakout_confirmed"])
+            answer = decide(built["judges"], context=context)
+            answer["regime_diagnostics"] = regime
+            results.append({
+                "bar_end_utc": end,
+                "answer": answer,
+                "diagnostics": built["diagnostics"],
+            })
+    finally:
+        _power_regime.set_bar_seconds(previous_bar_seconds)
     return results
 
 

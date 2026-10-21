@@ -135,6 +135,35 @@ def find_col(cols, *names):
     return None
 
 
+def decision_source_counts(rows, day_start, day_end, ts_col,
+                           model_col, source_col=None):
+    """Count decision origins, preferring the separate source over model names.
+
+    ``power-lead-v1`` is recognized for historical logs; current Power carries
+    keep the actual AI label and identify their source in ``decision_source``.
+    This is a decision-source census, not a count of broker-executed trades.
+    """
+    counts = {"carried": 0, "ai": 0, "fallback": 0, "quiet": 0, "other": 0}
+    for row in rows or []:
+        ts = parse_ts(row.get(ts_col)) if ts_col else None
+        if ts is None or not (day_start <= ts < day_end):
+            continue
+        model = str(row.get(model_col) or "").strip().lower() if model_col else ""
+        source = str(row.get(source_col) or "").strip().upper() if source_col else ""
+        if (source == "POWER_V2_CONFIGURED_THRESHOLD_CARRY"
+                or model.startswith("power-lead")):
+            counts["carried"] += 1
+        elif model.startswith("fallback"):
+            counts["fallback"] += 1
+        elif model.startswith("gemini"):
+            counts["ai"] += 1
+        elif model.startswith("none") or model == "":
+            counts["quiet"] += 1
+        else:
+            counts["other"] += 1
+    return counts
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Classroom-vs-POWER fusion evidence (read-only)")
@@ -194,6 +223,7 @@ def main() -> int:
     dir_col = find_col(cols, "signal_direction", "direction", "signal")
     stren_col = find_col(cols, "signal_strength", "strength")
     model_col = find_col(cols, "ai_model", "model")
+    source_col = find_col(cols, "decision_source")
     if not (ts_col and conf_col):
         print(f"ERROR: log columns not recognised (need timestamp + confidence);"
               f" found: {', '.join(list(cols)[:10])}")
@@ -260,30 +290,20 @@ def main() -> int:
     print(f"graded symbol: {chosen}   bars: {n}   aligned minutes: {len(minutes)}")
     print(f"bar interval: {bar_interval:.0f}s (M{bar_interval / 60.0:.0f}) - horizons are true minutes")
 
-    # fusionv1: power-lead receipts census (what carried the day's trades)
+    # Decision-source census. Current Power carry attribution is separate from
+    # ai_model; the historical power-lead-v1 model label remains recognized.
     print()
-    print("0. POWER-LEAD RECEIPTS (decisions_log ai_model)")
-    if model_col:
-        carried = ai = fallback = quiet = other = 0
-        for row in rows:
-            ts = parse_ts(row.get(ts_col))
-            if ts is None or not (day_start <= ts < day_end):
-                continue
-            m = str(row.get(model_col) or "").strip().lower()
-            if m.startswith("power-lead"):
-                carried += 1
-            elif m.startswith("fallback"):
-                fallback += 1
-            elif m.startswith("gemini"):
-                ai += 1
-            elif m.startswith("none") or m == "":
-                quiet += 1
-            else:
-                other += 1
-        print(f"  carried: {carried} (ai_model=power-lead-v1) | ai: {ai} | "
-              f"fallback: {fallback} | none/quiet: {quiet} | other: {other}")
+    print("0. DECISION-SOURCE CENSUS (not an executed-trade count)")
+    if model_col or source_col:
+        source_counts = decision_source_counts(
+            rows, day_start, day_end, ts_col, model_col, source_col)
+        print(f"  POWER carries: {source_counts['carried']} "
+              "(decision_source=POWER_V2_CONFIGURED_THRESHOLD_CARRY or legacy "
+              "ai_model=power-lead-v1) | "
+              f"AI: {source_counts['ai']} | fallback: {source_counts['fallback']} | "
+              f"none/quiet: {source_counts['quiet']} | other: {source_counts['other']}")
     else:
-        print("  ai_model column not found in decisions_log - skipped")
+        print("  decision_source/ai_model columns not found in decisions_log - skipped")
     if twins:
         others = ", ".join(f"{s} x{c}" for s, c in sorted(twins.items()))
         print(f"twins filtered (not graded): {others}")

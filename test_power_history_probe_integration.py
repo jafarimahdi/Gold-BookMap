@@ -1,7 +1,11 @@
 """Guard the regime-only probe boundary and preserve the force input contract."""
 import ast
+import os
+import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 
 class PowerProbeBoundaryTests(unittest.TestCase):
@@ -35,6 +39,61 @@ class PowerProbeBoundaryTests(unittest.TestCase):
                     if isinstance(value, ast.Name) and value.id == "_regime_ticks":
                         bad_assignments.append(node)
         self.assertFalse(bad_assignments)
+
+    def test_fixed_m5_probe_is_observed_but_not_used_by_m3_regime(self):
+        import step2_market_analysis as step2
+
+        with tempfile.TemporaryDirectory() as temp:
+            Path(temp, "power_history_probe_latest.csv").touch()
+            step2._POWER_PROBE_STARTUP_CACHE.clear()
+            rows = [{"start": float(i), "open": 4200.0, "high": 4201.0,
+                     "low": 4199.0, "close": 4200.5} for i in range(28)]
+            def fake_loader(**_kwargs):
+                return {"status": "LOADED", "loaded_bars": 28,
+                        "bars": [dict(row) for row in rows]}
+            live = [{"timestamp": datetime(2026, 10, 21, 12, 7, 29,
+                                           tzinfo=timezone.utc), "price": 4200.0}]
+            with patch.dict(os.environ, {"POWER_HISTORY_PROBE_DIR": temp}, clear=False), \
+                    patch("power_history_probe_loader.load_probe_regime_bars",
+                          side_effect=fake_loader):
+                returned_live, m3_diagnostics, m3_history = \
+                    step2._power_probe_startup_history(
+                        "GCZ6.COMEX@RITHMIC",
+                        datetime(2026, 10, 21, 12, 7, 30, tzinfo=timezone.utc),
+                        live, bar_seconds=180)
+                self.assertIs(returned_live, live)
+                self.assertEqual(m3_diagnostics["loaded_m5_bars"], 28)
+                self.assertTrue(m3_diagnostics["timeframe_mismatch"])
+                self.assertEqual(m3_diagnostics["usable_bars"], 0)
+                self.assertEqual(m3_diagnostics["rejected_probe_bars"], 28)
+                self.assertEqual(m3_history, [])
+                _live, m5_diagnostics, m5_history = \
+                    step2._power_probe_startup_history(
+                        "GCZ6.COMEX@RITHMIC",
+                        datetime(2026, 10, 21, 12, 7, 30, tzinfo=timezone.utc),
+                        live, bar_seconds=300)
+                self.assertTrue(m5_diagnostics["probe_compatible"])
+                self.assertEqual(m5_diagnostics["usable_bars"], 28)
+                self.assertEqual(len(m5_history), 28)
+
+            # A fixed-M5 source being configured does not mean a mismatch
+            # occurred when there are no probe rows to reject.
+            step2._POWER_PROBE_STARTUP_CACHE.clear()
+            with patch.dict(os.environ, {"POWER_HISTORY_PROBE_DIR": temp}, clear=False), \
+                    patch("power_history_probe_loader.load_probe_regime_bars",
+                          return_value={"status": "NO_DATA", "loaded_bars": 0,
+                                        "bars": []}):
+                _live, empty_diagnostics, empty_history = \
+                    step2._power_probe_startup_history(
+                        "GCZ6.COMEX@RITHMIC",
+                        datetime(2026, 10, 21, 12, 7, 30, tzinfo=timezone.utc),
+                        live, bar_seconds=180)
+                self.assertFalse(empty_diagnostics["timeframe_mismatch"])
+                self.assertFalse(empty_diagnostics.get("history_bars_refused", False))
+                self.assertEqual(empty_diagnostics["status"], "NO_DATA")
+                self.assertEqual(empty_diagnostics["usable_bars"], 0)
+                self.assertEqual(empty_history, [])
+            step2._POWER_PROBE_STARTUP_CACHE.clear()
 
 
 if __name__ == "__main__":
