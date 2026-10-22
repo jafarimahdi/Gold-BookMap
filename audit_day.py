@@ -60,7 +60,7 @@ def LOGS_DIR():
 # BUILD MARKER - the shell scripts check for THIS string instead of a byte count,
 # so an intentional edit can never make morning_check.sh yell "re-copy it from the
 # kit" at a perfectly good file. Bump the date whenever you ship a new auditor.
-BUILD = "audit-2026-09-26h"
+BUILD = "audit-2026-10-22a"
 BASE_DIR_FOR_ENV = Path(__file__).resolve().parent
 
 
@@ -139,11 +139,12 @@ def _envf(name, default):
         return float(default)
 
 
-ATR = _envf("AUDIT_ATR", 3.18)                 # M5 ATR of gold, points
-SPREAD = _envf("AUDIT_SPREAD", 0.50)           # CFD round-trip cost, points
+ATR = _envf("AUDIT_ATR", 3.18)                 # legacy reference only; replay ATR is tape-derived
+SPREAD = _envf("AUDIT_SPREAD", 0.50)           # assumed round-trip cost, points
 SL_MULT = _envf("STOP_LOSS_ATR_MULT", 2.0)
 TP_MULT = _envf("TAKE_PROFIT_ATR_MULT", 3.5)
-MAX_HOLD_CANDLES = int(_envf("AUDIT_MAX_HOLD_MIN", 180) / 5.0) or 36
+MAX_HOLD_MIN = _envf("AUDIT_MAX_HOLD_MIN", 180.0)  # audit scenario horizon, not a robot exit
+MAX_HOLD_CANDLES = max(1, int(MAX_HOLD_MIN / 5.0))  # legacy M5 callers
 WINDOW_START_H = int(_env("BUDAPEST_START", "08:00").split(":")[0])
 WINDOW_END_H = int(_env("BUDAPEST_END", "23:00").split(":")[0])
 AI_MIN = _envf("AI_MIN_SIGNAL_STRENGTH", 6.0)
@@ -781,56 +782,235 @@ def read_json(path):
         return None
 
 
-def build_candles(ticks):
-    """M5 OHLC from a sorted tick list."""
+def build_candles(ticks, bar_seconds=300):
+    """Build OHLC bars from ticks on an explicit, epoch-aligned interval.
+
+    The default remains M5 for existing report panels. Timeframe-sensitive
+    replays must pass the day's recorded POWER_BAR_SECONDS explicitly.
+    """
+    try:
+        bar_seconds = int(bar_seconds)
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError("bar_seconds must be an integer number of seconds")
+    if bar_seconds < 60:
+        raise ValueError("bar_seconds must be >=60")
     buckets = defaultdict(list)
     for dt, price, _sz in ticks:
-        b = dt.replace(minute=(dt.minute // 5) * 5, second=0, microsecond=0)
-        buckets[b].append(price)
+        if not isinstance(dt, datetime):
+            continue
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        try:
+            value = float(price)
+            stamp = dt.timestamp()
+        except (TypeError, ValueError, OverflowError, OSError):
+            continue
+        if not math.isfinite(value) or value <= 0 or not math.isfinite(stamp):
+            continue
+        start = math.floor(stamp / bar_seconds) * bar_seconds
+        bucket = datetime.fromtimestamp(start, tz=dt.tzinfo)
+        buckets[bucket].append((stamp, value))
     out = []
-    for b in sorted(buckets):
-        pr = buckets[b]
-        out.append({"dt": b, "open": pr[0], "high": max(pr),
-                    "low": min(pr), "close": pr[-1], "n": len(pr)})
+    for bucket in sorted(buckets):
+        rows = sorted(buckets[bucket], key=lambda row: row[0])
+        prices = [row[1] for row in rows]
+        out.append({"dt": bucket, "open": prices[0], "high": max(prices),
+                    "low": min(prices), "close": prices[-1], "n": len(prices)})
     return out
 
 
+def _wilder_atr_before(candles, entry_dt, bar_seconds=300, period=14):
+    """Wilder ATR from completed, contiguous bars strictly before a signal."""
+    try:
+        bar_seconds, period = int(bar_seconds), int(period)
+        entry_ts = entry_dt.timestamp()
+    except (AttributeError, TypeError, ValueError, OverflowError, OSError):
+        return None
+    if bar_seconds < 60 or period < 1 or not math.isfinite(entry_ts):
+        return None
+    completed = []
+    for candle in candles:
+        try:
+            start = candle["dt"].timestamp()
+        except (KeyError, AttributeError, TypeError, ValueError, OverflowError, OSError):
+            continue
+        if start + bar_seconds <= entry_ts:
+            completed.append(candle)
+    completed.sort(key=lambda candle: candle["dt"])
+    if len(completed) < period + 1:
+        return None
+
+    # A missing interval invalidates the rolling ATR window; do not bridge a
+    # feed gap with a stale previous close.
+    tail = [completed[-1]]
+    for previous in reversed(completed[:-1]):
+        try:
+            delta = (tail[0]["dt"] - previous["dt"]).total_seconds()
+        except (KeyError, TypeError, AttributeError):
+            break
+        if delta != bar_seconds:
+            break
+        tail.insert(0, previous)
+    if len(tail) < period + 1:
+        return None
+
+    true_ranges = []
+    try:
+        for previous, current in zip(tail, tail[1:]):
+            high = float(current["high"])
+            low = float(current["low"])
+            prior_close = float(previous["close"])
+            tr = max(high - low, abs(high - prior_close), abs(low - prior_close))
+            if not all(math.isfinite(v) for v in (high, low, prior_close, tr)) or tr < 0:
+                return None
+            true_ranges.append(tr)
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return None
+    if len(true_ranges) < period:
+        return None
+    atr = sum(true_ranges[:period]) / period
+    for tr in true_ranges[period:]:
+        atr = (atr * (period - 1) + tr) / period
+    return atr if math.isfinite(atr) and atr > 0 else None
+
+
 def simulate(ticks, candles, entry_dt, direction, entry_price,
-             max_candles=MAX_HOLD_CANDLES, sl_mult=None, tp_mult=None):
-    """Walk forward on M5 candles. Returns points captured after spread."""
+             max_candles=None, sl_mult=None, tp_mult=None, *, atr=None,
+             spread=None, bar_seconds=300, require_contiguous=False):
+    """Walk explicit-interval bars; optionally refuse gaps; return points after cost."""
     if not candles:
         return None
+    try:
+        bar_seconds = int(bar_seconds)
+        entry_bucket = math.floor(entry_dt.timestamp() / bar_seconds) * bar_seconds
+        entry_price = float(entry_price)
+        atr = float(ATR if atr is None else atr)
+        cost = float(SPREAD if spread is None else spread)
+        max_candles = (int(MAX_HOLD_MIN * 60 // bar_seconds)
+                       if max_candles is None else int(max_candles))
+    except (AttributeError, TypeError, ValueError, OverflowError, OSError, ZeroDivisionError):
+        return None
+    if (bar_seconds < 60 or max_candles < 1
+            or not all(math.isfinite(v) for v in (entry_price, atr, cost))
+            or entry_price <= 0 or atr <= 0 or cost < 0):
+        return None
+    first_future_ts = entry_bucket + bar_seconds
     i = None
-    for k, c in enumerate(candles):
-        if c["dt"] >= entry_dt.replace(second=0, microsecond=0):
-            i = k + 1
+    for k, candle in enumerate(candles):
+        if candle["dt"].timestamp() >= first_future_ts:
+            i = k
             break
     if i is None or i >= len(candles):
         return None
     seg = candles[i:i + max_candles]
     if not seg:
         return None
-    slm = SL_MULT if sl_mult is None else sl_mult
-    tpm = TP_MULT if tp_mult is None else tp_mult
+    try:
+        slm = float(SL_MULT if sl_mult is None else sl_mult)
+        tpm = float(TP_MULT if tp_mult is None else tp_mult)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not (math.isfinite(slm) and math.isfinite(tpm) and slm > 0 and tpm > 0):
+        return None
+    expected_ts = first_future_ts
     if direction == "BUY":
-        sl = entry_price - slm * ATR
-        tp = entry_price + tpm * ATR
-        for c in seg:
-            if c["low"] <= sl:
-                return sl - entry_price - SPREAD
-            if c["high"] >= tp:
-                return tp - entry_price - SPREAD
-        return seg[-1]["close"] - entry_price - SPREAD
-    else:
-        sl = entry_price + slm * ATR
-        tp = entry_price - tpm * ATR
-        for c in seg:
-            if c["high"] >= sl:
-                return entry_price - sl - SPREAD
-            if c["low"] <= tp:
-                return entry_price - tp - SPREAD
-        return entry_price - seg[-1]["close"] - SPREAD
+        sl = entry_price - slm * atr
+        tp = entry_price + tpm * atr
+        for candle in seg:
+            try:
+                candle_ts = candle["dt"].timestamp()
+            except (KeyError, AttributeError, TypeError, ValueError, OverflowError, OSError):
+                return None
+            if require_contiguous and candle_ts != expected_ts:
+                return None
+            expected_ts = candle_ts + bar_seconds
+            if candle["low"] <= sl:       # same-bar SL/TP collision: conservative stop first
+                return sl - entry_price - cost
+            if candle["high"] >= tp:
+                return tp - entry_price - cost
+        return seg[-1]["close"] - entry_price - cost
+    if direction == "SELL":
+        sl = entry_price + slm * atr
+        tp = entry_price - tpm * atr
+        for candle in seg:
+            try:
+                candle_ts = candle["dt"].timestamp()
+            except (KeyError, AttributeError, TypeError, ValueError, OverflowError, OSError):
+                return None
+            if require_contiguous and candle_ts != expected_ts:
+                return None
+            expected_ts = candle_ts + bar_seconds
+            if candle["high"] >= sl:
+                return entry_price - sl - cost
+            if candle["low"] <= tp:
+                return entry_price - tp - cost
+        return entry_price - seg[-1]["close"] - cost
+    return None
 
+
+def _timeframe_label(bar_seconds):
+    try:
+        seconds = int(bar_seconds)
+    except (TypeError, ValueError, OverflowError):
+        return "unknown"
+    if seconds >= 60 and seconds % 60 == 0:
+        return f"M{seconds // 60}"
+    return f"{seconds}s"
+
+
+def _audit_bar_seconds(day, run_config=None):
+    """Return (seconds, source) without borrowing today's .env for an old run."""
+    rc = run_config if isinstance(run_config, dict) else _load_run_config(day)
+    if isinstance(rc, dict):
+        for key in ("POWER_BAR_SECONDS", "REGIME_BAR_SECONDS", "bar_seconds"):
+            raw = rc.get(key)
+            if raw in (None, ""):
+                continue
+            try:
+                seconds = int(float(raw))
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if seconds >= 60:
+                return seconds, f"recorded {key}"
+            if key == "POWER_BAR_SECONDS":
+                # Step 2 fails closed to 300s when the explicit interval is <60s.
+                return 300, "runtime M5 fallback (recorded POWER_BAR_SECONDS<60)"
+        for key in ("TIMEFRAME", "POWER_TIMEFRAME"):
+            tf = str(rc.get(key) or "").strip().upper()
+            match = re.fullmatch(r"M(\d{1,3})", tf)
+            if match:
+                minutes = int(match.group(1))
+                if 1 <= minutes <= 240:
+                    return minutes * 60, f"recorded {key}"
+    # The audit's dated baseline says the robot moved to M3 on 2026-10-15.
+    # This fallback is explicitly marked as inferred, never represented as a
+    # value recorded by the process.
+    if day >= date_cls(2026, 10, 15):
+        return 180, "dated M3 baseline (not recorded in run_config)"
+    return 300, "legacy M5 baseline (not recorded in run_config)"
+
+
+def _run_config_number(run_config, key, fallback):
+    if isinstance(run_config, dict):
+        raw = run_config.get(key)
+        try:
+            value = float(raw)
+            if math.isfinite(value):
+                return value, f"run_config {key}"
+        except (TypeError, ValueError, OverflowError):
+            pass
+    return float(fallback), f"audit setting/default {key}"
+
+
+def _hold_bars(max_hold_min, bar_seconds):
+    try:
+        minutes, seconds = float(max_hold_min), int(bar_seconds)
+        if not math.isfinite(minutes) or minutes <= 0 or seconds < 60:
+            return None
+        bars = int(math.floor(minutes * 60.0 / seconds))
+        return bars if bars >= 1 else None
+    except (TypeError, ValueError, OverflowError, ZeroDivisionError):
+        return None
 
 
 JUDGE_ERR_RE = re.compile(r"([A-Za-z0-9_][A-Za-z0-9_. +]{0,40}?)\s*(?:v6(?:\.0)?\s*)?error\s*:\s*(.+)", re.I)
@@ -1658,72 +1838,139 @@ def test_7_what_if(day, ticks, decisions, log_path):
             why.append(f"once ticks.csv has this day, re-run: python audit_day.py --date {day:%Y-%m-%d}")
         r.add("NA", "WHAT-IF CHECK", "if it had taken every signal, would we have made money?", why)
         return r, None
-    candles = build_candles(ticks)
-    cands = [d for d in decisions if (d.get("signal_direction") or "") in ("BUY", "SELL") and d.get("price", 0) > 1000]
-    why = [f"{len(candles)} M5 candles built, {len(cands)} real BUY/SELL decisions with a price to replay"]
+
+    rc = _load_run_config(day)
+    bar_seconds, timeframe_source = _audit_bar_seconds(day, rc)
+    timeframe = _timeframe_label(bar_seconds)
+    candles = build_candles(ticks, bar_seconds=bar_seconds)
+    def _signal_price(row):
+        try:
+            return float(row.get("price") or 0)
+        except (TypeError, ValueError, OverflowError):
+            return 0.0
+
+    def _signal_order_key(row):
+        try:
+            return row["_dt"].timestamp()
+        except (KeyError, AttributeError, TypeError, ValueError, OverflowError, OSError):
+            return float("inf")
+
+    cands = sorted(
+        (d for d in decisions
+         if (d.get("signal_direction") or "").upper() in ("BUY", "SELL")
+         and _signal_price(d) > 1000),
+        key=_signal_order_key)
+    why = [f"{len(candles)} {timeframe} candles ({bar_seconds}s) built; "
+           f"{len(cands)} BUY/SELL decisions with a replayable price",
+           f"timeframe source: {timeframe_source}"]
+    max_hold_min, hold_source = _run_config_number(rc, "AUDIT_MAX_HOLD_MIN", MAX_HOLD_MIN)
+    spread, spread_source = _run_config_number(rc, "AUDIT_SPREAD", SPREAD)
+    sl_mult, sl_source = _run_config_number(rc, "STOP_LOSS_ATR_MULT", SL_MULT)
+    tp_mult, tp_source = _run_config_number(rc, "TAKE_PROFIT_ATR_MULT", TP_MULT)
+    max_candles = _hold_bars(max_hold_min, bar_seconds)
+    if (max_candles is None
+            or not all(math.isfinite(v) for v in (spread, sl_mult, tp_mult))
+            or spread < 0 or sl_mult <= 0 or tp_mult <= 0):
+        r.add("NA", "WHAT-IF CHECK", "if it had taken every signal, would we have made money?",
+              why + ["invalid replay assumptions (hold horizon, cost, SL, or TP) -> refusing to manufacture a result"])
+        return r, None
+
     if not cands:
-        # fall back: grade every snapshot in the window at its own confidence
-        grade = "WARN"
-        why.append("the robot asked for ZERO trades that day -> so I cannot score its choices; I can only tell you the market did move, so the question stays open")
-        moves = []
-        for a, b in zip(candles, candles[1:]):
-            moves.append(abs(b["close"] - a["close"]))
+        why.append("the robot asked for ZERO directional trades -> no decision can be scored; "
+                   "the price tape is shown only as market context")
+        moves = [abs(b["close"] - a["close"]) for a, b in zip(candles, candles[1:])]
         if moves:
-            why.append(f"average 5-min move that day: {fmt(statistics.mean(moves),2)} pts, biggest {fmt(max(moves),2)} pts (ATR used for SL/TP: {fmt(ATR)})")
-        r.add(grade, "WHAT-IF CHECK", "if it had taken every signal, would we have made money?", why)
+            why.append(f"average {timeframe} close-to-close move: "
+                       f"{fmt(statistics.mean(moves), 2)} pts, biggest {fmt(max(moves), 2)} pts")
+        r.add("WARN", "WHAT-IF CHECK", "if it had taken every signal, would we have made money?", why)
         return r, None
+
     res = []
-    for d in cands:
-        pts = simulate(ticks, candles, d["_dt"], d["signal_direction"], d["price"])
-        if pts is not None:
-            res.append((d, pts))
+    no_atr = no_forward = 0
+    for decision in cands:
+        atr = _wilder_atr_before(candles, decision.get("_dt"),
+                                 bar_seconds=bar_seconds, period=14)
+        if atr is None:
+            no_atr += 1
+            continue
+        pts = simulate(ticks, candles, decision["_dt"],
+                       decision["signal_direction"].upper(), decision["price"],
+                       max_candles=max_candles, sl_mult=sl_mult, tp_mult=tp_mult,
+                       atr=atr, spread=spread, bar_seconds=bar_seconds,
+                       require_contiguous=True)
+        if pts is None:
+            no_forward += 1
+        else:
+            res.append((decision, pts))
     if not res:
-        r.add("WARN", "WHAT-IF CHECK", "if it had taken every signal, would we have made money?",
-              ["no decision had candles after it (day ran out of tape) -> cannot grade"])
+        why.extend([
+            f"no signal could be scored: ATR unavailable for {no_atr} (fewer than 15 "
+            f"contiguous completed {timeframe} bars before the signal); no contiguous future path for {no_forward}",
+            f"reporting a proxy timeframe or constant M5 ATR here would not be a valid {timeframe} replay"])
+        r.add("WARN", "WHAT-IF CHECK", "if it had taken every signal, would we have made money?", why)
         return r, None
-    pts_list = [p for _d, p in res]
-    wins = [p for p in pts_list if p > 0]
-    losses = [p for p in pts_list if p <= 0]
+
+    pts_list = [points for _decision, points in res]
+    wins = [points for points in pts_list if points > 0]
+    losses = [points for points in pts_list if points <= 0]
     total = sum(pts_list)
     pf = (sum(wins) / abs(sum(losses))) if losses and sum(losses) != 0 else float("inf")
-    eq = 0.0
-    dd = 0.0
-    for p in pts_list:
-        eq += p
-        dd = max(dd, eq - max(0.0, eq)) if False else max(dd, (max(0.0, eq) - eq))
-    why.append(f"SL={fmt(SL_MULT)}xATR TP={fmt(TP_MULT)}xATR max {MAX_HOLD_CANDLES*5}min, cost {fmt(SPREAD)} pts per round trip")
+    equity = peak = drawdown = 0.0
+    for points in pts_list:
+        equity += points
+        peak = max(peak, equity)
+        drawdown = max(drawdown, peak - equity)
+    effective_hold_min = max_candles * bar_seconds / 60.0
+    hold_bars_text = (f"{max_candles} {timeframe} bars = {effective_hold_min:g} min effective "
+                      f"({hold_source})")
+    why.append(f"scenario only: Wilder ATR(14) from completed {timeframe} bars strictly "
+               f"before each signal; SL={fmt(sl_mult)}xATR ({sl_source}), "
+               f"TP={fmt(tp_mult)}xATR ({tp_source}), configured max hold {max_hold_min:g} min "
+               f"({hold_bars_text}), assumed cost {fmt(spread)} pts round trip "
+               f"({spread_source})")
+    why.append("OHLC walk starts after the signal's current bar and refuses missing future "
+               "intervals; if SL and TP both touch within one bar, the stop is counted first. "
+               "Signals are scored independently "
+               "(no position cap, sizing, fills, CFD/BookMap basis conversion, or actual P&L).")
     if len(res) != len(cands):
-        why.append(f"of those {len(cands)} signals, {len(res)} could be replayed: the other "
-                   f"{len(cands) - len(res)} sat within the last M5 candle of the tape, so the "
-                   f"market had already ended and there was nothing left to score them on")
-    why.append(f"if ALL {len(res)} had been taken: total {total:+.1f} pts | win rate {pct(len(wins), len(res)):.0f}% | profit factor {fmt(pf,2)} | worst drawdown {fmt(dd,1)} pts")
+        why.append(f"of {len(cands)} signals, {len(res)} were replayable; ATR unavailable "
+                   f"for {no_atr}, and no contiguous future path for {no_forward}")
+    why.append(f"if ALL {len(res)} had been taken in this scenario: total {total:+.1f} pts | "
+               f"win rate {pct(len(wins), len(res)):.0f}% | profit factor {fmt(pf,2)} | "
+               f"peak-to-trough drawdown {fmt(drawdown,1)} pts")
     best = max(res, key=lambda x: x[1])
     worst = min(res, key=lambda x: x[1])
-    why.append(f"best: {hhmm(best[0]['_dt'])} {best[0]['signal_direction']} {best[1]:+.1f} pts (conf {fmt(best[0]['signal_confidence'])}, {best[0].get('regime')})")
-    why.append(f"worst: {hhmm(worst[0]['_dt'])} {worst[0]['signal_direction']} {worst[1]:+.1f} pts (conf {fmt(worst[0]['signal_confidence'])}, {worst[0].get('regime')})")
+    why.append(f"best: {hhmm(best[0]['_dt'])} {best[0]['signal_direction']} {best[1]:+.1f} pts "
+               f"(conf {fmt(best[0]['signal_confidence'])}, {best[0].get('regime')})")
+    why.append(f"worst: {hhmm(worst[0]['_dt'])} {worst[0]['signal_direction']} {worst[1]:+.1f} pts "
+               f"(conf {fmt(worst[0]['signal_confidence'])}, {worst[0].get('regime')})")
     _gk, _gn = _gate_field(res)
-    hi_conf = [p for d, p in res if _gate_value(d) >= CONF_MIN]
-    lo_conf = [p for d, p in res if _gate_value(d) < CONF_MIN]
+    hi_conf = [points for decision, points in res if _gate_value(decision) >= CONF_MIN]
+    lo_conf = [points for decision, points in res if _gate_value(decision) < CONF_MIN]
     why.append(f"gate study reads '{_gk}' - the same number the executor compares in "
                f"step4_mt5_execution.py against CONFIDENCE_THRESHOLD={fmt(CONF_MIN,0)}"
                + ("" if _gk == "ai_confidence" else
                   f" (ai_confidence was missing or zero on {_gn} row(s), so the team's "
-                  f"signal_confidence was used instead - say so out loud rather than "
-                  f"silently grading a different door)"))
+                  f"signal_confidence was used instead)"))
     if hi_conf and lo_conf:
-        why.append(f"gate test: >= {fmt(CONF_MIN,0)}% conf -> {sum(hi_conf):+.1f} pts ({len(hi_conf)} trades); below gate -> {sum(lo_conf):+.1f} pts ({len(lo_conf)})")
+        why.append(f"gate study only: >= {fmt(CONF_MIN,0)}% -> {sum(hi_conf):+.1f} pts "
+                   f"({len(hi_conf)} signals); below -> {sum(lo_conf):+.1f} pts ({len(lo_conf)})")
         if len(hi_conf) < 20 or len(lo_conf) < 20:
-            why.append(f"too few trades to compare gates ({len(hi_conf)} above / {len(lo_conf)} below) - "
-                       f"that is weather, not climate. 20+ a side before this line can advise anything; "
-                       f"the numbers above are shown, the advice is withheld on purpose")
+            why.append(f"too few signals to compare gates ({len(hi_conf)} above / {len(lo_conf)} below); "
+                       "numbers are descriptive, not a recommendation to change the configured gate")
         else:
-            why.append("if the below-gate pile is bigger, the 50% threshold is throwing away money; if it's negative, the guard earns its keep")
-    grade = "PASS" if total > 0 else "WARN"
-    r.add(grade, "WHAT-IF CHECK", "if it had taken every signal, would we have made money?", why)
+            why.append("gate comparison is descriptive only; it does not authorize lowering or changing the execution threshold")
+    grade = "PASS" if total > 0 and no_atr == 0 and no_forward == 0 else "WARN"
+    r.add(grade, "WHAT-IF CHECK",
+          "timeframe-aligned hypothetical replay (not actual P&L)", why)
     METRICS["whatif"] = {"n": len(res), "total_pts": round(total, 1),
                          "win_rate": round(pct(len(wins), len(res)), 1),
                          "profit_factor": (round(pf, 2) if pf != float("inf") else 999.0),
-                         "max_drawdown_pts": round(dd, 1)}
+                         "max_drawdown_pts": round(drawdown, 1),
+                         "timeframe": timeframe, "bar_seconds": bar_seconds,
+                         "max_hold_min": max_hold_min,
+                         "effective_max_hold_min": round(effective_hold_min, 3),
+                         "atr_method": "Wilder ATR(14)"}
     return r, {"total": total, "wins": len(wins), "losses": len(losses)}
 
 
@@ -3102,7 +3349,9 @@ def test_11_version_config(text, day):
     rc = _load_run_config(day)   # what the ROBOT recorded while that day was running
     ran = ({k: rc.get(k) for k in ("CONFIDENCE_THRESHOLD", "AI_MIN_SIGNAL_STRENGTH",
                                    "V6_CFD_SPREAD_MAX", "BOOKMAP_WINDOW_SECONDS",
-                                   "BOOKMAP_MAX_DEPTH_LEVELS")} if rc else {})
+                                   "BOOKMAP_MAX_DEPTH_LEVELS", "POWER_BAR_SECONDS",
+                                   "TIMEFRAME", "A1_BASE_TF_MINUTES", "VOICE_GAIN",
+                                   "TRADING_ENABLED")} if rc else {})
     want = {"BOOKMAP_WINDOW_SECONDS": "10800", "BOOKMAP_MAX_DEPTH_LEVELS": "250",
             "AI_MIN_SIGNAL_STRENGTH": "6", "CONFIDENCE_THRESHOLD": "50",
             "V6_CFD_SPREAD_MAX": "0.50", "TRADING_ENABLED": "1"}
@@ -3112,9 +3361,21 @@ def test_11_version_config(text, day):
     if day >= date_cls(2026, 10, 13):
         want["BOOKMAP_MAX_DEPTH_LEVELS"] = "150"
     if day >= date_cls(2026, 10, 15):
-        want.update({"TIMEFRAME": "M3", "A1_BASE_TF_MINUTES": "3", "VOICE_GAIN": "3.0"})
-    basis = {k: (ran.get(k) if ran.get(k) not in (None, "") else env.get(k)) for k in want}
-    src_name = "recorded by the robot for that day" if ran else "today's .env (no run_config file)"
+        want.update({"TIMEFRAME": "M3", "A1_BASE_TF_MINUTES": "3", "VOICE_GAIN": "3.0",
+                     "POWER_BAR_SECONDS": "180"})
+    # The owner-supplied .env/run record reports 35 for 2026-10-22 onward.
+    # This audit comparator never writes to .env or the execution config.
+    if day >= date_cls(2026, 10, 22):
+        want["CONFIDENCE_THRESHOLD"] = "35"
+    # POWER_BAR_SECONDS was already captured in older run_config files before
+    # the audit stored raw TIMEFRAME. Derive only from that dated interval.
+    if rc and ran.get("TIMEFRAME") in (None, ""):
+        try:
+            _recorded_seconds = int(float(ran.get("POWER_BAR_SECONDS")))
+            if _recorded_seconds >= 60:
+                ran["TIMEFRAME"] = _timeframe_label(_recorded_seconds)
+        except (TypeError, ValueError, OverflowError):
+            pass
     def _same(a, b):
         if a is None:
             return False
@@ -3122,8 +3383,23 @@ def test_11_version_config(text, day):
             return abs(float(a) - float(b)) < 1e-9     # 0.5 == 0.50 == "0.50"
         except Exception:
             return str(a).strip() == str(b).strip()
-    diff = [f"{k}: ran={basis.get(k, 'MISSING')} expected={v}" for k, v in want.items()
-            if not _same(basis.get(k), v)]
+    if rc:
+        # A missing key is unverified history, not permission to substitute
+        # today's .env and call the result a recorded setting.
+        basis = {k: ran.get(k) for k in want}
+        src_name = "recorded by the robot for that day (unrecorded keys remain unverified)"
+        unverified = [k for k in want if basis.get(k) in (None, "")]
+        diff = [f"{k}: ran={basis.get(k)} expected={v}" for k, v in want.items()
+                if k not in unverified and not _same(basis.get(k), v)]
+        current_env_diff = []
+    else:
+        basis = {k: env.get(k) for k in want}
+        src_name = "today's .env (no run_config file; not historical proof)"
+        unverified = list(want)
+        diff = []
+        current_env_diff = [f"{k}: current .env={basis.get(k)} baseline={v}"
+                            for k, v in want.items()
+                            if basis.get(k) not in (None, "") and not _same(basis.get(k), v)]
     ver = re.findall(r"v\d\.\d[\.\d]*", text)
     feed_age = len(re.findall(r"STALE/EMPTY", text))
     creds = re.findall(r"Credentials: (\{[^}]*\})", text)
@@ -3134,9 +3410,13 @@ def test_11_version_config(text, day):
         if k.startswith("GEMINI_API_KEY") and v in ("", "REPLACE_ME", "your_key_here"):
             why.append(f"{k} is EMPTY -> STEP 3 AI cannot run at all (AI calls = 0)")
             break
+    _tf_basis = basis.get("TIMEFRAME") or _timeframe_label(basis.get("POWER_BAR_SECONDS"))
     why.append(f"config basis  : {src_name} | window {basis.get('BOOKMAP_WINDOW_SECONDS')}s "
                f"depth {basis.get('BOOKMAP_MAX_DEPTH_LEVELS')} conf {basis.get('CONFIDENCE_THRESHOLD')}% "
-               f"ai_gate {basis.get('AI_MIN_SIGNAL_STRENGTH')} spread_cap {basis.get('V6_CFD_SPREAD_MAX')}")
+               f"timeframe {_tf_basis} ai_gate {basis.get('AI_MIN_SIGNAL_STRENGTH')} "
+               f"spread_cap {basis.get('V6_CFD_SPREAD_MAX')}")
+    why.append(f"confidence audit comparator for {day:%Y-%m-%d}: "
+               f"{want.get('CONFIDENCE_THRESHOLD')}% (metadata only; no app/.env setting is changed)")
     if ran:
         why.append(f"the robot's own record: {Path(rc['_path']).name} (written {rc.get('written_at', '?')}) "
                    f"-> this report is graded with the day's rule, so editing .env today cannot rewrite history")
@@ -3145,16 +3425,26 @@ def test_11_version_config(text, day):
                 why.append(f"   the day ran with {k}={ran.get(k)}; today's .env says {env.get(k)} "
                            f"(the grade above uses {ran.get(k)})")
     else:
-        why.append("no run_config_<date>.json for this day -> graded against today's .env (older "
-                   "build, or the file was deleted); the 24f build pins this per day from now on")
+        why.append("no run_config_<date>.json for this day -> today's .env is displayed only as "
+                   "a current comparator; historical settings are unverified")
     if creds:
         why.append(f"last credentials line seen by the robot: {creds[-1]}")
     if diff:
-        why.append("MISMATCH with the declared run baseline (v7.0-P3 + depth 250 = "
-                   "user decision 2026-10-07): " + "; ".join(diff[:4]))
+        why.append("MISMATCH with the dated audit baseline: " + "; ".join(diff[:4]))
+    if current_env_diff:
+        why.append("today's .env comparison only (not evidence of this day's settings): "
+                   + "; ".join(current_env_diff[:4]))
+    if unverified and rc:
+        why.append("UNVERIFIED: this run_config did not record " + ", ".join(unverified[:6])
+                   + (" ..." if len(unverified) > 6 else "")
+                   + "; today's .env was not substituted for missing historical values")
+    elif unverified:
+        why.append("UNVERIFIED: no run_config file exists for this date; today's .env "
+                   "cannot prove what the robot ran")
+    if diff or unverified:
         r.add("WARN", "VERSION CHECK", "did it run the version you think it ran?", why)
     else:
-        why.append("matches the declared run baseline (3h window, 250 levels, 50% gate, 0.50 spread cap) -> the numbers below describe the build you intended")
+        why.append("matches the dated audit baseline -> the recorded settings describe the build expected for this day")
         r.add("PASS", "VERSION CHECK", "did it run the version you think it ran?", why)
     return r, None
 
@@ -3651,16 +3941,20 @@ def _isolate_env(env_path):
     inherited a real .env, whose BOOKMAP_BRIDGE_FILE points at the operator's
     ticks.csv - the demo day is not in there, so every data test graded 0 prints.
     """
+    isolated_keys = {"TIMEFRAME", "POWER_BAR_SECONDS", "A1_BASE_TF_MINUTES",
+                     "VOICE_GAIN", "STOP_LOSS_ATR_MULT", "TAKE_PROFIT_ATR_MULT"}
     for k in list(os.environ):
-        if k.startswith(("BOOKMAP_", "AI_", "GEMINI_", "V6_", "CONFIDENCE", "TRADING_",
-                         "MAX_", "NT_", "BUDAPEST_", "AUDIT_", "LATENCY_")):
+        if (k.startswith(("BOOKMAP_", "AI_", "GEMINI_", "V6_", "CONFIDENCE", "TRADING_",
+                          "MAX_", "NT_", "BUDAPEST_", "AUDIT_", "LATENCY_"))
+                or k in isolated_keys):
             del os.environ[k]
     ENV.clear()
     _load_dotenv(str(env_path))
     globals().update(
         ATR=_envf("AUDIT_ATR", 3.18), SPREAD=_envf("AUDIT_SPREAD", 0.50),
         SL_MULT=_envf("STOP_LOSS_ATR_MULT", 2.0), TP_MULT=_envf("TAKE_PROFIT_ATR_MULT", 3.5),
-        MAX_HOLD_CANDLES=int(_envf("AUDIT_MAX_HOLD_MIN", 180) / 5.0) or 36,
+        MAX_HOLD_MIN=_envf("AUDIT_MAX_HOLD_MIN", 180.0),
+        MAX_HOLD_CANDLES=max(1, int(_envf("AUDIT_MAX_HOLD_MIN", 180.0) / 5.0)),
         WINDOW_START_H=int(_env("BUDAPEST_START", "08:00").split(":")[0]),
         WINDOW_END_H=int(_env("BUDAPEST_END", "23:00").split(":")[0]),
         AI_MAX_CALLS=int(_envf("AI_MAX_CALLS_PER_DAY", 2000)),
@@ -4151,6 +4445,122 @@ def _as_dict(x, key="position_ids"):
 
 
 
+def _parse_power_history_rows(text):
+    """Parse current M3 and legacy M5 probe receipts without assuming one schema."""
+    rows = []
+    seen = set()
+    for line in (text or "").splitlines():
+        marker = "POWER HISTORY PROBE |"
+        pos = line.find(marker)
+        if pos < 0:
+            continue
+        payload = line[pos + len(marker):]
+        fields = {key: value for key, value in
+                  re.findall(r"(?<!\S)([A-Za-z][A-Za-z0-9_]*)=([^\s|]+)", payload)}
+        identity = (tuple(sorted(fields.items())), "LIVE WARM-UP" in payload)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        row = dict(fields)
+        row["warmup_marker"] = "LIVE WARM-UP" in payload
+        row["raw_line"] = line
+        tail_match = re.fullmatch(r"(\d+)/(\d+)", str(fields.get("regime_tail", "")))
+        if tail_match:
+            row["tail"] = int(tail_match.group(1))
+            row["required"] = int(tail_match.group(2))
+        else:
+            try:
+                row["tail"] = int(fields.get("loaded_bars", ""))
+                row["required"] = 28
+            except (TypeError, ValueError, OverflowError):
+                row["tail"] = row["required"] = None
+        try:
+            row["gap_count"] = int(fields.get("regime_gaps", ""))
+        except (TypeError, ValueError, OverflowError):
+            row["gap_count"] = None
+        try:
+            row["tick_age"] = float(fields.get("tick_age_s", ""))
+        except (TypeError, ValueError, OverflowError):
+            row["tick_age"] = None
+        rows.append(row)
+    return rows
+
+
+def _power_history_timeframe_matches(row, active_bar_seconds=None):
+    """Reject a receipt whose explicit regime clock differs from the run clock."""
+    if not row:
+        return False
+    try:
+        active_seconds = int(active_bar_seconds or 0)
+    except (TypeError, ValueError, OverflowError):
+        active_seconds = 0
+    try:
+        recorded_seconds = int(row.get("regime_bar_seconds") or 0)
+    except (TypeError, ValueError, OverflowError):
+        recorded_seconds = 0
+    regime_tf = str(row.get("regime_tf") or "").strip().upper()
+    match = re.fullmatch(r"M(\d{1,3})", regime_tf)
+    regime_tf_seconds = int(match.group(1)) * 60 if match else 0
+    expected_seconds = active_seconds or recorded_seconds or regime_tf_seconds
+    if active_seconds and recorded_seconds and recorded_seconds != active_seconds:
+        return False
+    if active_seconds and regime_tf_seconds and regime_tf_seconds != active_seconds:
+        return False
+    if recorded_seconds and regime_tf_seconds and recorded_seconds != regime_tf_seconds:
+        return False
+    return bool(expected_seconds or not regime_tf)
+
+
+def _power_history_ready(row, active_bar_seconds=None):
+    """True/False for provable active-timeframe readiness; None if unmeasurable."""
+    if not row:
+        return None
+    if not _power_history_timeframe_matches(row, active_bar_seconds):
+        return False
+    try:
+        recorded_seconds = int(row.get("regime_bar_seconds") or 0)
+    except (TypeError, ValueError, OverflowError):
+        recorded_seconds = 0
+    try:
+        active_seconds = int(active_bar_seconds or 0)
+    except (TypeError, ValueError, OverflowError):
+        active_seconds = 0
+    seconds = recorded_seconds or active_seconds
+    tail, required = row.get("tail"), row.get("required")
+    if "regime_tail" not in row:
+        # Old M5-only logs can grade an M5 run, but a loaded M5 probe cannot
+        # establish readiness for an M3 active regime.
+        status = str(row.get("status", "")).upper()
+        try:
+            loaded = int(row.get("loaded_bars", "0"))
+        except (TypeError, ValueError, OverflowError):
+            loaded = 0
+        if seconds == 300 and status == "LOADED" and loaded >= 28 and row.get("scale") == "OK":
+            return True
+        if seconds == 300 and loaded < 28 and status not in ("", "LOADED"):
+            return False
+        return None
+    if tail is None or required is None:
+        return None
+    if required <= 0 or tail < required:
+        return False
+    reason = str(row.get("regime_reason", "")).upper()
+    if (str(row.get("latest_bar_present", "TRUE")).lower() in ("false", "0", "no")
+            or (str(row.get("scale", "")).upper() == "MISMATCH")
+            or (row.get("gap_count") is not None and row["gap_count"] > 0)
+            or (row.get("tick_age") is not None and row["tick_age"] > 60.0)
+            or reason in {"STALE_FEED", "NO_TIMESTAMPED_PRICE_TICKS",
+                          "HISTORY_PRICE_SCALE_MISMATCH", "ADX_UNAVAILABLE"}
+            or reason.startswith(("NO_TRADE_IN_LATEST_COMPLETED_",
+                                  "INSUFFICIENT_COMPLETED_", "GAP_IN_COMPLETED_"))):
+        return False
+    # Only a completed classifier result proves the freshness/latest-bar checks
+    # passed. ADX_NEUTRAL_BAND is ready history, even though regime is UNKNOWN.
+    if reason.startswith("ADX_"):
+        return True
+    return None
+
+
 def test_16_team_cycle(day, diary, text, decisions):
     """TEAM CYCLE & ACCEPTANCE (report16) - the money path and the 12 acceptance
     points. The diary has carried power / shot / entry_simulation / escort since
@@ -4261,19 +4671,44 @@ def test_16_team_cycle(day, diary, text, decisions):
     except Exception:
         rc = None
 
-    probes = re.findall(
-        r"POWER HISTORY PROBE \| status=(\w+)[^\n]*?loaded_bars=(\d+)"
-        r"[^\n]*?scale=(\w+)", all_txt)
+    probe_rows = _parse_power_history_rows(all_txt)
+    active_seconds, active_source = _audit_bar_seconds(day, rc)
     fb = len(re.findall(r"FUTURE_BAR|NO_HISTORY", all_txt))
-    if probes:
-        st_p, bars_p, scale_p = probes[-1]
-        ok = (st_p == "LOADED" and bars_p == "28" and scale_p == "OK")
-        _chk("PASS" if ok else "WARN", "1  probe 28 bars + scale=OK",
-             f"last line: status={st_p} loaded_bars={bars_p} scale={scale_p}"
-             + (f" | transients FUTURE_BAR/NO_HISTORY x{fb} (self-heals at the "
-                "next completed M5 bar)" if fb else ""))
+    if probe_rows:
+        last_probe = probe_rows[-1]
+        ready = _power_history_ready(last_probe, active_seconds)
+        tf = str(last_probe.get("regime_tf") or _timeframe_label(active_seconds))
+        expected_tf = _timeframe_label(active_seconds)
+        tail = last_probe.get("regime_tail", "unknown")
+        status = last_probe.get("status", "unknown")
+        timeframe_note = (f"; active timeframe expected {expected_tf}, got {tf}"
+                          if tf != expected_tf else "")
+        probe_note = (f"; fixed-M5 probe refusal is expected at {expected_tf}"
+                      if expected_tf != "M5"
+                      and str(status).startswith("TIMEFRAME_MISMATCH:") else "")
+        if ready is True:
+            if "regime_tail" in last_probe:
+                ready_detail = (f"last regime tail {tail} on {tf}; "
+                                "readiness/freshness checks passed")
+            else:
+                ready_detail = (f"legacy M5 probe loaded {last_probe.get('loaded_bars', '?')} "
+                                "bars; active M5 history accepted")
+            _chk("PASS", "1  active-timeframe regime history",
+                 f"{ready_detail} (timeframe source: {active_source})"
+                 f"{timeframe_note}{probe_note}")
+        elif ready is False:
+            _chk("WARN", "1  active-timeframe regime history",
+                 f"last regime tail {tail} on {tf}, reason={last_probe.get('regime_reason', 'not recorded')}, "
+                 f"gaps={last_probe.get('regime_gaps', 'not recorded')}, "
+                 f"tick_age_s={last_probe.get('tick_age_s', 'not recorded')} "
+                 f"(timeframe source: {active_source}){timeframe_note}{probe_note}")
+        else:
+            _chk("WARN", "1  active-timeframe regime history",
+                 f"probe line found (status={status}) but active regime tail/readiness "
+                 f"is not recorded for {tf}{timeframe_note}; "
+                 f"{probe_note or 'cannot infer readiness from probe rows alone'}")
     else:
-        _chk("NA", "1  probe 28 bars + scale=OK",
+        _chk("NA", "1  active-timeframe regime history",
              "no POWER HISTORY PROBE line in the kept log for this day"
              + (f" | FUTURE_BAR/NO_HISTORY x{fb}" if fb else ""))
 
@@ -4415,18 +4850,52 @@ def test_16_team_cycle(day, diary, text, decisions):
              "no POWER entries in the diary to grade")
 
     warm = len(re.findall(r"POWER WARM-UP", all_txt))
-    if probes and probes[-1][0] == "LOADED":
-        _chk("PASS", "10  warm-up only before 28 bars",
-             f"steady state reached (last probe LOADED "
-             f"loaded_bars={probes[-1][1]}) | POWER WARM-UP notes in the log "
-             f"x{warm} (before steady state they are expected)")
-    elif warm:
-        _chk("WARN", "10  warm-up only before 28 bars",
-             f"POWER WARM-UP notes x{warm} but no steady LOADED probe line "
-             "in the kept log")
+    active_rows = [row for row in probe_rows if "regime_tail" in row
+                   and _power_history_timeframe_matches(row, active_seconds)]
+    if active_rows:
+        marker_mismatches = []
+        below_count = full_count = 0
+        for row in active_rows:
+            tail, required = row.get("tail"), row.get("required")
+            if tail is None or required is None:
+                continue
+            expected_marker = tail < required
+            if expected_marker:
+                below_count += 1
+            else:
+                full_count += 1
+            if bool(row.get("warmup_marker")) != expected_marker:
+                marker_mismatches.append(f"{tail}/{required}")
+        if marker_mismatches:
+            _chk("WARN", "10  warm-up only before 28 active bars",
+                 "warm-up marker disagreed with the active M3 bar count on "
+                 + ", ".join(marker_mismatches[-4:]))
+        elif below_count and full_count:
+            _chk("PASS", "10  warm-up only before 28 active bars",
+                 f"warm-up marker matched the active regime tail across {len(active_rows)} "
+                 f"receipt(s): below 28 x{below_count}, full tail x{full_count}; "
+                 f"POWER WARM-UP notes x{warm}")
+        elif below_count:
+            _chk("WARN", "10  warm-up only before 28 active bars",
+                 f"markers correctly show warm-up below 28, but no full 28-bar tail was "
+                 f"observed ({below_count} receipt(s)); readiness is still unproven")
+        elif full_count:
+            _chk("PASS", "10  warm-up only before 28 active bars",
+                 f"full active-timeframe tail observed x{full_count}; no warm-up marker "
+                 f"after 28 bars | POWER WARM-UP notes x{warm}")
+        else:
+            _chk("NA", "10  warm-up only before 28 active bars",
+                 "probe lines exist but contain no parseable active regime tail")
+    elif probe_rows and _power_history_ready(probe_rows[-1], active_seconds) is True:
+        _chk("PASS", "10  warm-up only before 28 active bars",
+             "legacy M5 probe reached 28 loaded bars; no active-M3 inference was made")
+    elif warm or probe_rows:
+        _chk("WARN", "10  warm-up only before 28 active bars",
+             f"warm-up notes x{warm}; no parseable active-timeframe tail/full-ready state "
+             "in the kept log (a loaded M5 probe is not M3 readiness)")
     else:
-        _chk("NA", "10  warm-up only before 28 bars",
-             "no probe/warm-up evidence in the kept log")
+        _chk("NA", "10  warm-up only before 28 active bars",
+             "no active timeframe probe/warm-up evidence in the kept log")
 
     flats = re.findall(r"daily flatten[^\n]*|SESSION_FLATTEN[^\n]*", txt, re.I)
     stamps = re.findall(r"\d{4}-\d{2}-\d{2} (\d{2}:\d{2}):\d{2}", txt)
@@ -5378,9 +5847,10 @@ def _make_demo_day(dst: Path):
     (dst / "data").mkdir(parents=True, exist_ok=True)
     (dst / "logs").mkdir(parents=True, exist_ok=True)
     (dst / ".env").write_text(
-        "BOOKMAP_WINDOW_SECONDS=10800\nBOOKMAP_MAX_DEPTH_LEVELS=250\n"
-        "AI_MIN_SIGNAL_STRENGTH=6\nCONFIDENCE_THRESHOLD=50\n"
+        "BOOKMAP_WINDOW_SECONDS=10800\nBOOKMAP_MAX_DEPTH_LEVELS=150\n"
+        "AI_MIN_SIGNAL_STRENGTH=6\nCONFIDENCE_THRESHOLD=35\n"
         "V6_CFD_SPREAD_MAX=0.50\nTRADING_ENABLED=1\n"
+        "TIMEFRAME=M3\nA1_BASE_TF_MINUTES=3\nPOWER_BAR_SECONDS=180\nVOICE_GAIN=3.0\n"
         # point the data paths INSIDE the demo tree, whatever the operator's real
         # .env says - otherwise the demo reads his live ticks.csv and finds nothing
         f"BOOKMAP_BRIDGE_FILE={dst / 'ticks.csv'}\n"

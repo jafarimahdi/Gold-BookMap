@@ -40,6 +40,31 @@ class PowerProbeBoundaryTests(unittest.TestCase):
                         bad_assignments.append(node)
         self.assertFalse(bad_assignments)
 
+    def test_power_history_note_exposes_active_m3_readiness_and_gap_reason(self):
+        import step2_market_analysis as step2
+
+        note = step2._format_power_history_probe_note(
+            {"status": "TIMEFRAME_MISMATCH:M5_probe_for_M3_regime",
+             "probe_timeframe": "M5", "loaded_m5_bars": 28, "usable_bars": 0,
+             "probe_compatible": False, "history_bars_refused": True,
+             "regime_latest_expected_bar_present": True,
+             "price_scale_check": {"status": "NO_HISTORY"}},
+            {"bar_seconds": 180, "latest_contiguous_bars": 4,
+             "reason": "GAP_IN_COMPLETED_M3_HISTORY", "recent_gap_count": 1,
+             "latest_tick_age_seconds": 6.3,
+             "recent_gaps": [{"previous_bar_end_utc": "2026-10-22T12:00:00Z",
+                               "next_bar_start_utc": "2026-10-22T12:06:00Z",
+                               "missing_bar_intervals": 1}]},
+            "M3", 28, " | LIVE WARM-UP 4/28 M3 bars")
+        self.assertIn("status=TIMEFRAME_MISMATCH:M5_probe_for_M3_regime", note)
+        self.assertIn("regime_tf=M3 regime_bar_seconds=180", note)
+        self.assertIn("regime_tail=4/28", note)
+        self.assertIn("regime_reason=GAP_IN_COMPLETED_M3_HISTORY", note)
+        self.assertIn("regime_gaps=1", note)
+        self.assertIn("tick_age_s=6.3", note)
+        self.assertIn("first_gap_next=2026-10-22T12:06:00Z", note)
+        self.assertIn("LIVE WARM-UP 4/28", note)
+
     def test_fixed_m5_probe_is_observed_but_not_used_by_m3_regime(self):
         import step2_market_analysis as step2
 

@@ -391,6 +391,41 @@ def _a1_cache_store(snapshot, market_data, now, spread_now=0.0):
 
 
 
+def _format_power_history_probe_note(probe_diagnostics, regime, regime_timeframe,
+                                     warmup_required, warmup_text=""):
+    """Compact operator receipt for probe compatibility and active-regime readiness."""
+    probe = probe_diagnostics if isinstance(probe_diagnostics, dict) else {}
+    regime = regime if isinstance(regime, dict) else {}
+    gaps = regime.get("recent_gaps", []) or []
+    first_gap = gaps[0] if gaps and isinstance(gaps[0], dict) else {}
+    gap_receipt = ""
+    if first_gap:
+        gap_receipt = (
+            f" first_gap_prev={first_gap.get('previous_bar_end_utc', 'UNKNOWN')}"
+            f" first_gap_next={first_gap.get('next_bar_start_utc', 'UNKNOWN')}"
+            f" missing_intervals={first_gap.get('missing_bar_intervals', 'UNKNOWN')}"
+        )
+    scale = (probe.get("price_scale_check") or {}).get("status", "NOT_CHECKED")
+    return (
+        "POWER HISTORY PROBE | "
+        f"status={probe.get('status', 'NOT_CHECKED')} "
+        f"probe_tf={probe.get('probe_timeframe', 'M5')} "
+        f"regime_tf={regime_timeframe} "
+        f"regime_bar_seconds={regime.get('bar_seconds', 'UNKNOWN')} "
+        f"loaded_probe_bars={probe.get('loaded_m5_bars', probe.get('loaded_bars', 0))} "
+        f"usable_probe_bars={probe.get('usable_bars', 0)} "
+        f"probe_compatible={probe.get('probe_compatible', 'UNKNOWN')} "
+        f"regime_tail={regime.get('latest_contiguous_bars', 0)}/{warmup_required} "
+        f"regime_reason={regime.get('reason', 'UNKNOWN')} "
+        f"regime_gaps={regime.get('recent_gap_count', 'UNKNOWN')} "
+        f"latest_bar_present={probe.get('regime_latest_expected_bar_present', 'UNKNOWN')} "
+        f"tick_age_s={regime.get('latest_tick_age_seconds', 'UNKNOWN')} "
+        f"scale={scale} "
+        f"history_refused={bool(probe.get('history_bars_refused', False))}"
+        f"{gap_receipt}{warmup_text}"
+    )
+
+
 def _power_probe_startup_history(symbol, now, live_ticks, bar_seconds=300):
     """Load the fixed-M5 probe only when it matches the active POWER clock.
 
@@ -5231,19 +5266,9 @@ def analyze_market(market_data: Dict[str, Any],
         except Exception:
             _warmup_text = (f" | LIVE WARM-UP {_warmup_count}/{_warmup_required} "
                             f"{_regime_timeframe} bars")
-    notes.append(
-        "POWER HISTORY PROBE | "
-        f"status={_probe_diagnostics.get('status', 'NOT_CHECKED')} "
-        f"probe_tf={_probe_diagnostics.get('probe_timeframe', 'M5')} "
-        f"regime_tf={_regime_timeframe} "
-        f"loaded_probe_bars={_probe_diagnostics.get('loaded_m5_bars', _probe_diagnostics.get('loaded_bars', 0))} "
-        f"usable_probe_bars={_probe_diagnostics.get('usable_bars', 0)} "
-        f"probe_compatible={_probe_diagnostics.get('probe_compatible', 'UNKNOWN')} "
-        f"regime_tail={_regime_tail}/{_warmup_required} "
-        f"scale={(_probe_diagnostics.get('price_scale_check') or {}).get('status', 'NOT_CHECKED')} "
-        f"history_refused={bool(_probe_diagnostics.get('history_bars_refused', False))}"
-        f"{_warmup_text}"
-    )
+    notes.append(_format_power_history_probe_note(
+        _probe_diagnostics, _regime_v2, _regime_timeframe,
+        _warmup_required, _warmup_text))
     _prov = (_regime_v2.get("provisional") or {}) if isinstance(_regime_v2, dict) else {}
     if _prov.get("informational_only") and int(_prov.get("bars", 0) or 0) > 0:
         _prov_count = int(_prov.get("bars", 0) or 0)

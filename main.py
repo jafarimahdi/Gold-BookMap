@@ -2362,7 +2362,16 @@ def _env_snapshot() -> dict:
         "EXECUTION_MODE": g("EXECUTION_MODE"),
         "TRADING_ENABLED": g("TRADING_ENABLED"),
         "ALLOW_LIVE_TRADING": g("ALLOW_LIVE_TRADING"),
+        "TIMEFRAME": g("TIMEFRAME"),
+        "A1_BASE_TF_MINUTES": os.environ.get("A1_BASE_TF_MINUTES"),
+        "VOICE_GAIN": os.environ.get("VOICE_GAIN"),
         "POWER_BAR_SECONDS": g("POWER_BAR_SECONDS"),
+        "STOP_LOSS_ATR_MULT": g("STOP_LOSS_ATR_MULT"),
+        "TAKE_PROFIT_ATR_MULT": g("TAKE_PROFIT_ATR_MULT"),
+        # Audit assumptions are recorded for reproducibility, not consumed by
+        # the trading path. They do not change execution behavior.
+        "AUDIT_SPREAD": os.environ.get("AUDIT_SPREAD", "0.50"),
+        "AUDIT_MAX_HOLD_MIN": os.environ.get("AUDIT_MAX_HOLD_MIN", "180"),
         "POWER_LEAD_ENABLED": g("POWER_LEAD_ENABLED"),
         "POWER_LEAD_CONF_FLOOR": g("POWER_LEAD_CONF_FLOOR"),
         "POWER_LEAD_SHADOW_ENABLED": g("POWER_LEAD_SHADOW_ENABLED"),
