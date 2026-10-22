@@ -1,4 +1,6 @@
 # Gold Trading System — BOOKMAP EDITION v5.3 MEDIUM DONE
+
+> **Current operator guide:** read [`QUICK_START.md`](QUICK_START.md). The version labels and setup commands below are historical snapshots; do not use the old `python main.py` one-shot instruction just to test the app. Normal mode can open DEMO positions when configured gates pass. Do not run root-level `apply_*.py` files as installers.
 ## BookMap L1+L2+L3 data + 5-step AI brain + MT5 execution + Institutional Upgrades
 
 **Status: ✅ v5.3 MEDIUM 6 DONE 2026-09-17 11:05** — Footprint direct side + absorption 50, vol-adj sizing min-lot skip, iceberg/spoof L3 alpha 1.0/0.8, macro HIGH boost + DXY veto, MBO archival 100MB gzip, TCA weekly report. v5.2 CRITICAL 4 DONE earlier (L3 whale 1.5x, regime-adaptive, AI fallback 8s cache 5min, basis risk). Live trade order 90001722, 10756 ticks 100% direct, L3 OFI -3071, whales 250/300 lots.

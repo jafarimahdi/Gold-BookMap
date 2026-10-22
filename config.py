@@ -374,6 +374,9 @@ def _refresh() -> None:
     g["DAILY_BREAK_START"] = _fget("DAILY_BREAK_START", "")
     g["DAILY_BREAK_END"] = _fget("DAILY_BREAK_END", "")
     g["STALE_DATA_SECONDS"] = _fint("STALE_DATA_SECONDS", 300)
+    # Per-price BookMap depth expiry; previously the provider fallback existed
+    # but this config key was never loaded from the owner's environment.
+    g["BOOKMAP_LEVEL_MAX_AGE"] = _ffloat("BOOKMAP_LEVEL_MAX_AGE", 900.0)
 
     g["BUDAPEST_START"] = _fget("BUDAPEST_START", "08:00")
     g["BUDAPEST_END"] = _fget("BUDAPEST_END", "23:00")

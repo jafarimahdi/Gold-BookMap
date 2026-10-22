@@ -57,6 +57,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import re
 import time
@@ -175,24 +176,55 @@ class BaseProvider:
         self.order_book: Dict[str, List] = {"bids": [], "asks": []}
         self.tick_data: List[Dict] = []
         self._trades: List[Dict] = []
-        self.last_data_ts: Optional[datetime] = None   # heartbeat
+        self.last_data_ts: Optional[datetime] = None   # newest feed event
+        self.last_depth_ts: Optional[datetime] = None  # newest quote/depth event
+        self.last_trade_ts: Optional[datetime] = None
+        self.last_order_event_ts: Optional[datetime] = None
 
     # -- heartbeat -------------------------------------------------------------
     def _touch(self, ts: Optional[datetime] = None) -> None:
-        self.last_data_ts = ts or datetime.now(timezone.utc)
+        candidate = ts or datetime.now(timezone.utc)
+        if candidate.tzinfo is None:
+            candidate = candidate.replace(tzinfo=timezone.utc)
+        if self.last_data_ts is None:
+            self.last_data_ts = candidate
+            return
+        previous = self.last_data_ts
+        if previous.tzinfo is None:
+            previous = previous.replace(tzinfo=timezone.utc)
+        if candidate > previous:
+            self.last_data_ts = candidate
 
     def data_age_seconds(self, now: Optional[datetime] = None) -> float:
-        """Seconds since the last data update (0.0 if never received)."""
+        """Signed seconds since the newest data event (0.0 if never received).
+
+        A negative age is deliberately retained so future-dated vendor records
+        can be rejected instead of appearing to have zero latency.
+        """
         if self.last_data_ts is None:
             return 0.0
         now = now or datetime.now(timezone.utc)
-        return max(0.0, (now - self.last_data_ts).total_seconds())
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+        previous = self.last_data_ts
+        if previous.tzinfo is None:
+            previous = previous.replace(tzinfo=timezone.utc)
+        return (now - previous).total_seconds()
 
     def has_fresh_data(self, max_age: Optional[float] = None) -> bool:
-        max_age = max_age if max_age is not None else config.STALE_DATA_SECONDS
         if self.last_data_ts is None:
             return False
-        return self.data_age_seconds() <= max_age
+        raw_max_age = max_age if max_age is not None else config.STALE_DATA_SECONDS
+        if isinstance(raw_max_age, bool):
+            return False
+        try:
+            age_limit = float(raw_max_age)
+        except (TypeError, ValueError, OverflowError):
+            return False
+        if not math.isfinite(age_limit) or age_limit <= 0:
+            return False
+        age = self.data_age_seconds()
+        return math.isfinite(age) and 0.0 <= age <= age_limit
 
     # -- state maintenance -----------------------------------------------------
     def reset(self) -> None:
@@ -201,6 +233,9 @@ class BaseProvider:
         self.order_book = {"bids": [], "asks": []}
         self.tick_data, self._trades = [], []
         self.last_data_ts = None
+        self.last_depth_ts = None
+        self.last_trade_ts = None
+        self.last_order_event_ts = None
 
     # -- LEVEL 2: depth update -------------------------------------------------
     def handle_depth(self, bids: Any, asks: Any, ts: Optional[datetime] = None) -> None:
@@ -211,54 +246,190 @@ class BaseProvider:
         """
         bids = self._normalize(bids)
         asks = self._normalize(asks)
+        event_ts = ts or datetime.now(timezone.utc)
+        if event_ts.tzinfo is None:
+            event_ts = event_ts.replace(tzinfo=timezone.utc)
         self.bid_depth = bids
         self.ask_depth = asks
-        self.book_updates.append({"bids": bids, "asks": asks})
+        self.book_updates.append({"bids": bids, "asks": asks,
+                                  "timestamp": event_ts.isoformat()})
         self.order_book = {
             "bids": [(p, s) for p, s in sorted(bids.items(), reverse=True)],
             "asks": [(p, s) for p, s in sorted(asks.items())],
         }
-        self._touch(ts)
+        if self.last_depth_ts is None or event_ts > self.last_depth_ts:
+            self.last_depth_ts = event_ts
+        self._touch(event_ts)
 
     # -- LEVEL 3: order event --------------------------------------------------
-    def handle_order_event(self, event: Dict) -> None:
-        """Ingest one order event ({type, side, price, size, is_market_order})."""
-        self.order_events.append(event)
-        self._touch()
+    def handle_order_event(self, event: Dict,
+                           ts: Optional[datetime] = None) -> None:
+        """Ingest one timestamped order event ({type, side, price, size})."""
+        stored = dict(event)
+        event_ts = ts
+        has_source_timestamp = event_ts is not None
+        if event_ts is None and stored.get("timestamp"):
+            try:
+                event_ts = datetime.fromisoformat(
+                    str(stored["timestamp"]).replace("Z", "+00:00"))
+                has_source_timestamp = True
+            except (TypeError, ValueError, OverflowError):
+                event_ts = None
+        event_ts = event_ts or datetime.now(timezone.utc)
+        if event_ts.tzinfo is None:
+            event_ts = event_ts.replace(tzinfo=timezone.utc)
+        stored.setdefault("timestamp", event_ts.isoformat())
+        stored.setdefault("timestamp_is_source", has_source_timestamp)
+        stored.setdefault("timestamp_source", "provider_event_time"
+                          if has_source_timestamp else "local_receive_time")
+        self.order_events.append(stored)
+        if (self.last_order_event_ts is None or
+                event_ts > self.last_order_event_ts):
+            self.last_order_event_ts = event_ts
+        self._touch(event_ts)
 
     # -- L1: trade -------------------------------------------------------------
     def handle_trade(self, price: float, volume: float, side: str,
-                     ts: Optional[datetime] = None) -> None:
-        """Ingest one trade (feeds tick_data, CVD/delta/footprint and candles)."""
-        ts = ts or datetime.now(timezone.utc)
+                     ts: Optional[datetime] = None,
+                     is_direct: bool = False) -> None:
+        """Ingest a trade and preserve whether its aggressor side is explicit.
+
+        An inferred/tick-rule side remains useful to general order flow, but is
+        not mislabeled as an observed aggressive market-order print in L3.
+        """
+        has_source_timestamp = ts is not None
+        event_ts = ts or datetime.now(timezone.utc)
+        if event_ts.tzinfo is None:
+            event_ts = event_ts.replace(tzinfo=timezone.utc)
+        # Local receive time is useful for general feed telemetry, but it must
+        # never upgrade an untimestamped vendor print into direct L3 evidence.
+        direct = is_direct is True and has_source_timestamp
         self.tick_data.append({"price": float(price), "volume": float(volume),
-                               "side": side})
-        self._trades.append({"timestamp": ts.isoformat(), "price": float(price),
-                             "volume": float(volume)})
-        self._touch(ts)
+                               "side": side, "is_direct": direct,
+                               "timestamp": event_ts.isoformat()})
+        self._trades.append({"timestamp": event_ts.isoformat(),
+                             "price": float(price), "volume": float(volume),
+                             "is_direct": direct})
+        if self.last_trade_ts is None or event_ts > self.last_trade_ts:
+            self.last_trade_ts = event_ts
+        self._touch(event_ts)
 
     # -- assembly --------------------------------------------------------------
     def build_market_data(self, symbol: str, candles: Optional[Dict] = None,
                           macro: Optional[Dict] = None,
                           news: Optional[Dict] = None) -> Dict[str, Any]:
-        """Assemble everything into the analyze_market() schema.
+        """Assemble an analyzer payload with explicit quote/feed health data.
 
-        Tags the payload with its DATA-side market and the TRADE-side market so
-        downstream steps always know which is which (and never mix prices).
+        Tags DATA-side versus TRADE-side identity and never represents a missing
+        or crossed quote as a zero-spread quote.
         """
         from markets import normalize_symbol
         bid, ask = self._best_prices()
-        price = (bid + ask) / 2.0 if bid and ask else (bid or ask or 0.0)
+        quote_status = "unavailable"
+        spread_pct = None
+        quote_age = None
+        quote_timestamp = None
+        quote_mid = 0.0
+        now = datetime.now(timezone.utc)
+        if (math.isfinite(float(bid)) and math.isfinite(float(ask))
+                and bid > 0 and ask > 0):
+            if ask <= bid:
+                quote_status = "crossed_or_locked"
+            else:
+                quote_mid = (bid + ask) / 2.0
+                candidate_spread = (ask - bid) / quote_mid * 100.0
+                if math.isfinite(candidate_spread) and candidate_spread >= 0:
+                    spread_pct = candidate_spread
+                    if self.last_depth_ts is None:
+                        quote_status = "timestamp_unknown"
+                    else:
+                        quote_ts = self.last_depth_ts
+                        if quote_ts.tzinfo is None:
+                            quote_ts = quote_ts.replace(tzinfo=timezone.utc)
+                        quote_age = (now - quote_ts).total_seconds()
+                        if not math.isfinite(quote_age) or quote_age < 0:
+                            quote_status = "future_timestamp"
+                            quote_age = None
+                        else:
+                            try:
+                                max_quote_age = float(getattr(
+                                    config, "STALE_DATA_SECONDS", 300.0))
+                                if not math.isfinite(max_quote_age) or max_quote_age <= 0:
+                                    raise ValueError("invalid quote-age limit")
+                            except (TypeError, ValueError, OverflowError):
+                                max_quote_age = None
+                            if max_quote_age is None:
+                                quote_status = "invalid_age_limit"
+                            elif quote_age > max_quote_age:
+                                quote_status = "stale"
+                            else:
+                                quote_status = "valid"
+                                quote_timestamp = quote_ts.isoformat()
+                else:
+                    quote_status = "invalid_spread"
+        price = quote_mid if quote_mid > 0 else (bid or ask or 0.0)
         if candles is None:
             candles = trades_to_candles(self._trades)
         trade_symbol = os.environ.get("MT5_SYMBOL", config.MT5_SYMBOL)
         has_data = bool(self.tick_data or self.order_events or self.book_updates
                         or self.bid_depth or self.ask_depth)
+        l2_status = ("unavailable" if not (bid > 0 and ask > 0) else
+                     "crossed" if ask <= bid else
+                     "quote_unvalidated" if quote_status != "valid" else
+                     "available")
+        valid_event_sides = {"BUY", "SELL", "BID", "ASK"}
+        direct_trades = any(tick.get("is_direct") is True and
+                            str(tick.get("side", "")).upper()
+                            in {"BUY", "SELL", "B", "S"}
+                            for tick in self.tick_data)
+        mbo_market = any(event.get("is_market_order") is True and
+                         str(event.get("side", "")).upper() in valid_event_sides
+                         for event in self.order_events)
+        passive_events = any(
+            str(event.get("type", "")).upper()
+            in {"NEW", "ADD", "OPEN", "BID_NEW", "ASK_NEW"} and
+            str(event.get("side", "")).upper() in valid_event_sides
+            for event in self.order_events)
+        if mbo_market and passive_events:
+            l3_aggr_limit = "partial_mbo_tags"
+        elif mbo_market:
+            l3_aggr_limit = "market_order_events_only"
+        elif passive_events:
+            l3_aggr_limit = "passive_order_events_only"
+        else:
+            l3_aggr_limit = "not_emitted"
+        now_ts = now
+        def _age_for(event_ts):
+            if event_ts is None:
+                return None
+            if event_ts.tzinfo is None:
+                event_ts = event_ts.replace(tzinfo=timezone.utc)
+            age = (now_ts - event_ts).total_seconds()
+            return age if math.isfinite(age) else None
+
+        trade_age = _age_for(self.last_trade_ts)
+        event_age = _age_for(self.last_order_event_ts)
+        depth_age = _age_for(self.last_depth_ts)
         return {
             "symbol": symbol,
             "price": price,
-            "bid": bid,
-            "ask": ask,
+            "bid": bid if quote_status == "valid" else 0.0,
+            "ask": ask if quote_status == "valid" else 0.0,
+            "spread_pct": spread_pct,
+            "quote_age_seconds": quote_age if quote_status not in {
+                "unavailable", "crossed_or_locked", "future_timestamp",
+                "timestamp_unknown"} else None,
+            "quote_timestamp": quote_timestamp,
+            "depth_age_seconds": depth_age,
+            "depth_timestamp": (self.last_depth_ts.isoformat()
+                                if self.last_depth_ts else None),
+            "last_trade_age_seconds": trade_age,
+            "last_trade_timestamp": (self.last_trade_ts.isoformat()
+                                      if self.last_trade_ts else None),
+            "last_order_event_age_seconds": event_age,
+            "last_order_event_timestamp": (
+                self.last_order_event_ts.isoformat()
+                if self.last_order_event_ts is not None else None),
             "volume": float(sum(t["volume"] for t in self.tick_data)),
             "tick_data": list(self.tick_data),
             "bid_depth": dict(self.bid_depth),
@@ -277,12 +448,22 @@ class BaseProvider:
             "trade_market": normalize_symbol(trade_symbol),
             # feed health (no-data / weekend resilience)
             "has_data": has_data,
-            "last_data_age_seconds": self.data_age_seconds(),
+            "last_data_age_seconds": (self.data_age_seconds(now)
+                                      if self.last_data_ts is not None else None),
+            "last_data_timestamp": (self.last_data_ts.isoformat()
+                                     if self.last_data_ts else None),
             "data_quality": {
-                "level2": "available" if bid and ask else "unavailable",
+                "quote": quote_status,
+                "level2": l2_status,
                 "level3": "available" if self.order_events else "unavailable",
+                "level3_events": "partial_window" if self.order_events else "unavailable",
+                "l3_aggressive_flow": ("partial_mbo_market_order_events" if mbo_market
+                                        else "direct_trade_prints_only" if direct_trades
+                                        else "unavailable"),
+                "l3_aggr_limit": l3_aggr_limit,
                 "trade_prints": "available" if self._trades else "unavailable",
-                "order_flow": "provider_ticks" if self._trades else "unavailable",
+                "order_flow": ("direct_trade_side" if direct_trades else
+                               "provider_ticks" if self._trades else "unavailable"),
             },
         }
 
@@ -293,11 +474,29 @@ class BaseProvider:
 
     @staticmethod
     def _normalize(levels: Any) -> Dict[float, float]:
+        """Normalize one depth side, rejecting malformed snapshots atomically."""
         if levels is None:
             return {}
-        if isinstance(levels, dict):
-            return {float(k): float(v) for k, v in levels.items() if float(v) > 0}
-        return {float(p): float(s) for p, s in levels if float(s) > 0}
+        items = levels.items() if isinstance(levels, dict) else levels
+        normalized = {}
+        try:
+            for item in items:
+                if not isinstance(item, (list, tuple)) and not hasattr(item, "__iter__"):
+                    return {}
+                try:
+                    price, size = item
+                except (TypeError, ValueError):
+                    return {}
+                if isinstance(price, (bool, np.bool_)) or isinstance(size, (bool, np.bool_)):
+                    return {}
+                price, size = float(price), float(size)
+                if not math.isfinite(price) or not math.isfinite(size):
+                    return {}
+                if price > 0 and size > 0:
+                    normalized[price] = size
+        except (TypeError, ValueError, OverflowError):
+            return {}
+        return normalized
 
     # -- lifecycle -------------------------------------------------------------
     def connect(self) -> None:
@@ -452,7 +651,9 @@ def databento_mbo_row_to_event(row: Any) -> Optional[Dict]:
     """
     action = str(row.get("action", "")).upper()
     side_code = str(row.get("side", "")).upper()
-    side = {"B": "BUY", "A": "SELL"}.get(side_code, "BUY")
+    side = {"B": "BUY", "A": "SELL"}.get(side_code)
+    if side is None:
+        return None
     try:
         price = float(row.get("price", 0) or 0)
         size = float(row.get("size", 0) or 0)
@@ -478,10 +679,13 @@ def databento_mbo_row_to_tick(row: Any) -> Optional[Dict]:
     """Map a Databento MBO 'T' row to a Step-2 tick (aggressor = side)."""
     if str(row.get("action", "")).upper() != "T":
         return None
-    side = {"B": "BUY", "A": "SELL"}.get(str(row.get("side", "")).upper(), "BUY")
+    side_code = str(row.get("side", "")).upper()
+    side = {"B": "BUY", "A": "SELL"}.get(side_code)
+    if side is None:
+        return None
     try:
         return {"price": float(row["price"]), "volume": float(row["size"]),
-                "side": side}
+                "side": side, "is_direct": True}
     except (TypeError, ValueError, KeyError):
         return None
 
@@ -546,20 +750,28 @@ class DatabentoProvider(BaseProvider):
     def _ingest_mbo(self, data) -> None:
         """Map an MBO result set into order events + ticks + candles."""
         for row in data:
+            event_ts = _ts_from_row(row)
+            if event_ts is None:
+                continue
             evt = databento_mbo_row_to_event(row)
             if evt:
-                self.handle_order_event(evt)
+                self.handle_order_event(evt, ts=event_ts)
             tick = databento_mbo_row_to_tick(row)
             if tick:
                 self.handle_trade(tick["price"], tick["volume"], tick["side"],
-                                  ts=_ts_from_row(row))
+                                  ts=event_ts,
+                                  is_direct=(event_ts is not None and
+                                             tick.get("is_direct") is True))
 
     def _ingest_mbp10(self, data) -> None:
         """Map an MBP-10 result set into depth snapshots."""
         for row in data:
+            event_ts = _ts_from_row(row)
+            if event_ts is None:
+                continue
             bids, asks = databento_mbp10_row_to_depths(row)
             if bids or asks:
-                self.handle_depth(bids, asks, ts=_ts_from_row(row))
+                self.handle_depth(bids, asks, ts=event_ts)
 
     def _ingest_trades(self, data) -> None:
         """Map a trades result set into tick_data + candles."""
@@ -567,12 +779,17 @@ class DatabentoProvider(BaseProvider):
             try:
                 price = float(row["price"])
                 size = float(row["size"])
-                # side: 'B' buyer-initiated, 'A' seller-initiated
+                # Side B/A is explicit. Unknown aggressor side is not guessed.
                 side = {"B": "BUY", "A": "SELL"}.get(
-                    str(row.get("side", "")).upper(), "BUY")
+                    str(row.get("side", "")).upper())
+                if side is None:
+                    continue
             except (TypeError, ValueError):
                 continue
-            self.handle_trade(price, size, side, ts=_ts_from_row(row))
+            event_ts = _ts_from_row(row)
+            if event_ts is None:
+                continue
+            self.handle_trade(price, size, side, ts=event_ts, is_direct=True)
 
     def acquire(self, symbol: str = "", **kwargs) -> Dict[str, Any]:
         if not self.connected:
@@ -622,18 +839,30 @@ class DatabentoProvider(BaseProvider):
 
 
 def _ts_from_row(row: Any) -> Optional[datetime]:
-    """Best-effort timestamp extraction from a vendor row."""
+    """Best-effort timestamp extraction from vendor rows (ns/ms/s/ISO)."""
+    if not hasattr(row, "get"):
+        return None
     ts = row.get("ts_event") or row.get("ts_recv") or row.get("timestamp")
     if ts is None:
         return None
-    try:
-        # Databento ts_event is UNIX nanoseconds
-        return datetime.fromtimestamp(float(ts) / 1e9, tz=timezone.utc)
-    except (TypeError, ValueError, OSError):
+    if isinstance(ts, (int, float, np.integer, np.floating)):
         try:
-            return datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
-        except ValueError:
+            value = float(ts)
+            if not math.isfinite(value) or value <= 0:
+                return None
+            if value >= 1e17:       # Unix nanoseconds (Databento)
+                value /= 1e9
+            elif value >= 1e14:     # Unix microseconds
+                value /= 1e6
+            elif value >= 1e11:     # Unix milliseconds (MT5-like adapters)
+                value /= 1e3
+            return datetime.fromtimestamp(value, tz=timezone.utc)
+        except (TypeError, ValueError, OverflowError, OSError):
             return None
+    try:
+        return datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+    except (TypeError, ValueError, OverflowError):
+        return None
 
 
 # ============================================================================= #
@@ -802,7 +1031,22 @@ class MT5Provider(BaseProvider):
                             side = "SELL"
                         else:
                             side = ""              # tick rule will infer
-                        self.handle_trade(last, vol, side)
+                        tick_ts = None
+                        try:
+                            _time_msc = int(t["time_msc"])
+                            if _time_msc > 0:
+                                tick_ts = datetime.fromtimestamp(
+                                    _time_msc / 1000.0, tz=timezone.utc)
+                        except (KeyError, TypeError, ValueError, OverflowError, OSError):
+                            try:
+                                _time_s = int(t["time"])
+                                if _time_s > 0:
+                                    tick_ts = datetime.fromtimestamp(
+                                        _time_s, tz=timezone.utc)
+                            except (KeyError, TypeError, ValueError, OverflowError, OSError):
+                                pass
+                        self.handle_trade(last, vol, side, ts=tick_ts,
+                                          is_direct=bool(side) and tick_ts is not None)
                         real_trade_ticks += 1
                     except (KeyError, TypeError, ValueError):
                         continue
@@ -860,12 +1104,28 @@ class MT5Provider(BaseProvider):
         except Exception as exc:
             logger.warning("MT5: candle copy failed (%s)", exc)
 
-        # ---- 5) live spread (% of price) ----------------------------------
-        spread_pct = 0.0
-        if tick is not None and getattr(tick, "bid", 0) and getattr(tick, "ask", 0):
-            mid = (tick.bid + tick.ask) / 2.0
-            if mid > 0:
-                spread_pct = (tick.ask - tick.bid) / mid * 100.0
+        # ---- 5) live spread (% of the current MT5 quote) -------------------
+        # Missing/locked/crossed quotes are unknown, never a synthetic 0.000%.
+        spread_pct = None
+        quote_status = "unavailable"
+        quote_bid = quote_ask = 0.0
+        if tick is not None:
+            try:
+                quote_bid = float(getattr(tick, "bid", 0) or 0)
+                quote_ask = float(getattr(tick, "ask", 0) or 0)
+            except (TypeError, ValueError, OverflowError):
+                quote_bid = quote_ask = 0.0
+            if (math.isfinite(quote_bid) and math.isfinite(quote_ask)
+                    and quote_bid > 0 and quote_ask > quote_bid):
+                mid = (quote_bid + quote_ask) / 2.0
+                candidate = (quote_ask - quote_bid) / mid * 100.0
+                if math.isfinite(candidate) and candidate >= 0:
+                    spread_pct = candidate
+                    quote_status = "valid"
+                else:
+                    quote_status = "invalid"
+            elif quote_bid > 0 and quote_ask > 0:
+                quote_status = "crossed_or_locked"
 
         # ---- 6) CFD feeds have no trade prints (last=0, volume=0). --------
         # If no real ticks arrived, APPROXIMATE order flow from candle
@@ -881,38 +1141,87 @@ class MT5Provider(BaseProvider):
                     side = "BUY" if close[i] >= open_[i] else "SELL"
                     v = float(vol[i]) if (vol is not None and i < len(vol)
                                           and vol[i] > 0) else 1.0
-                    self.handle_trade(float(close[i]), v, side)
+                    self.handle_trade(float(close[i]), v, side, is_direct=False)
 
         data = self.build_market_data(symbol=symbol, candles=candles)
         data["candles_m5"] = candles_m5
         data["candles_m15"] = candles_m15
         data["candles_h1"] = candles_h1
-        data["spread_pct"] = spread_pct
         has_l2 = bool(data.get("bid_depth") and data.get("ask_depth"))
         data["data_quality"] = {
+            "quote": quote_status,
             "level2": "live" if has_l2 else "unavailable",
             "level3": "unavailable",
+            "level3_events": "not_emitted",
+            "l3_aggressive_flow": "unavailable",
+            "l3_aggr_limit": "not_emitted",
             "trade_prints": "live" if real_trade_ticks else "unavailable",
             "order_flow": ("real_trade_ticks" if real_trade_ticks
                             else "estimated_from_candle_direction"),
         }
-        # ---- 7) CFD feeds have no order book -> use the live tick price ----
-        # Without this, price/bid/ask would be 0 (the order book is empty) and
-        # every price-vs-SMA/VWAP signal would be wrong.
+        data["quote_age_seconds"] = None
+        data["quote_timestamp"] = None
+        quote_epoch = None
         if tick is not None:
-            tbid = float(getattr(tick, "bid", 0) or 0)
-            task = float(getattr(tick, "ask", 0) or 0)
-            tlast = float(getattr(tick, "last", 0) or 0)
-            if tbid and task:
-                data["bid"] = tbid
-                data["ask"] = task
-                data["price"] = (tbid + task) / 2.0
-            elif tlast:
-                data["price"] = tlast
+            try:
+                _quote_msc = int(getattr(tick, "time_msc", 0) or 0)
+                quote_epoch = (_quote_msc / 1000.0 if _quote_msc > 0 else
+                               float(getattr(tick, "time", 0) or 0))
+                if not math.isfinite(quote_epoch) or quote_epoch <= 0:
+                    quote_epoch = None
+            except (TypeError, ValueError, OverflowError):
+                quote_epoch = None
+
+        if quote_status == "valid" and quote_epoch is not None:
+            quote_age = time.time() - quote_epoch
+            if not math.isfinite(quote_age) or quote_age < 0:
+                quote_status = "future_timestamp"
+                spread_pct = None
+            else:
+                data["quote_age_seconds"] = quote_age
+                data["quote_timestamp"] = datetime.fromtimestamp(
+                    quote_epoch, tz=timezone.utc).isoformat()
+                try:
+                    max_quote_age = float(getattr(
+                        config, "STALE_DATA_SECONDS", 300.0))
+                    if not math.isfinite(max_quote_age) or max_quote_age <= 0:
+                        raise ValueError("invalid quote-age limit")
+                except (TypeError, ValueError, OverflowError):
+                    max_quote_age = None
+                if max_quote_age is None:
+                    quote_status = "invalid_age_limit"
+                elif quote_age > max_quote_age:
+                    quote_status = "stale"
+                if quote_status == "valid":
+                    data["bid"] = quote_bid
+                    data["ask"] = quote_ask
+                    data["price"] = (quote_bid + quote_ask) / 2.0
+        else:
+            if quote_status == "valid":
+                quote_status = "timestamp_unknown"
+            spread_pct = None
+
+        if quote_status != "valid":
+            data["bid"] = data["ask"] = 0.0
+            if tick is not None:
+                try:
+                    last = float(getattr(tick, "last", 0) or 0)
+                    if math.isfinite(last) and last > 0:
+                        data["price"] = last
+                except (TypeError, ValueError, OverflowError):
+                    pass
+        data["spread_pct"] = spread_pct
+        data["data_quality"]["quote"] = quote_status
+        if self.last_data_ts is not None:
+            data["last_data_timestamp"] = self.last_data_ts.isoformat()
         logger.info("MT5 provider: %d ticks, %d book updates for %s "
-                    "(spread %.3f%%, H1/M15/M5 bars %d/%d/%d)",
+                    "(spread %s, quote=%s age=%s, H1/M15/M5 bars %d/%d/%d)",
                     len(self.tick_data), len(self.book_updates), symbol,
-                    spread_pct, len(candles_h1.get("close", [])),
+                    f"{spread_pct:.4f}%" if spread_pct is not None else "n/a",
+                    quote_status,
+                    f"{data['quote_age_seconds']:.2f}s"
+                    if data.get("quote_age_seconds") is not None else "n/a",
+                    len(candles_h1.get("close", [])),
                     len(candles_m15.get("close", [])),
                     len(candles_m5.get("close", [])))
         return data
@@ -940,17 +1249,138 @@ class ReplayProvider(BaseProvider):
                 "market_data JSON (see data_providers.record_market_data), or "
                 "set RECORD_DATA=1 during a live session to capture one.")
         data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise ProviderNotAvailable("Replay file must contain a market_data object")
         # restore numpy arrays
         candles = data.get("candles") or {}
+        if not isinstance(candles, dict):
+            candles = {}
         for k in ("open", "high", "low", "close", "volume"):
             if k in candles and candles[k] is not None:
                 candles[k] = np.asarray(candles[k], dtype=float)
         data["candles"] = candles
-        data.setdefault("has_data", True)
-        data.setdefault("last_data_age_seconds", 0.0)
-        logger.info("REPLAY provider: loaded %s (%d ticks, %d order events)",
+        data["data_source"] = "replay"
+        data_quality = data.get("data_quality")
+        if not isinstance(data_quality, dict):
+            data_quality = {}
+            data["data_quality"] = data_quality
+
+        def _recorded_epoch(value):
+            if value is None or isinstance(value, bool):
+                return None
+            try:
+                if isinstance(value, (int, float, np.integer, np.floating)):
+                    epoch = float(value)
+                    if not math.isfinite(epoch) or epoch <= 0:
+                        return None
+                    if epoch >= 1e17:
+                        epoch /= 1e9
+                    elif epoch >= 1e14:
+                        epoch /= 1e6
+                    elif epoch >= 1e11:
+                        epoch /= 1e3
+                    return epoch
+                parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                return float(parsed.timestamp())
+            except (TypeError, ValueError, OverflowError, OSError):
+                return None
+
+        event_times = []
+        for key in ("last_data_timestamp", "quote_timestamp", "depth_timestamp",
+                    "last_trade_timestamp", "last_order_event_timestamp"):
+            epoch = _recorded_epoch(data.get(key))
+            if epoch is not None:
+                event_times.append(epoch)
+        for collection_key in ("tick_data", "order_events", "book_updates"):
+            collection = data.get(collection_key) or []
+            if isinstance(collection, (list, tuple)):
+                for event in collection:
+                    if isinstance(event, dict):
+                        epoch = _recorded_epoch(event.get("timestamp"))
+                        if epoch is not None:
+                            event_times.append(epoch)
+        now_epoch = time.time()
+        latest_event = max(event_times, default=None)
+        data["last_data_age_seconds"] = (
+            now_epoch - latest_event if latest_event is not None else None)
+        data["last_data_timestamp"] = (
+            datetime.fromtimestamp(latest_event, tz=timezone.utc).isoformat()
+            if latest_event is not None else None)
+        for timestamp_key, age_key in (
+                ("quote_timestamp", "quote_age_seconds"),
+                ("depth_timestamp", "depth_age_seconds"),
+                ("last_trade_timestamp", "last_trade_age_seconds"),
+                ("last_order_event_timestamp", "last_order_event_age_seconds")):
+            epoch = _recorded_epoch(data.get(timestamp_key))
+            data[age_key] = now_epoch - epoch if epoch is not None else None
+
+        try:
+            max_age = float(getattr(config, "STALE_DATA_SECONDS", 300.0))
+            if not math.isfinite(max_age) or max_age <= 0:
+                raise ValueError("invalid replay freshness limit")
+        except (TypeError, ValueError, OverflowError):
+            max_age = None
+        quote_status = str(data_quality.get("quote", "unknown") or "unknown").lower()
+        quote_age = data.get("quote_age_seconds")
+        if quote_status == "valid":
+            if max_age is None:
+                quote_status = "invalid_age_limit"
+            elif quote_age is None:
+                quote_status = "timestamp_unknown"
+            elif not math.isfinite(float(quote_age)) or float(quote_age) < 0:
+                quote_status = "future_timestamp"
+            elif float(quote_age) > max_age:
+                quote_status = "stale"
+        if quote_status == "valid":
+            try:
+                raw_bid, raw_ask = data.get("bid"), data.get("ask")
+                if (isinstance(raw_bid, bool) or isinstance(raw_ask, bool) or
+                        raw_bid is None or raw_ask is None):
+                    raise ValueError("missing replay bid/ask")
+                bid, ask = float(raw_bid), float(raw_ask)
+                if (not math.isfinite(bid) or not math.isfinite(ask) or
+                        bid <= 0 or ask <= 0):
+                    quote_status = "invalid_quote"
+                elif ask <= bid:
+                    quote_status = "crossed_quote"
+            except (TypeError, ValueError, OverflowError):
+                quote_status = "invalid_quote"
+            if quote_status == "valid":
+                raw_spread = data.get("spread_pct")
+                if raw_spread is None:
+                    quote_status = "spread_unknown"
+                else:
+                    try:
+                        if isinstance(raw_spread, bool):
+                            raise ValueError("boolean replay spread")
+                        spread = float(raw_spread)
+                        if not math.isfinite(spread) or spread <= 0:
+                            quote_status = "invalid_spread"
+                        else:
+                            expected = (ask - bid) / ((ask + bid) / 2.0) * 100.0
+                            if not math.isclose(spread, expected,
+                                                rel_tol=1e-6, abs_tol=1e-8):
+                                quote_status = "spread_quote_mismatch"
+                    except (TypeError, ValueError, OverflowError):
+                        quote_status = "invalid_spread"
+        data_quality["quote"] = quote_status
+        if quote_status in {"crossed", "crossed_or_locked", "crossed_quote"}:
+            data_quality["level2"] = "crossed_book"
+        elif quote_status in {"stale", "future_timestamp", "timestamp_unknown",
+                              "invalid_age_limit", "invalid_quote", "invalid_spread",
+                              "spread_unknown", "spread_quote_mismatch"}:
+            data_quality["level2"] = "stale_or_missing_levels"
+        data["has_data"] = data.get("has_data") is True or bool(
+            data.get("tick_data") or data.get("order_events") or
+            data.get("bid_depth") or data.get("ask_depth"))
+        logger.info("REPLAY provider: loaded %s (%d ticks, %d order events; "
+                    "quote=%s age=%s)",
                     path.name, len(data.get("tick_data", [])),
-                    len(data.get("order_events", [])))
+                    len(data.get("order_events", [])), quote_status,
+                    f"{quote_age:.3f}s" if isinstance(quote_age, (int, float))
+                    and math.isfinite(quote_age) else "unknown")
         return data
 
 

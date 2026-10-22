@@ -40,6 +40,11 @@ def make_ticks(kind="trend", bars=36, *, omit_bar=None, incomplete_spike=False):
 
 
 class PowerV2RegimeTests(unittest.TestCase):
+    def setUp(self):
+        # These fixtures use 5-minute bars; isolate them from the configured
+        # runtime timeframe and other tests that may select M3.
+        set_bar_seconds(300)
+
     def test_adx_labels_use_trend_range_and_gray_band(self):
         self.assertEqual(_label_adx(25.0, 25.0, 20.0), ("TREND", "ADX_TREND"))
         self.assertEqual(_label_adx(19.99, 25.0, 20.0), ("RANGE", "ADX_RANGE_BREAKOUT_DISABLED"))

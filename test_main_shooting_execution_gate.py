@@ -2,6 +2,8 @@ import sys
 import types
 from types import SimpleNamespace
 
+import pytest
+
 import main
 from main import _shooting_execution_gate
 
@@ -215,8 +217,8 @@ def test_step4_never_calls_executor_for_a_shadow_only_candidate(monkeypatch):
     calls = []
 
     class Executor:
-        def execute(self, decision, snapshot):
-            calls.append((decision, snapshot))
+        def execute(self, decision, snapshot, *, execution_authorized=False):
+            calls.append((decision, snapshot, execution_authorized))
             return Result(status="EXECUTED", reason="must not be reached")
 
     fake_step4 = types.ModuleType("step4_mt5_execution")
@@ -237,12 +239,160 @@ def test_step4_never_calls_executor_for_a_shadow_only_candidate(monkeypatch):
     snapshot.signal_direction = "BUY"
     snapshot.shadow_candidates = {}
 
-    result = main.run_step4(decision, snapshot)
+    result = main.run_step4(decision, snapshot, execution_authorized=True)
 
     assert result.status == "SKIPPED"
     assert "shadow candidate only" in result.reason
     assert calls == []
     assert decision.action == "HOLD"
+
+
+def test_failed_safety_gate_cannot_be_overridden_by_power_carry(monkeypatch):
+    class Result:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    calls = []
+
+    class Executor:
+        def execute(self, decision, snapshot, *, execution_authorized=False):
+            calls.append((decision, snapshot, execution_authorized))
+            return Result(status="EXECUTED", reason="must not be reached")
+
+    fake_step4 = types.ModuleType("step4_mt5_execution")
+    fake_step4.ExecutionResult = Result
+    fake_step4.MT5Executor = Executor
+    monkeypatch.setitem(sys.modules, "step4_mt5_execution", fake_step4)
+    monkeypatch.setattr(main.config, "TRADING_ENABLED", True)
+    monkeypatch.setattr(main.config, "EXECUTION_MODE", "python")
+    monkeypatch.setattr(main.config, "AI_CONFIDENCE_THRESHOLD", 35.0)
+    monkeypatch.setattr(main.config, "POWER_LEAD_CONF_FLOOR", 30.0)
+    monkeypatch.setattr(main, "_record", lambda *_args, **_kwargs: None)
+
+    # This is the HOLD that run_pipeline creates after a blocked feed gate.
+    decision = SimpleNamespace(action="HOLD", confidence=0.0,
+                               rationale="safety gate: stale quote",
+                               model="none-safety-gate")
+    snapshot = snap(status="BROKER_READY", direction="UP",
+                    reason_code="UPWARD_FORCE_DOMINATES", confidence=35.0)
+    snapshot.quality_evidence = {
+        "quote_status": "stale", "safety_gate_status": "BLOCKED"}
+
+    result = main.run_step4(
+        decision, snapshot, execution_authorized=False,
+        authorization_reason="live quote not validated (stale)")
+
+    assert result.status == "SKIPPED"
+    assert "live quote not validated" in result.reason
+    assert decision.action == "HOLD"
+    assert decision.confidence == 0.0
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "allow_new_entries, gate_ok, expected_authorized",
+    [(True, False, False), (False, True, False), (True, True, True)],
+)
+def test_pipeline_passes_hard_authorization_to_step4(
+        monkeypatch, allow_new_entries, gate_ok, expected_authorized):
+    import main
+
+    class Decision:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    class TradeMonitor:
+        def single_pass(self):
+            return []
+        def check_closed_deals(self, **_kwargs):
+            return []
+
+    manager_calls = []
+    bridge_calls = []
+    monitor_calls = []
+
+    class PositionManager:
+        def manage(self, _snapshot):
+            manager_calls.append(True)
+            return None
+
+    modules = {
+        "maintenance": {"run_maintenance": lambda: None},
+        "news": {"enrich_market_news": lambda _data: None},
+        "macro": {"enrich_macro": lambda _data: None},
+        "position_manager": {"get_position_manager": lambda: PositionManager()},
+        "step3_ai_decision": {"Decision": Decision},
+        "step5_monitoring": {"TradeMonitor": TradeMonitor},
+    }
+    for name, attributes in modules.items():
+        module = types.ModuleType(name)
+        for key, value in attributes.items():
+            setattr(module, key, value)
+        monkeypatch.setitem(sys.modules, name, module)
+
+    snapshot = SimpleNamespace(timestamp=None, notes=[], regime="TREND")
+    monkeypatch.setattr(main.config, "reload_env", lambda: None)
+    monkeypatch.setattr(main.config, "RL_ENABLED", False, raising=False)
+    monkeypatch.setattr(main.config, "LATENCY_LOG_ENABLED", False, raising=False)
+    monkeypatch.setattr(main, "_record", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(main, "_record_latency", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(main, "_load_plumbing_test_position_ids", set)
+    monkeypatch.setattr(main, "_load_tracked_position_ids", set)
+    monkeypatch.setattr(main, "_save_tracked_position_ids", lambda *_args: None)
+    monkeypatch.setattr(main, "_touch_lock", lambda: None)
+    monkeypatch.setattr(main, "run_step1", lambda: {"has_data": True})
+    monkeypatch.setattr(main, "run_step2", lambda _data: snapshot)
+    monkeypatch.setattr(main, "_check_flash_crash", lambda _snapshot: "")
+    monkeypatch.setattr(main, "_entries_paused", lambda: False)
+    monkeypatch.setattr(main, "run_step3", lambda _snapshot: SimpleNamespace(
+        action="BUY", confidence=100.0, rationale="synthetic", model="test"))
+    monkeypatch.setattr(main, "_update_last_diary_ai", lambda *_args, **_kwargs: None)
+    gate_reason = "live quote not validated (stale)" if not gate_ok else "ok"
+    monkeypatch.setattr(main, "_safety_gates", lambda *_args, **_kwargs: (
+        gate_ok, gate_reason))
+    monkeypatch.setattr(main, "_preflight_data_reason", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(main, "_market_quality_evidence", lambda *_args, **_kwargs: {
+        "safety_gate_status": "PASS" if gate_ok else "BLOCKED",
+        "quote_status": "valid" if gate_ok else "stale"})
+    monkeypatch.setattr(main, "_attach_quality_evidence_to_shadow_candidates",
+                        lambda *_args: None)
+    monkeypatch.setattr(main, "_as_position_id", lambda value: value)
+    monkeypatch.setattr(main, "_persist_market_quality_snapshot", lambda *_args: True)
+    monkeypatch.setattr(main, "_load_logged_outcome_keys", set)
+    monkeypatch.setattr(main, "_save_logged_outcome_keys", lambda *_args: None)
+    monkeypatch.setattr(main, "_outcome_signature", lambda _deal: "sig")
+    monkeypatch.setattr(main, "run_step5", lambda: monitor_calls.append(True) or [])
+    monkeypatch.setattr(main, "run_signal_bridge",
+                        lambda _snapshot, _decision, **kwargs:
+                        bridge_calls.append(kwargs.get("allow_new_entries")))
+    monkeypatch.setattr(main, "log_decision", lambda *_args: None)
+    monkeypatch.setattr(main, "print_summary", lambda: None)
+
+    calls = []
+    def fake_run_step4(decision, snap, *, execution_authorized=False,
+                       authorization_reason=""):
+        calls.append((decision, snap, execution_authorized, authorization_reason))
+        return SimpleNamespace(status="SKIPPED", reason="blocked")
+    monkeypatch.setattr(main, "run_step4", fake_run_step4)
+
+    main.run_pipeline(allow_new_entries=allow_new_entries)
+
+    assert len(calls) == 1
+    decision, seen_snapshot, authorized, reason = calls[0]
+    assert seen_snapshot is snapshot
+    assert authorized is expected_authorized
+    if not gate_ok:
+        assert decision.action == "HOLD"  # gate-generated HOLD remains intact
+        assert "stale" in reason
+    elif not allow_new_entries:
+        assert decision.action == "BUY"  # analysis is preserved; entry is separately blocked
+        assert "no-new-entries" in reason
+    else:
+        assert decision.action == "BUY"
+        assert reason == ""
+    assert bridge_calls == [expected_authorized]
+    assert manager_calls == [True]  # position management is not disabled
+    assert monitor_calls == [True]
 
 
 def test_direct_decision_below_owner_threshold_fails_closed(monkeypatch):
@@ -329,9 +479,10 @@ def test_actual_step4_handoff_routes_to_the_python_executor(monkeypatch):
     captured = {}
 
     class Executor:
-        def execute(self, decision, snapshot):
+        def execute(self, decision, snapshot, *, execution_authorized=False):
             captured["decision"] = decision
             captured["snapshot"] = snapshot
+            captured["execution_authorized"] = execution_authorized
             return Result(status="EXECUTED", reason="stub executor ran")
 
     fake_step4 = types.ModuleType("step4_mt5_execution")
@@ -343,9 +494,46 @@ def test_actual_step4_handoff_routes_to_the_python_executor(monkeypatch):
     monkeypatch.setattr(main, "_record", lambda *_args, **_kwargs: None)
 
     d = SimpleNamespace(action="BUY", confidence=75.0)
-    result = main.run_step4(d, snap(status="BROKER_READY"))
+    result = main.run_step4(
+        d, snap(status="BROKER_READY"), execution_authorized=True)
     assert result.status == "EXECUTED"
     assert captured["decision"] is d
+    assert captured["execution_authorized"] is True
+
+
+def test_no_new_entries_signal_bridge_clears_actionable_signal(monkeypatch):
+    captured = {}
+
+    class Decision:
+        def __init__(self, action, confidence, rationale):
+            self.action = action
+            self.confidence = confidence
+            self.rationale = rationale
+
+    def capture_signal(_snapshot, decision):
+        captured["decision"] = decision
+        return None
+
+    fake_decision = types.ModuleType("step3_ai_decision")
+    fake_decision.Decision = Decision
+    fake_bridge = types.ModuleType("mt5_signal_bridge")
+    fake_bridge.write_signal = capture_signal
+    monkeypatch.setitem(sys.modules, "step3_ai_decision", fake_decision)
+    monkeypatch.setitem(sys.modules, "mt5_signal_bridge", fake_bridge)
+    monkeypatch.setattr(main.config, "EXECUTION_MODE", "ea")
+    monkeypatch.setattr(main, "_shooting_execution_gate",
+                        lambda *_args: (_ for _ in ()).throw(
+                            AssertionError("no-entry mode must veto before the strategy gate")))
+    monkeypatch.setattr(main, "_record", lambda *_args, **_kwargs: None)
+
+    main.run_signal_bridge(
+        snap(status="BROKER_READY"),
+        SimpleNamespace(action="BUY", confidence=95.0),
+        allow_new_entries=False)
+
+    assert captured["decision"].action == "HOLD"
+    assert captured["decision"].confidence == 0.0
+    assert "new entries are disabled" in captured["decision"].rationale
 
 
 def test_decision_journal_keeps_power_veto_model_outcome_and_shadow_receipt(

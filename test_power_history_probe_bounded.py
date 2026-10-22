@@ -6,7 +6,7 @@ from pathlib import Path
 
 from bookmap_power_history_probe.analyze_probe import summarize as summarize_probe
 from power_history_probe_loader import load_probe_regime_bars
-from power_v2_regime import classify_m5_regime
+from power_v2_regime import classify_m5_regime, set_bar_seconds
 
 ALIAS = "GCZ6.COMEX@RITHMIC"
 BASE = datetime(2026, 10, 5, 12, 0, tzinfo=timezone.utc)
@@ -40,6 +40,10 @@ def rows_for_bars(count=28, *, gap_at=None, alias=ALIAS):
 
 
 class CappedProbeLoaderTests(unittest.TestCase):
+    def setUp(self):
+        # Probe snapshots and fixtures in this class are explicitly M5.
+        set_bar_seconds(300)
+
     def write_snapshot(self, directory, rows, *, name="power_history_probe_latest.csv"):
         path = Path(directory) / name
         with path.open("w", encoding="utf-8", newline="") as stream:

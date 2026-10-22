@@ -1,4 +1,11 @@
 ================================================================
+ HISTORICAL NOTES — NOT THE CURRENT INSTALL STEPS
+ Follow QUICK_START.md for the current operator flow. This file contains
+ dated patch instructions and old .env values. Do not copy its old patch,
+ change thresholds, edit .env, or run steps from it as a current update.
+================================================================
+
+================================================================
  WHAT TO DO NOW - 7 small steps. One at a time.
  (Git Bash, HP-240. If a step's "expect" line does not match,
   STOP and send me exactly what you got. Do not skip ahead.)

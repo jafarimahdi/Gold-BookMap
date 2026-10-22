@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import math
 import os
 import sys
 import time as _time
@@ -267,33 +268,222 @@ class SimMT5:
 # --------------------------------------------------------------------------- #
 
 class Replayer(BaseProvider):
-    name = "backtest"
+    name = "replay"
 
     def __init__(self) -> None:
         super().__init__()
+        self.replay_now: Optional[datetime] = None
+        self.depth_age_limit_invalid = False
+
+    @staticmethod
+    def _as_utc_datetime(value) -> Optional[datetime]:
+        if value is None:
+            return None
+        try:
+            if isinstance(value, datetime):
+                stamp = value
+            else:
+                stamp = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            if stamp.tzinfo is None:
+                stamp = stamp.replace(tzinfo=timezone.utc)
+            return stamp.astimezone(timezone.utc)
+        except (TypeError, ValueError, OverflowError, OSError):
+            return None
 
     def load_from_state(self, st, window_seconds: float, now_ts: float):
-        cutoff = now_ts - window_seconds
-        ticks = [t for t in st.ticks if t["ts"].timestamp() >= cutoff] \
-            or st.ticks[-200:]
-        self.tick_data = [{"price": t["price"], "volume": t["volume"],
-                           "side": t["side"]} for t in ticks]
-        self._trades = [{"timestamp": t["ts"].isoformat(),
-                         "price": t["price"], "volume": t["volume"]}
-                        for t in ticks]
-        bids = {p: s for p, s in st.bids.items() if not st.best_ask
-                or p <= st.best_ask}
-        asks = {p: s for p, s in st.asks.items() if not st.best_bid
-                or p >= st.best_bid}
-        self.bid_depth = dict(sorted(bids.items(), key=lambda kv: -kv[0])[:20])
-        self.ask_depth = dict(sorted(asks.items(), key=lambda kv: kv[0])[:20])
+        self.reset()
+        self.replay_now = datetime.fromtimestamp(float(now_ts), tz=timezone.utc)
+        cutoff = float(now_ts) - max(float(window_seconds), 0.0)
+        now_epoch = float(now_ts)
+
+        def _in_window(stamp):
+            parsed = self._as_utc_datetime(stamp)
+            return parsed if parsed is not None and cutoff <= parsed.timestamp() <= now_epoch else None
+
+        ticks = []
+        for tick in getattr(st, "ticks", []) or []:
+            stamp = _in_window(tick.get("ts"))
+            if stamp is None:
+                continue
+            ticks.append((stamp, tick))
+        ticks.sort(key=lambda item: item[0])
+        self.tick_data = [
+            {"price": tick["price"], "volume": tick["volume"],
+             "side": tick.get("side", ""),
+             "is_direct": tick.get("is_direct") is True,
+             "timestamp": stamp.isoformat(),
+             "operation": tick.get("operation", "")}
+            for stamp, tick in ticks
+        ]
+        self._trades = [
+            {"timestamp": stamp.isoformat(), "price": tick["price"],
+             "volume": tick["volume"]}
+            for stamp, tick in ticks
+        ]
+        self.last_trade_ts = max((stamp for stamp, _ in ticks), default=None)
+
+        try:
+            max_depth_age = float(getattr(config, "BOOKMAP_LEVEL_MAX_AGE", 900.0))
+            if not math.isfinite(max_depth_age) or max_depth_age <= 0:
+                raise ValueError("invalid replay depth age")
+            self.depth_age_limit_invalid = False
+        except (TypeError, ValueError, OverflowError):
+            max_depth_age = 0.0
+            self.depth_age_limit_invalid = True
+
+        def _fresh_levels(levels, level_timestamps):
+            fresh = {}
+            stamps = {}
+            for raw_price, raw_size in (levels or {}).items():
+                try:
+                    if isinstance(raw_price, bool) or isinstance(raw_size, bool):
+                        continue
+                    price, size = float(raw_price), float(raw_size)
+                    if not math.isfinite(price) or not math.isfinite(size) or price <= 0 or size <= 0:
+                        continue
+                    stamp = self._as_utc_datetime((level_timestamps or {}).get(raw_price))
+                    if stamp is None:
+                        continue
+                    age = now_epoch - stamp.timestamp()
+                    if not math.isfinite(age) or age < 0 or age > max_depth_age:
+                        continue
+                    fresh[price] = size
+                    stamps[price] = stamp
+                except (TypeError, ValueError, OverflowError, OSError):
+                    continue
+            return fresh, stamps
+
+        self.bid_depth, bid_stamps = _fresh_levels(
+            getattr(st, "bids", {}), getattr(st, "level_ts_b", {}))
+        self.ask_depth, ask_stamps = _fresh_levels(
+            getattr(st, "asks", {}), getattr(st, "level_ts_a", {}))
+        self.bid_depth = dict(sorted(self.bid_depth.items(),
+                                     key=lambda item: -item[0])[:20])
+        self.ask_depth = dict(sorted(self.ask_depth.items(),
+                                     key=lambda item: item[0])[:20])
+        if self.bid_depth and self.ask_depth:
+            best_bid, best_ask = max(self.bid_depth), min(self.ask_depth)
+            best_bid_ts = bid_stamps.get(best_bid)
+            best_ask_ts = ask_stamps.get(best_ask)
+            if best_bid_ts is not None and best_ask_ts is not None:
+                self.last_depth_ts = min(best_bid_ts, best_ask_ts)
+                self.book_updates = [{
+                    "bids": dict(self.bid_depth), "asks": dict(self.ask_depth),
+                    "timestamp": self.last_depth_ts.isoformat(),
+                }]
         self.order_book = {
             "bids": [(p, s) for p, s in sorted(self.bid_depth.items(),
                                                reverse=True)],
             "asks": [(p, s) for p, s in sorted(self.ask_depth.items())],
         }
-        if st.last_dt is not None:
-            self._touch(st.last_dt)
+
+        events = []
+        for event in getattr(st, "mbo_events", []) or []:
+            if not isinstance(event, dict):
+                continue
+            stamp = _in_window(event.get("timestamp"))
+            if stamp is None:
+                continue
+            copied = dict(event)
+            copied["timestamp"] = stamp.isoformat()
+            events.append((stamp, copied))
+        events.sort(key=lambda item: item[0])
+        self.order_events = [event for _, event in events]
+        self.last_order_event_ts = max((stamp for stamp, _ in events), default=None)
+
+        event_stamps = [stamp for stamp, _ in ticks]
+        event_stamps.extend(stamp for stamp, _ in events)
+        if self.last_depth_ts is not None:
+            event_stamps.append(self.last_depth_ts)
+        last_state_event = self._as_utc_datetime(getattr(st, "last_dt", None))
+        if last_state_event is not None and last_state_event.timestamp() <= now_epoch:
+            event_stamps.append(last_state_event)
+        self.last_data_ts = max(event_stamps, default=None)
+
+    def build_market_data(self, symbol: str, candles=None, macro=None, news=None):
+        data = super().build_market_data(symbol, candles=candles,
+                                         macro=macro, news=news)
+        now = self.replay_now or datetime.now(timezone.utc)
+        now_epoch = now.timestamp()
+        bid, ask = self._best_prices()
+        spread_pct = None
+        quote_age = None
+        quote_timestamp = (self.last_depth_ts.isoformat()
+                           if self.last_depth_ts is not None else None)
+        if bid > 0 and ask > 0 and ask > bid:
+            mid = (bid + ask) / 2.0
+            spread_pct = (ask - bid) / mid * 100.0
+        if self.depth_age_limit_invalid:
+            quote_status = "invalid_age_limit"
+        elif bid <= 0 or ask <= 0:
+            quote_status = "unavailable"
+        elif ask <= bid:
+            quote_status = "crossed_or_locked"
+        elif self.last_depth_ts is None:
+            quote_status = "timestamp_unknown"
+        else:
+            quote_age = now_epoch - self.last_depth_ts.timestamp()
+            if not math.isfinite(quote_age) or quote_age < 0:
+                quote_status = "future_timestamp"
+            else:
+                try:
+                    max_quote_age = float(getattr(config, "STALE_DATA_SECONDS", 300.0))
+                    if not math.isfinite(max_quote_age) or max_quote_age <= 0:
+                        raise ValueError("invalid replay quote age")
+                except (TypeError, ValueError, OverflowError):
+                    max_quote_age = None
+                if max_quote_age is None:
+                    quote_status = "invalid_age_limit"
+                elif quote_age > max_quote_age:
+                    quote_status = "stale"
+                else:
+                    quote_status = "valid"
+        data["data_source"] = "replay"
+        data["bid"] = bid if quote_status == "valid" else 0.0
+        data["ask"] = ask if quote_status == "valid" else 0.0
+        if quote_status == "valid":
+            data["price"] = (bid + ask) / 2.0
+        elif self.tick_data:
+            data["price"] = float(self.tick_data[-1]["price"])
+        data["spread_pct"] = spread_pct
+        data["quote_age_seconds"] = quote_age
+        data["quote_timestamp"] = quote_timestamp
+        data["depth_age_seconds"] = quote_age
+        data["depth_timestamp"] = quote_timestamp
+        data["last_data_age_seconds"] = (
+            now_epoch - self.last_data_ts.timestamp()
+            if self.last_data_ts is not None else None)
+        data["last_data_timestamp"] = (
+            self.last_data_ts.isoformat() if self.last_data_ts is not None else None)
+        data["last_trade_age_seconds"] = (
+            now_epoch - self.last_trade_ts.timestamp()
+            if self.last_trade_ts is not None else None)
+        data["last_trade_timestamp"] = (
+            self.last_trade_ts.isoformat() if self.last_trade_ts is not None else None)
+        data["last_order_event_age_seconds"] = (
+            now_epoch - self.last_order_event_ts.timestamp()
+            if self.last_order_event_ts is not None else None)
+        data["last_order_event_timestamp"] = (
+            self.last_order_event_ts.isoformat()
+            if self.last_order_event_ts is not None else None)
+        if quote_status == "crossed_or_locked":
+            level2_status = "crossed_book"
+        elif quote_status == "valid":
+            level2_status = "available"
+        elif quote_status in {"stale", "future_timestamp", "invalid_age_limit"}:
+            level2_status = "stale_or_missing_levels"
+        else:
+            level2_status = "unavailable"
+        data["data_quality"]["quote"] = quote_status
+        data["data_quality"]["level2"] = level2_status
+        data["l2_diagnostics"] = {
+            "status": "synthetic" if level2_status == "available" else level2_status,
+            "best_bid": max(self.bid_depth) if self.bid_depth else None,
+            "best_ask": min(self.ask_depth) if self.ask_depth else None,
+            "quote_age_seconds": quote_age,
+            "depth_timestamp": quote_timestamp,
+        }
+        return data
 
 
 # --------------------------------------------------------------------------- #
@@ -430,9 +620,12 @@ class Backtester:
         market_data["news"] = {"fetch_calendar": False, "events": [],
                                "headlines": []}
         market_data["macro"] = {}
-        market_data["data_quality"]["level3"] = "unavailable"
-        market_data["last_data_age_seconds"] = 0.0
-        snapshot = s2.analyze_market(market_data, now=now_dt)
+        source_before_analysis = config.DATA_SOURCE
+        try:
+            config.DATA_SOURCE = "replay"
+            snapshot = s2.analyze_market(market_data, now=now_dt)
+        finally:
+            config.DATA_SOURCE = source_before_analysis
 
         direction = snapshot.signal_direction
         strength = float(snapshot.signal_strength or 0.0)

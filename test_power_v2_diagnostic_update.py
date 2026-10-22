@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 
 from power_m5_adapter import build_m5_inputs
 from power_team_v2 import decide
-from power_v2_regime import classify_m5_regime
+from power_v2_regime import classify_m5_regime, set_bar_seconds
 from power_v2_shadow import run_power_v2
 
 
@@ -56,6 +56,11 @@ def make_runner_ticks(now):
 
 
 class PowerV2DiagnosticUpdateTests(unittest.TestCase):
+    def setUp(self):
+        # These fixtures use 5-minute bars; don't inherit M3 from config or
+        # another test's module-global interval.
+        set_bar_seconds(300)
+
     def test_regime_reports_insufficient_count_without_lowering_requirement(self):
         ticks = make_regime_ticks(bars=20)
         end = BASE + timedelta(minutes=100)

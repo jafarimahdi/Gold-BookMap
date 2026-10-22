@@ -162,36 +162,33 @@ def _a1_refresh_scout(market_data, served, price, spread_now):
     tick_data = market_data.get("tick_data") or []
     now = served.timestamp
 
-    # persistent L2 -> order flow (as in analyze_market)
+    # Persistent L2 continuity is reset across stale/misaligned snapshots.
     l2 = _get_persistent_l2()
-    for upd in market_data.get("book_updates") or []:
-        l2.update(upd.get("bids"), upd.get("asks"))
-    bid_depth = market_data.get("bid_depth") or {}
-    ask_depth = market_data.get("ask_depth") or {}
-    book = market_data.get("order_book")
-    if (not bid_depth or not ask_depth) and book:
-        bid_depth = bid_depth or dict(book.get("bids", []))
-        ask_depth = ask_depth or dict(book.get("asks", []))
-    if bid_depth or ask_depth:
-        l2.update(bid_depth, ask_depth)
-        _save_book_state(bid_depth, ask_depth)
-    l2_metrics = l2.summary(bid_depth, ask_depth)
-    try:
-        l2.absorption_events = 0
-        l2.absorption_net = 0
-    except Exception:
-        pass
+    bid_depth, ask_depth, l2_metrics, l2_ok, l2_reason = _l2_metrics_for(
+        market_data, l2, now=now)
+    book = ({"bids": sorted(bid_depth.items(), key=lambda item: -item[0]),
+             "asks": sorted(ask_depth.items(), key=lambda item: item[0])}
+            if l2_ok else {})
     order_flow = OrderFlowAnalyzer().analyze_tick_data(
         tick_data, bid_depth, ask_depth, l2_metrics=l2_metrics)
+    if not isinstance(getattr(served, "data_quality", None), dict):
+        served.data_quality = {}
+    if not l2_ok:
+        served.data_quality["level2"] = "suppressed"
+    elif l2_reason:
+        served.data_quality["level2"] = "available_continuity_reset"
 
-    # L3 (as in analyze_market)
+    # L3 (as in analyze_market); stale/unclocked events are not current flow.
     l3 = Level3OrderBookAnalyzer(large_size=float(
         getattr(config, "L3_LARGE_ORDER_LOTS",
                 getattr(config, "L3_WHALE_THRESHOLD", 100.0))))
-    for ev in market_data.get("order_events") or []:
+    for ev in _fresh_l3_order_events(
+            market_data, now_epoch=_datetime_epoch_utc(now)):
         l3.process_order_event(ev)
     if book:
         l3.update_order_book(book.get("bids", []), book.get("asks", []))
+    _feed_direct_trade_ticks(l3, tick_data,
+                             now_epoch=_datetime_epoch_utc(now))
     level3 = l3.analyze()
 
     # volume profile / htf poc / order blocks (as in analyze_market)
@@ -216,6 +213,8 @@ def _a1_refresh_scout(market_data, served, price, spread_now):
 
     # notebook: ingest then remembered doors then render (as in analyze_market)
     scout_notes = []
+    if l2_reason:
+        scout_notes.append(f"L2 analytics/continuity: {l2_reason}")
     signal_map = {}
     try:
         from signal_team import build_signal_map as _a1_bsm, describe as _a1_dsm
@@ -295,24 +294,56 @@ def _a1_try_serve(market_data, now, price):
 
     import copy as _a1_copy
     served = _a1_copy.deepcopy(snap)
-    bid = float(market_data.get("bid") or price)
-    ask = float(market_data.get("ask") or price)
+    # Quality receipts are post-gate shadow evidence, never inputs to Step 3.
+    # A cached snapshot otherwise carries the prior cycle's receipt into this
+    # cycle's AI prompt because snapshot_to_dict serializes every dataclass field.
+    served.quality_evidence = {}
+    def _clear_prior_quality(container):
+        if isinstance(container, dict):
+            for candidate in container.values():
+                if isinstance(candidate, dict):
+                    candidate.pop("market_quality_evidence", None)
+    _clear_prior_quality(getattr(served, "shadow_candidates", None))
+    _served_shot = getattr(served, "shot", None)
+    if isinstance(_served_shot, dict):
+        _clear_prior_quality(_served_shot.get("shadow_candidates"))
+    try:
+        bid = float(market_data.get("bid"))
+        ask = float(market_data.get("ask"))
+        if (not np.isfinite(bid) or not np.isfinite(ask) or
+                bid <= 0 or ask <= bid):
+            bid = ask = 0.0
+    except (TypeError, ValueError, OverflowError):
+        bid = ask = 0.0
     served.timestamp = now
     served.price = price
     served.bid = bid
     served.ask = ask
     served.volume = float(market_data.get("volume") or 0.0)
     try:
-        served.data_quality = dict(market_data.get("data_quality") or {})
+        served.data_quality = _snapshot_data_quality(
+            market_data, market_data.get("tick_data") or [],
+            now_epoch=_datetime_epoch_utc(now))
+        _live_spread = market_data.get("spread_pct")
+        served.spread_pct = (float(_live_spread)
+                             if _live_spread is not None and
+                             np.isfinite(float(_live_spread)) and
+                             float(_live_spread) >= 0 else 0.0)
     except Exception:
-        pass
-    _f_ask = float(market_data.get("ask") or 0.0)
-    _f_bid = float(market_data.get("bid") or 0.0)
+        served.spread_pct = 0.0
+        served.data_quality = dict(getattr(served, "data_quality", {}) or {})
+        served.data_quality["quote"] = "spread_unknown"
+    try:
+        _f_ask = float(market_data.get("ask") or 0.0)
+        _f_bid = float(market_data.get("bid") or 0.0)
+        if not np.isfinite(_f_ask) or not np.isfinite(_f_bid):
+            _f_ask = _f_bid = 0.0
+    except (TypeError, ValueError, OverflowError):
+        _f_ask = _f_bid = 0.0
     _spread_now = abs(_f_ask - _f_bid) if _f_ask and _f_bid else 0.0
 
     # ---- live scout chain (full notebook feed), EVERY serve ----------------
     scout_notes, _atr = _a1_refresh_scout(market_data, served, price, _spread_now)
-
     # ---- live pair: paper-entry simulator + Escort, re-run EVERY serve -----
     pair_notes = []
     _escort_plan = {}
@@ -655,6 +686,8 @@ class MarketSnapshot:
     # Data-quality labels prevent estimated CFD flow from being mistaken for
     # exchange trade prints or Level 3 data.
     data_quality: Dict[str, str] = field(default_factory=dict)
+    # Per-cycle, serializable feed-quality receipt attached to shadow evidence.
+    quality_evidence: Dict[str, Any] = field(default_factory=dict)
     # Non-executable alternatives retained for the evidence/shadow review.
     shadow_candidates: Dict[str, Any] = field(default_factory=dict)
 
@@ -1234,6 +1267,16 @@ class OrderBookDepthAnalyzer:
         self._prev_ba_price, self._prev_ba_size = ba_price, ba_size
         if mid:
             self._last_mid = mid
+
+    # -- continuity control ----------------------------------------------------
+    def reset(self) -> None:
+        """Forget prior-book continuity after a stale or invalid feed snapshot.
+
+        Retaining the old snapshot across a data-quality gap would turn the
+        first recovered book into a fabricated OFI/absorption transition.
+        """
+        levels, wall_size = self.levels, self.wall_size
+        self.__init__(levels=levels, wall_size=wall_size)
 
     # -- main update -----------------------------------------------------------
     def update(self, bids: Any, asks: Any) -> None:
@@ -3882,6 +3925,8 @@ def _nearest_zones(zones: List[Dict], price: float) -> Tuple[float, float]:
 # Persistent Level-2 state (makes OFI & absorption work ACROSS cycles)
 # --------------------------------------------------------------------------- #
 _PERSISTENT_L2: Optional[OrderBookDepthAnalyzer] = None
+_PERSISTENT_L2_TIMESTAMP: Optional[datetime] = None
+_PERSISTENT_L2_INSTRUMENT: Optional[str] = None
 _BOOK_STATE_PATH = None
 
 
@@ -3902,7 +3947,7 @@ def _get_persistent_l2() -> OrderBookDepthAnalyzer:
     zero. The previous book is restored from a small state file so it also
     survives a restart.
     """
-    global _PERSISTENT_L2
+    global _PERSISTENT_L2, _PERSISTENT_L2_TIMESTAMP, _PERSISTENT_L2_INSTRUMENT
     if _PERSISTENT_L2 is None:
         _PERSISTENT_L2 = OrderBookDepthAnalyzer(levels=5)
         try:
@@ -3916,17 +3961,635 @@ def _get_persistent_l2() -> OrderBookDepthAnalyzer:
                 if bids or asks:
                     _PERSISTENT_L2._prev_bids = bids
                     _PERSISTENT_L2._prev_asks = asks
+                state_timestamp = state.get("timestamp")
+                if state_timestamp:
+                    try:
+                        _PERSISTENT_L2_TIMESTAMP = datetime.fromisoformat(
+                            str(state_timestamp).replace("Z", "+00:00"))
+                        if _PERSISTENT_L2_TIMESTAMP.tzinfo is None:
+                            _PERSISTENT_L2_TIMESTAMP = _PERSISTENT_L2_TIMESTAMP.replace(
+                                tzinfo=timezone.utc)
+                    except (TypeError, ValueError, OverflowError):
+                        _PERSISTENT_L2_TIMESTAMP = None
+                state_instrument = state.get("instrument")
+                _PERSISTENT_L2_INSTRUMENT = (
+                    str(state_instrument).strip().upper()
+                    if state_instrument else None)
         except Exception:
             pass
     return _PERSISTENT_L2
 
 
-def _save_book_state(bids: Dict[float, float], asks: Dict[float, float]) -> None:
+def _l2_inputs(market_data: Dict[str, Any]):
+    """Return (usable, bids, asks, book, updates, reason) for the L2 feed."""
+    quality = market_data.get("data_quality") or {}
+    quality = quality if isinstance(quality, dict) else {}
+    status = str(quality.get("level2", "unknown") or "unknown").lower()
+    source = str(getattr(config, "DATA_SOURCE", "") or "").strip().lower()
+    strict_bookmap = source in {"bookmapbridge", "ninjabridge", "bookmap",
+                               "bmbridge", "bookmap_bridge", "ntbridge", "ninja"}
+    invalid = {
+        "unavailable", "stale", "invalid", "misaligned", "crossed",
+        "crossed_book", "instrument_mismatch", "stale_or_missing_levels",
+        "unverified_last_trade_missing", "unverified_last_trade_stale",
+        "misaligned_quote_vs_last", "unknown", "quote_unvalidated",
+        "timestamp_unknown", "future_timestamp", "invalid_spread",
+    }
+    if status in invalid:
+        return False, {}, {}, {}, [], f"L2 status={status}"
+    if strict_bookmap and status != "validated":
+        return False, {}, {}, {}, [], f"BookMap L2 status={status}, requires validated"
+    if strict_bookmap and str(quality.get("quote", "")).lower() != "valid":
+        return False, {}, {}, {}, [], "BookMap quote is not validated"
+    if strict_bookmap and str(quality.get("instrument", "unknown")).lower() != "matched":
+        return False, {}, {}, {}, [], "BookMap instrument is not verified"
+    if source not in {"demo", "replay"} and str(
+            quality.get("quote", "")).lower() != "valid":
+        return False, {}, {}, {}, [], "live quote is not validated"
+    if source not in {"demo", "replay"}:
+        try:
+            raw_bid, raw_ask = market_data.get("bid"), market_data.get("ask")
+            if isinstance(raw_bid, bool) or isinstance(raw_ask, bool):
+                raise ValueError("boolean quote")
+            quote_bid, quote_ask = float(raw_bid), float(raw_ask)
+            if (not np.isfinite(quote_bid) or not np.isfinite(quote_ask) or
+                    quote_bid <= 0 or quote_ask <= quote_bid):
+                return False, {}, {}, {}, [], "live bid/ask quote invalid or crossed"
+            raw_spread = market_data.get("spread_pct")
+            if isinstance(raw_spread, bool) or raw_spread is None:
+                return False, {}, {}, {}, [], "live quote spread unknown or invalid"
+            quote_spread = float(raw_spread)
+            expected_spread = (quote_ask - quote_bid) / (
+                (quote_ask + quote_bid) / 2.0) * 100.0
+            if (not np.isfinite(quote_spread) or quote_spread <= 0 or
+                    not np.isclose(quote_spread, expected_spread,
+                                   rtol=1e-6, atol=1e-8)):
+                return False, {}, {}, {}, [], "live spread does not match bid/ask quote"
+        except (TypeError, ValueError, OverflowError):
+            return False, {}, {}, {}, [], "live quote/spread metadata invalid"
+    if source not in {"demo", "replay"}:
+        max_depth_age = getattr(
+            config, "BOOKMAP_LEVEL_MAX_AGE", 900.0) if strict_bookmap else getattr(
+            config, "STALE_DATA_SECONDS", 300.0)
+        try:
+            if isinstance(max_depth_age, bool):
+                raise ValueError("boolean depth age limit")
+            max_depth_age = float(max_depth_age)
+            if not np.isfinite(max_depth_age) or max_depth_age <= 0:
+                raise ValueError("invalid depth age limit")
+            raw_depth_age = market_data.get("depth_age_seconds")
+            if raw_depth_age is None:
+                raw_depth_age = market_data.get("quote_age_seconds")
+            if raw_depth_age is None:
+                depth_timestamp = (market_data.get("depth_timestamp") or
+                                   market_data.get("quote_timestamp"))
+                if depth_timestamp:
+                    parsed_ts = datetime.fromisoformat(
+                        str(depth_timestamp).replace("Z", "+00:00"))
+                    if parsed_ts.tzinfo is None:
+                        parsed_ts = parsed_ts.replace(tzinfo=timezone.utc)
+                    raw_depth_age = datetime.now(timezone.utc).timestamp() - parsed_ts.timestamp()
+            if isinstance(raw_depth_age, bool):
+                raise ValueError("boolean depth age")
+            depth_age = float(raw_depth_age)
+            if not np.isfinite(depth_age) or depth_age < 0:
+                return False, {}, {}, {}, [], "L2 depth age unknown or future-dated"
+            if depth_age > max_depth_age:
+                return False, {}, {}, {}, [], (
+                    f"L2 depth stale ({depth_age:.3f}s > {max_depth_age:.3f}s)")
+        except (TypeError, ValueError, OverflowError):
+            return False, {}, {}, {}, [], "L2 depth age unknown or invalid"
+    raw_diagnostics = market_data.get("l2_diagnostics")
+    if raw_diagnostics is not None and not isinstance(raw_diagnostics, dict):
+        return False, {}, {}, {}, [], "L2 diagnostics metadata invalid"
+    diagnostics = raw_diagnostics or {}
+    diagnostic_status = str(diagnostics.get("status", "") or "").lower()
+    allowed_diagnostic_statuses = ({"validated", "synthetic"}
+                                   if source in {"demo", "replay"}
+                                   else {"validated"})
+    if (diagnostic_status and
+            diagnostic_status not in allowed_diagnostic_statuses):
+        return False, {}, {}, {}, [], f"L2 diagnostics status={diagnostic_status}"
+
+    raw_bids = market_data.get("bid_depth") or {}
+    raw_asks = market_data.get("ask_depth") or {}
+    raw_book = market_data.get("order_book") or {}
+    if (not raw_bids or not raw_asks) and raw_book:
+        try:
+            raw_bids = raw_bids or dict(raw_book.get("bids", []))
+            raw_asks = raw_asks or dict(raw_book.get("asks", []))
+        except (TypeError, ValueError, AttributeError, OverflowError):
+            return False, {}, {}, {}, [], "L2 order-book shape invalid"
+
+    def _clean_levels(levels):
+        if isinstance(levels, dict):
+            items = levels.items()
+        elif isinstance(levels, (list, tuple)):
+            items = levels
+        else:
+            return {}, True
+        cleaned = {}
+        malformed = False
+        try:
+            for item in items:
+                if not isinstance(item, (list, tuple)) or len(item) != 2:
+                    malformed = True
+                    continue
+                if isinstance(item[0], (bool, np.bool_)) or isinstance(item[1], (bool, np.bool_)):
+                    malformed = True
+                    continue
+                price, size = float(item[0]), float(item[1])
+                if not np.isfinite(price) or not np.isfinite(size) or price <= 0 or size <= 0:
+                    malformed = True
+                    continue
+                cleaned[price] = size
+        except (TypeError, ValueError, OverflowError):
+            malformed = True
+        return cleaned, malformed
+
+    bids, bad_bids = _clean_levels(raw_bids)
+    asks, bad_asks = _clean_levels(raw_asks)
+    if bad_bids or bad_asks:
+        return False, {}, {}, {}, [], "L2 contains invalid price/size levels"
+    if not bids or not asks:
+        return False, {}, {}, {}, [], "L2 lacks two-sided depth"
+    best_bid, best_ask = max(bids), min(asks)
+    if best_bid >= best_ask:
+        return False, {}, {}, {}, [], (
+            f"L2 crossed/locked book ({best_bid:.5f} >= {best_ask:.5f})")
+    if source not in {"demo", "replay"}:
+        try:
+            last_price = float(market_data.get("price", 0) or 0)
+            if not np.isfinite(last_price) or last_price <= 0:
+                return False, {}, {}, {}, [], "L2 alignment price unavailable"
+            book_mid = (best_bid + best_ask) / 2.0
+            allowed_deviation = max(1.0, 0.001 * last_price)
+            deviation = abs(book_mid - last_price)
+            if deviation > allowed_deviation:
+                return False, {}, {}, {}, [], (
+                    f"L2 mid/last misalignment ({deviation:.3f} > "
+                    f"{allowed_deviation:.3f})")
+        except (TypeError, ValueError, OverflowError):
+            return False, {}, {}, {}, [], "L2 alignment price invalid"
+    book = {
+        "bids": sorted(bids.items(), key=lambda item: -item[0]),
+        "asks": sorted(asks.items(), key=lambda item: item[0]),
+    }
+    updates = market_data.get("book_updates") or []
+    if not isinstance(updates, (list, tuple)):
+        return False, {}, {}, {}, [], "L2 update batch shape invalid"
+    clean_updates = []
+    for update in updates:
+        if not isinstance(update, dict):
+            return False, {}, {}, {}, [], "L2 update entry invalid"
+        update_bids, bad_update_bids = _clean_levels(update.get("bids") or {})
+        update_asks, bad_update_asks = _clean_levels(update.get("asks") or {})
+        if bad_update_bids or bad_update_asks or not update_bids or not update_asks:
+            return False, {}, {}, {}, [], "L2 update has invalid/two-sided depth"
+        if max(update_bids) >= min(update_asks):
+            return False, {}, {}, {}, [], "L2 update crossed/locked"
+        clean_updates.append({"bids": update_bids, "asks": update_asks,
+                              "timestamp": update.get("timestamp")})
+    return True, bids, asks, book, clean_updates, ""
+
+
+def _l2_metrics_for(market_data: Dict[str, Any], l2: OrderBookDepthAnalyzer,
+                    now: Optional[datetime] = None):
+    """Update L2 from trusted books, evaluated on the analysis event clock."""
+    global _PERSISTENT_L2_TIMESTAMP, _PERSISTENT_L2_INSTRUMENT
+    usable, bids, asks, _book, updates, reason = _l2_inputs(market_data)
+    if not usable:
+        l2.reset()
+        _PERSISTENT_L2_TIMESTAMP = None
+        _PERSISTENT_L2_INSTRUMENT = None
+        _save_book_state({}, {}, timestamp=None, instrument=None)
+        return {}, {}, {}, False, reason
+
+    source = str(getattr(config, "DATA_SOURCE", "unknown") or "unknown").strip().lower()
+    clocked_source = source != "demo"
+    bookmap_source = source in {"bookmapbridge", "ninjabridge", "bookmap",
+                                "bmbridge", "bookmap_bridge", "ntbridge", "ninja"}
+    max_gap = (getattr(config, "BOOKMAP_LEVEL_MAX_AGE", 900.0)
+               if bookmap_source
+               else getattr(config, "STALE_DATA_SECONDS", 300.0))
+    try:
+        if isinstance(max_gap, bool):
+            raise ValueError("boolean L2 continuity limit")
+        max_gap = float(max_gap)
+        if not np.isfinite(max_gap) or max_gap <= 0:
+            raise ValueError("invalid L2 continuity limit")
+    except (TypeError, ValueError, OverflowError):
+        l2.reset()
+        _PERSISTENT_L2_TIMESTAMP = None
+        _PERSISTENT_L2_INSTRUMENT = None
+        _save_book_state({}, {}, timestamp=None, instrument=None)
+        return {}, {}, {}, False, "L2 continuity-age configuration invalid"
+
+    data_symbol = str(market_data.get("data_symbol") or
+                      market_data.get("symbol") or "").strip().upper()
+    current_instrument = f"{source}:{data_symbol or '<UNKNOWN>'}"
+    clock_now = now or datetime.now(timezone.utc)
+    if clock_now.tzinfo is None:
+        clock_now = clock_now.replace(tzinfo=timezone.utc)
+    else:
+        clock_now = clock_now.astimezone(timezone.utc)
+    raw_timestamp = (market_data.get("depth_timestamp") or
+                     market_data.get("quote_timestamp") or
+                     market_data.get("last_data_timestamp"))
+    current_ts = None
+    if isinstance(raw_timestamp, datetime):
+        current_ts = raw_timestamp
+    elif raw_timestamp:
+        try:
+            current_ts = datetime.fromisoformat(
+                str(raw_timestamp).replace("Z", "+00:00"))
+        except (TypeError, ValueError, OverflowError):
+            current_ts = None
+    if current_ts is not None:
+        if current_ts.tzinfo is None:
+            current_ts = current_ts.replace(tzinfo=timezone.utc)
+        current_ts = current_ts.astimezone(timezone.utc)
+    if current_ts is None:
+        raw_age = market_data.get("depth_age_seconds")
+        if raw_age is None:
+            raw_age = market_data.get("quote_age_seconds")
+        try:
+            if isinstance(raw_age, bool):
+                raise ValueError("boolean depth age")
+            raw_age = float(raw_age)
+            if not np.isfinite(raw_age) or raw_age < 0:
+                raise ValueError("invalid depth age")
+            current_ts = clock_now - timedelta(seconds=raw_age)
+        except (TypeError, ValueError, OverflowError):
+            if clocked_source:
+                l2.reset()
+                _PERSISTENT_L2_TIMESTAMP = None
+                _PERSISTENT_L2_INSTRUMENT = None
+                _save_book_state({}, {}, timestamp=None, instrument=None)
+                return {}, {}, {}, False, "L2 snapshot timestamp unknown"
+            current_ts = clock_now
+
+    if clocked_source:
+        snapshot_age = (clock_now - current_ts).total_seconds()
+        if not np.isfinite(snapshot_age) or snapshot_age < 0:
+            l2.reset()
+            _PERSISTENT_L2_TIMESTAMP = None
+            _PERSISTENT_L2_INSTRUMENT = None
+            _save_book_state({}, {}, timestamp=None, instrument=None)
+            return {}, {}, {}, False, "L2 snapshot timestamp future-dated or invalid"
+        if snapshot_age > max_gap:
+            l2.reset()
+            _PERSISTENT_L2_TIMESTAMP = None
+            _PERSISTENT_L2_INSTRUMENT = None
+            _save_book_state({}, {}, timestamp=None, instrument=None)
+            return {}, {}, {}, False, (
+                f"L2 snapshot stale ({snapshot_age:.3f}s > {max_gap:.3f}s)")
+
+    continuity_note = ""
+    has_previous_book = bool(getattr(l2, "_prev_bids", {}) or
+                              getattr(l2, "_prev_asks", {}))
+    if (_PERSISTENT_L2_INSTRUMENT is not None and
+            _PERSISTENT_L2_INSTRUMENT != current_instrument):
+        l2.reset()
+        continuity_note = "L2 instrument/source changed; OFI continuity reset"
+    elif _PERSISTENT_L2_INSTRUMENT is None and has_previous_book:
+        l2.reset()
+        continuity_note = "prior L2 instrument unknown; OFI continuity reset"
+    elif clocked_source and _PERSISTENT_L2_TIMESTAMP is None and has_previous_book:
+        l2.reset()
+        continuity_note = "prior L2 timestamp unknown; OFI continuity reset"
+    elif clocked_source and _PERSISTENT_L2_TIMESTAMP is not None:
+        gap = (current_ts - _PERSISTENT_L2_TIMESTAMP).total_seconds()
+        if not np.isfinite(gap) or gap < 0 or gap > max_gap:
+            l2.reset()
+            continuity_note = "L2 observation gap; OFI continuity reset"
+
+    if clocked_source:
+        checked_updates = []
+        invalid_update = False
+        for update in updates:
+            if not isinstance(update, dict):
+                invalid_update = True
+                break
+            stamp_text = update.get("timestamp")
+            try:
+                stamp = (stamp_text if isinstance(stamp_text, datetime) else
+                         datetime.fromisoformat(
+                             str(stamp_text).replace("Z", "+00:00")))
+                if stamp.tzinfo is None:
+                    stamp = stamp.replace(tzinfo=timezone.utc)
+                stamp = stamp.astimezone(timezone.utc)
+                age = (clock_now - stamp).total_seconds()
+                if (not np.isfinite(age) or age < 0 or age > max_gap or
+                        stamp > current_ts + timedelta(seconds=1) or
+                        not update.get("bids") or not update.get("asks")):
+                    invalid_update = True
+                    break
+            except (TypeError, ValueError, OverflowError):
+                invalid_update = True
+                break
+            checked_updates.append((stamp, update))
+        if invalid_update:
+            l2.reset()
+            checked_updates = []
+            update_note = "invalid/stale L2 update timestamps; OFI continuity reset"
+            continuity_note = "; ".join(
+                part for part in (continuity_note, update_note) if part)
+        else:
+            checked_updates.sort(key=lambda item: item[0])
+        updates = [update for _, update in checked_updates]
+
+    for update in updates:
+        l2.update(update.get("bids"), update.get("asks"))
+    l2.update(bids, asks)
+    _PERSISTENT_L2_TIMESTAMP = current_ts
+    _PERSISTENT_L2_INSTRUMENT = current_instrument
+    _save_book_state(bids, asks, timestamp=current_ts,
+                     instrument=current_instrument)
+    metrics = l2.summary(bids, asks)
+    # These are per-cycle diagnostics, not lifetime accumulators.
+    l2.absorption_events = 0
+    l2.absorption_net = 0
+    return bids, asks, metrics, True, continuity_note
+
+
+def _datetime_epoch_utc(value: Optional[datetime]) -> Optional[float]:
+    if not isinstance(value, datetime):
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    try:
+        return float(value.timestamp())
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def _is_fresh_direct_trade_tick(tick: Dict[str, Any],
+                                now_epoch: Optional[float] = None) -> bool:
+    """Whether a tick carries an explicit, recent BUY/SELL aggressor side."""
+    if not isinstance(tick, dict):
+        return False
+    direct_value = tick.get("is_direct", tick.get("is_bookmap_direct", False))
+    direct = isinstance(direct_value, (bool, np.bool_)) and bool(direct_value)
+    side = str(tick.get("side", "")).upper()
+    if not direct or side not in {"BUY", "SELL", "B", "S"}:
+        return False
+    try:
+        raw_price, raw_volume = tick.get("price", 0), tick.get("volume", 0)
+        if isinstance(raw_price, bool) or isinstance(raw_volume, bool):
+            return False
+        price = float(raw_price or 0)
+        volume = float(raw_volume or 0)
+        if not np.isfinite(price) or not np.isfinite(volume) or price <= 0 or volume <= 0:
+            return False
+    except (TypeError, ValueError, OverflowError):
+        return False
+    # Demo/synthetic classification is not an exception: missing event time
+    # cannot be made fresh by receive-time fallback in any provider.
+    stamp = tick.get("timestamp")
+    try:
+        if isinstance(stamp, datetime):
+            if stamp.tzinfo is None:
+                stamp = stamp.replace(tzinfo=timezone.utc)
+            tick_epoch = stamp.timestamp()
+        elif isinstance(stamp, (int, float, np.integer, np.floating)):
+            tick_epoch = float(stamp)
+            if tick_epoch >= 1e17:
+                tick_epoch /= 1e9
+            elif tick_epoch >= 1e14:
+                tick_epoch /= 1e6
+            elif tick_epoch >= 1e11:
+                tick_epoch /= 1e3
+        else:
+            parsed = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            tick_epoch = parsed.timestamp()
+        if now_epoch is None:
+            now_epoch = time.time()
+        elif isinstance(now_epoch, bool):
+            return False
+        else:
+            now_epoch = float(now_epoch)
+        raw_max_age = getattr(config, "POWER_MAX_TICK_AGE_SECONDS",
+                              getattr(config, "STALE_DATA_SECONDS", 60.0))
+        if isinstance(raw_max_age, bool):
+            return False
+        max_age = float(raw_max_age)
+        age = now_epoch - tick_epoch
+        return (np.isfinite(tick_epoch) and np.isfinite(age) and age >= 0
+                and np.isfinite(max_age) and max_age > 0 and age <= max_age)
+    except (TypeError, ValueError, OverflowError, OSError):
+        return False
+
+
+def _feed_direct_trade_ticks(l3, tick_data: List[Dict[str, Any]],
+                             now_epoch: Optional[float] = None) -> int:
+    """Add only explicitly aggressor-tagged, recent prints to L3 counters.
+
+    Inferred tick-rule sides remain in general CVD/footprint analysis but are
+    not presented as observed market-order aggressor flow.
+    """
+    enabled = getattr(config, "AGGRESSIVE_FROM_TICKS", True)
+    if isinstance(enabled, str):
+        enabled = enabled.strip().lower() in {"1", "true", "yes", "on"}
+    if not bool(enabled):
+        return 0
+    accepted = 0
+    if now_epoch is None:
+        now_epoch = time.time()
+    try:
+        now_epoch = float(now_epoch)
+        if not np.isfinite(now_epoch):
+            return 0
+    except (TypeError, ValueError, OverflowError):
+        return 0
+    try:
+        ticks = list(tick_data or [])[-5000:]
+    except TypeError:
+        return 0
+    for tick in ticks:
+        if not _is_fresh_direct_trade_tick(tick, now_epoch=now_epoch):
+            continue
+        try:
+            l3.add_tick_as_aggressive(float(tick.get("price", 0) or 0),
+                                      float(tick.get("volume", 0) or 0),
+                                      str(tick.get("side", "")).upper())
+            accepted += 1
+        except (TypeError, ValueError, OverflowError):
+            continue
+    return accepted
+
+
+def _market_event_epoch(value: Any) -> Optional[float]:
+    """Parse event-time values used by live, replay, and vendor MBO rows."""
+    if value is None or isinstance(value, (bool, np.bool_)):
+        return None
+    try:
+        if isinstance(value, datetime):
+            stamp = value
+            if stamp.tzinfo is None:
+                stamp = stamp.replace(tzinfo=timezone.utc)
+            epoch = float(stamp.timestamp())
+        elif isinstance(value, (int, float, np.integer, np.floating)):
+            epoch = float(value)
+            if epoch >= 1e17:
+                epoch /= 1e9
+            elif epoch >= 1e14:
+                epoch /= 1e6
+            elif epoch >= 1e11:
+                epoch /= 1e3
+        else:
+            raw = str(value).strip()
+            try:
+                stamp = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+                if stamp.tzinfo is None:
+                    stamp = stamp.replace(tzinfo=timezone.utc)
+                epoch = float(stamp.timestamp())
+            except (TypeError, ValueError, OverflowError, OSError):
+                epoch = float(raw)
+                if epoch >= 1e17:
+                    epoch /= 1e9
+                elif epoch >= 1e14:
+                    epoch /= 1e6
+                elif epoch >= 1e11:
+                    epoch /= 1e3
+        return epoch if np.isfinite(epoch) and epoch > 0 else None
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
+
+
+def _fresh_l3_order_events(market_data: Dict[str, Any],
+                           now_epoch: Optional[float] = None) -> List[Dict[str, Any]]:
+    """Select timestamped, current L3 events; keep synthetic demo data labeled.
+
+    Live/replay events without a source timestamp, from the future, or outside
+    the configured stale-data window cannot contribute to observed L3 flow.
+    Synthetic demo order events are retained for offline demonstrations only.
+    """
+    raw_events = market_data.get("order_events") or []
+    if not isinstance(raw_events, (list, tuple)):
+        return []
+    quality = market_data.get("data_quality") or {}
+    if isinstance(quality, dict) and str(quality.get("level3", "")).lower() == "synthetic":
+        return [event for event in raw_events if isinstance(event, dict)]
+    try:
+        if isinstance(now_epoch, bool):
+            return []
+        current = time.time() if now_epoch is None else float(now_epoch)
+        max_age_raw = getattr(config, "STALE_DATA_SECONDS", 300.0)
+        if isinstance(max_age_raw, bool):
+            return []
+        max_age = float(max_age_raw)
+        if not np.isfinite(current) or not np.isfinite(max_age) or max_age <= 0:
+            return []
+    except (TypeError, ValueError, OverflowError):
+        return []
+
+    trusted = []
+    for event in raw_events:
+        if not isinstance(event, dict):
+            continue
+        if event.get("timestamp_is_source") is False or event.get("has_source_timestamp") is False:
+            continue
+        if str(event.get("side", "")).upper() not in {
+                "BUY", "SELL", "BID", "ASK", "B", "S", "A"}:
+            continue
+        timestamp_source = str(event.get("timestamp_source", "")).lower()
+        if timestamp_source in {"receive", "receive_time", "local",
+                                "local_receive", "local_receive_time"}:
+            continue
+        event_epoch = _market_event_epoch(event.get("timestamp") or event.get("time"))
+        if event_epoch is None:
+            continue
+        age = current - event_epoch
+        if np.isfinite(age) and 0.0 <= age <= max_age:
+            trusted.append(event)
+    return trusted
+
+
+def _snapshot_data_quality(market_data: Dict[str, Any],
+                           tick_data: List[Dict[str, Any]],
+                           now_epoch: Optional[float] = None) -> Dict[str, str]:
+    """Normalize feed quality labels, keeping tape prints distinct from L3."""
+    quality = market_data.get("data_quality") or {}
+    quality = dict(quality) if isinstance(quality, dict) else {}
+    if str(quality.get("quote", "")).lower() == "valid":
+        raw_spread = market_data.get("spread_pct")
+        if raw_spread is None:
+            quality["quote"] = "spread_unknown"
+        else:
+            try:
+                if isinstance(raw_spread, bool):
+                    raise ValueError("boolean spread")
+                spread = float(raw_spread)
+                if not np.isfinite(spread) or spread <= 0:
+                    raise ValueError("invalid spread")
+            except (TypeError, ValueError, OverflowError):
+                quality["quote"] = "invalid_spread"
+
+    try:
+        ticks = list(tick_data or [])
+    except TypeError:
+        ticks = []
+    direct_ticks = sum(1 for tick in ticks
+                       if _is_fresh_direct_trade_tick(tick, now_epoch=now_epoch))
+    raw_events = market_data.get("order_events") or []
+    raw_events = raw_events if isinstance(raw_events, (list, tuple)) else []
+    synthetic_l3 = str(quality.get("level3", "")).lower() == "synthetic"
+    events = _fresh_l3_order_events(market_data, now_epoch=now_epoch)
+    if synthetic_l3:
+        quality["level3_events"] = "synthetic"
+        quality["l3_aggressive_flow"] = "synthetic"
+        quality["l3_aggr_limit"] = "synthetic"
+        return {str(key): str(value) for key, value in quality.items()}
+    if events:
+        quality["level3"] = "available"
+        quality["level3_events"] = "fresh_window"
+    elif raw_events:
+        quality["level3"] = "stale_or_unverifiable"
+        quality["level3_events"] = "stale_or_unverifiable"
+    else:
+        quality["level3"] = "unavailable"
+        quality["level3_events"] = "unavailable"
+    valid_sides = {"BUY", "SELL", "BID", "ASK"}
+    mbo_market = any(
+        event.get("is_market_order") is True and
+        str(event.get("side", "")).upper() in valid_sides
+        for event in events if isinstance(event, dict))
+    passive_events = any(
+        str(event.get("type", "")).upper() in
+        {"NEW", "ADD", "OPEN", "BID_NEW", "ASK_NEW"} and
+        str(event.get("side", "")).upper() in valid_sides
+        for event in events if isinstance(event, dict))
+    if mbo_market:
+        quality["l3_aggressive_flow"] = "partial_mbo_market_order_events"
+    elif direct_ticks:
+        quality["l3_aggressive_flow"] = "direct_trade_prints_only"
+    else:
+        quality["l3_aggressive_flow"] = "unavailable"
+    if mbo_market and passive_events:
+        quality["l3_aggr_limit"] = "partial_mbo_tags"
+    elif mbo_market:
+        quality["l3_aggr_limit"] = "market_order_events_only"
+    elif passive_events:
+        quality["l3_aggr_limit"] = "passive_order_events_only"
+    else:
+        quality["l3_aggr_limit"] = "not_emitted"
+    return {str(key): str(value) for key, value in quality.items()}
+
+
+def _save_book_state(bids: Dict[float, float], asks: Dict[float, float],
+                     timestamp: Optional[datetime] = None,
+                     instrument: Optional[str] = None) -> None:
     try:
         path = _book_state_file()
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({"bids": {str(k): v for k, v in bids.items()},
-                                    "asks": {str(k): v for k, v in asks.items()}}),
+                                    "asks": {str(k): v for k, v in asks.items()},
+                                    "timestamp": timestamp.isoformat()
+                                    if timestamp else None,
+                                    "instrument": instrument}),
                         encoding="utf-8")
     except Exception:
         pass
@@ -4235,29 +4898,16 @@ def analyze_market(market_data: Dict[str, Any],
                      f"window fills")
 
     # ---- Level 2 depth analytics (OFI / microprice / imbalance / absorption) -
-    # Uses a PERSISTENT analyzer so OFI and absorption have a previous book to
-    # compare against (a fresh analyzer each cycle would always see OFI == 0).
+    # Untrusted, stale, crossed or misaligned snapshots contribute no L2 votes;
+    # continuity is reset so recovery cannot create a fabricated OFI jump.
     l2 = _get_persistent_l2()
-    for upd in market_data.get("book_updates") or []:
-        l2.update(upd.get("bids"), upd.get("asks"))
-    bid_depth = market_data.get("bid_depth") or {}
-    ask_depth = market_data.get("ask_depth") or {}
-    book = market_data.get("order_book")
-    if (not bid_depth or not ask_depth) and book:
-        bid_depth = bid_depth or dict(book.get("bids", []))
-        ask_depth = ask_depth or dict(book.get("asks", []))
-    if bid_depth or ask_depth:
-        l2.update(bid_depth, ask_depth)      # final snapshot (also feeds OFI)
-        _save_book_state(bid_depth, ask_depth)
-    l2_metrics = l2.summary(bid_depth, ask_depth)
-    # 26j/D4: absorption_net is a RUNNING TOTAL on a persistent analyzer - two events
-    # pinned the vote at full strength for the rest of the session. Clear it once this
-    # cycle has read it, so the number means "this cycle" and can be graded honestly.
-    try:
-        l2.absorption_events = 0
-        l2.absorption_net = 0
-    except Exception:
-        pass
+    bid_depth, ask_depth, l2_metrics, l2_ok, l2_reason = _l2_metrics_for(
+        market_data, l2, now=now)
+    book = ({"bids": sorted(bid_depth.items(), key=lambda item: -item[0]),
+             "asks": sorted(ask_depth.items(), key=lambda item: item[0])}
+            if l2_ok else {})
+    if l2_reason:
+        notes.append(f"L2 analytics/continuity: {l2_reason}")
 
     # ---- order flow (ticks) --------------------------------------------------
     order_flow = OrderFlowAnalyzer().analyze_tick_data(
@@ -4276,10 +4926,14 @@ def analyze_market(market_data: Dict[str, Any],
     l3 = Level3OrderBookAnalyzer(large_size=float(
         getattr(config, "L3_LARGE_ORDER_LOTS",
                 getattr(config, "L3_WHALE_THRESHOLD", 100.0))))
-    for ev in market_data.get("order_events") or []:
+    for ev in _fresh_l3_order_events(
+            market_data, now_epoch=_datetime_epoch_utc(now)):
         l3.process_order_event(ev)
     if book:
         l3.update_order_book(book.get("bids", []), book.get("asks", []))
+    _feed_direct_trade_ticks(l3, tick_data,
+                             now_epoch=_datetime_epoch_utc(now))
+    level3 = l3.analyze()
 
     # ---- 26o: THE SIGNAL TEAM -------------------------------------------------
     # SIGNAL does not vote. It answers "where are the targets?" and hands back a map.
@@ -4295,19 +4949,6 @@ def analyze_market(market_data: Dict[str, Any],
             notes.append(_describe_map(_signal_map))
     except Exception as _sm_err:
         notes.append(f"signal map unavailable: {type(_sm_err).__name__}")
-
-    # M1: Feed tick_data direct side into L3 aggressive counters (BookMap direct Buy/Sell)
-    try:
-        aggressive_from_ticks = bool(getattr(config, "AGGRESSIVE_FROM_TICKS", True))
-        if aggressive_from_ticks:
-            for t in tick_data[-5000:]:  # last 5k ticks for performance
-                side = t.get("side")
-                if side:
-                    l3.add_tick_as_aggressive(float(t.get("price", 0) or 0), float(t.get("volume", 0) or 0), side)
-    except Exception as e:
-        notes.append(f"L3 tick ingest error: {e}")
-
-    level3 = l3.analyze()
 
     # M1: If L2 absorption zero but L3 has wall hits, carry over
     if level3.iceberg_events > 0:
@@ -4351,7 +4992,12 @@ def analyze_market(market_data: Dict[str, Any],
     if len(close) >= 5:
         for tf, tf_dir in _derive_mtf_from_m1(open_, high, low, close, vol).items():
             mtf_trends.setdefault(tf, tf_dir)
-    spread_pct = float(market_data.get("spread_pct") or 0.0)
+    try:
+        spread_pct = float(market_data.get("spread_pct") or 0.0)
+        if not np.isfinite(spread_pct) or spread_pct < 0:
+            spread_pct = 0.0
+    except (TypeError, ValueError, OverflowError):
+        spread_pct = 0.0
     if spread_pct > 0:
         notes.append("spread %.3f%%" % spread_pct)
 
@@ -4823,6 +5469,13 @@ def analyze_market(market_data: Dict[str, Any],
     except Exception as _ec_err:
         notes.append(f"escort unavailable: {type(_ec_err).__name__}: {_ec_err}")
 
+    _snapshot_quality = _snapshot_data_quality(
+        market_data, tick_data, now_epoch=_datetime_epoch_utc(now))
+    if not l2_ok:
+        _snapshot_quality["level2"] = "suppressed"
+    elif l2_reason:
+        _snapshot_quality["level2"] = "available_continuity_reset"
+
     snapshot = MarketSnapshot(
         judge_votes=judge_panel,
         timestamp=now, price=price, bid=bid, ask=ask, volume=volume,
@@ -4846,7 +5499,7 @@ def analyze_market(market_data: Dict[str, Any],
         data_market=str(market_data.get("data_market") or ""),
         trade_market=str(market_data.get("trade_market") or ""),
         notes=notes,
-        data_quality=dict(market_data.get("data_quality") or {}))
+        data_quality=_snapshot_quality)
 
     logger.info("analyze_market() -> %s (strength=%s, confidence=%s, news=%s)",
                 direction, strength, confidence, news_state)
@@ -4915,6 +5568,20 @@ def format_snapshot(snapshot: MarketSnapshot) -> str:
     data_symbol = str(snapshot.data_symbol or "").upper()
     data_label = "MT5 CFD" if data_market == "XAUUSD" or data_symbol.startswith("XAU") else "futures feed"
     quality = snapshot.data_quality or {}
+    quote_quality = str(quality.get("quote", "unknown")).lower()
+    try:
+        _snapshot_spread = float(snapshot.spread_pct)
+        if not np.isfinite(_snapshot_spread) or _snapshot_spread <= 0:
+            _snapshot_spread = None
+    except (TypeError, ValueError, OverflowError):
+        _snapshot_spread = None
+    if _snapshot_spread is None:
+        spread_display = f"n/a ({quote_quality})"
+    elif quote_quality == "valid":
+        spread_display = f"{_snapshot_spread:.3f}%"
+    else:
+        spread_display = (f"{_snapshot_spread:.3f}% "
+                          f"(untrusted: {quote_quality})")
 
     lines = [
         "=" * 72,
@@ -4927,10 +5594,13 @@ def format_snapshot(snapshot: MarketSnapshot) -> str:
         f"Analysis price ({snapshot.data_symbol or 'data'}): {snapshot.price:,.2f}   "
         f"Bid: {snapshot.bid:,.2f}   Ask: {snapshot.ask:,.2f}   "
         f"Volume: {snapshot.volume:,.0f}   Regime: {snapshot.regime}",
-        f"Data quality: L2={quality.get('level2', 'unknown')}   "
+        f"Data quality: quote={quality.get('quote', 'unknown')}   "
+        f"L2={quality.get('level2', 'unknown')}   "
         f"trade prints={quality.get('trade_prints', 'unknown')}   "
         f"order flow={quality.get('order_flow', 'unknown')}   "
-        f"L3={quality.get('level3', 'unknown')}",
+        f"L3={quality.get('level3', 'unknown')}   "
+        f"L3 aggressor={quality.get('l3_aggressive_flow', 'unknown')}   "
+        f"l3_aggr_limit={quality.get('l3_aggr_limit', 'unknown')}",
         "",
         "--- TREND ---",
         f"  SMA 9/20/50      : {t.sma_9:,.2f} / {t.sma_20:,.2f} / {t.sma_50:,.2f}",
@@ -4964,9 +5634,11 @@ def format_snapshot(snapshot: MarketSnapshot) -> str:
         f"  Buying levels: {len(f.buying_levels)}   Selling levels: {len(f.selling_levels)}",
         "",
         "--- LEVEL 3 (order events) ---",
-        f"  Imbalance: {l3.order_book_imbalance:+.3f}   Mkt-aggr(tickwin): {l3.market_orders} "
-        f"  Limit(events): {l3.limit_orders}",
-        f"  Aggressive buys/sells: {l3.aggressive_buys}/{l3.aggressive_sells} "
+        f"  Imbalance: {l3.order_book_imbalance:+.3f}   "
+        f"Aggressive events/explicit prints: {l3.market_orders}   "
+        f"Limit events: {l3.limit_orders}",
+        f"  Aggressive buys/sells (explicit source only): "
+        f"{l3.aggressive_buys}/{l3.aggressive_sells} "
         f"(flow ratio {l3.aggressive_flow_ratio:.2f})",
         f"  OFI (L3): {l3.ofi:+,.0f}   Streaks B/S: {l3.buy_streak}/{l3.sell_streak}",
         f"  Large order events: {l3.large_order_events}   Icebergs: {l3.iceberg_events}",
@@ -4997,7 +5669,7 @@ def format_snapshot(snapshot: MarketSnapshot) -> str:
         f"  >>> {snapshot.signal_direction}   strength={snapshot.signal_strength:.1f} "
         f"  confidence={snapshot.confidence:.1f}   divergence={snapshot.divergence:+.0f}",
         f"  MTF align: {' '.join(f'{k}:{v}' for k, v in sorted(snapshot.mtf_trends.items())) or 'n/a'}   "
-        f"spread: {snapshot.spread_pct:.3f}%",
+        f"spread: {spread_display}",
         (f"  Zones: support {snapshot.nearest_support:.2f} | resistance "
          f"{snapshot.nearest_resistance:.2f}") if snapshot.nearest_resistance else
         f"  Zones: support {snapshot.nearest_support:.2f} | resistance none",

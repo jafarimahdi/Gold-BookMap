@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# preflight.sh -- "do I actually have everything, and is it the right version?"
+# LEGACY AUDIT-KIT CHECK: not the current trading-readiness validator.
+# Current local readiness command: python main.py --doctor
+# No .env values are prescribed here; never change thresholds/caps to satisfy this script.
+# preflight.sh -- historical evidence/audit-file checks only.
 # Run from the project folder:   bash preflight.sh [YYYY-MM-DD]
 # Read-only. It changes nothing. Paste the whole output back to me if anything is [MISSING]/[DIFFERENT].
 
@@ -62,53 +65,26 @@ if [ -f data/snapshots_history.jsonl ]; then
   [ "$N" -gt 0 ] && P "diary already contains judge_votes in $N lines" || W "diary has no judge_votes field -> test 9 runs in retro-parse mode"
 fi
 
-# ---------- 3. configuration ---------------------------------------------
-echo; echo "--- 3. .env (ls never shows it, so it needs its own check)"
+# ---------- 3. configuration presence only (values are not prescribed) ----
+echo; echo "--- 3. .env presence (values hidden; no recommended numbers)"
 if [ -f .env ]; then
-  P ".env exists ($(stat -c %s .env) bytes)"
-  for kv in "BOOKMAP_WINDOW_SECONDS=10800" "BOOKMAP_MAX_DEPTH_LEVELS=20" \
-            "CONFIDENCE_THRESHOLD=50" "AI_MIN_SIGNAL_STRENGTH=6" "V6_CFD_SPREAD_MAX=0.50" \
-            "TRADING_ENABLED=1" "BUDAPEST_START=08:00" "BUDAPEST_END=23:00" "DATA_SOURCE=bookmapbridge"; do
-    k="${kv%%=*}"
+  P ".env exists (contents are not printed or changed)"
+  for k in DATA_SOURCE EXECUTION_MODE TRADING_ENABLED ALLOW_LIVE_TRADING CONFIDENCE_THRESHOLD AI_MAX_CALLS_PER_DAY BOOKMAP_BRIDGE_FILE; do
     if grep -q "^${k}=" .env; then
-      v=$(grep "^${k}=" .env | tail -1 | cut -d= -f2 | tr -d ' \r')
-      [ "$v" = "${kv#*=}" ] && P "  $k = $v" || D "  $k = $v   (expected ${kv#*=})"
+      P "  $k is explicitly set (value hidden)"
     else
-      F "  $k not set in .env"
+      W "  $k is not explicit; config.py may use its default"
     fi
   done
-  for p in BOOKMAP_BRIDGE_FILE BOOKMAP_MBO_FILE; do
-    line=$(grep -m1 "^${p}=" .env || true)
-    if [ -n "$line" ]; then
-      val=$(echo "$line" | cut -d= -f2- | tr -d ' \r')
-      slash=$(printf '%s' "$val" | sed -e 's#\\#/#g' -e 's#^\([A-Za-z]\):#/\1#')
-      if [ -f "$val" ]; then P "  $p -> $val exists"
-      elif [ -f "$slash" ]; then P "  $p -> $slash exists (windows path read as unix)"
-      else D "  $p -> $val NOT FOUND (this alone kills every signal)"; fi
-    else
-      F "  $p not set in .env - the robot will not know where BookMap writes"
-    fi
-  done
-  GK=$(grep "^GEMINI_API_KEY=" .env | tail -1 | cut -d= -f2 | tr -d ' \r')
-  CAP=$(grep "^AI_MAX_CALLS_PER_DAY=" .env | tail -1 | cut -d= -f2 | tr -d ' \r')
-  if [ -z "$GK" ]; then
-    F "  GEMINI_API_KEY is EMPTY -> STEP 3 AI cannot run (0 AI calls all day)"
+  if grep -q "^GEMINI_API_KEY=.[^[:space:]]" .env; then
+    P "  Gemini key appears present (value hidden)"
   else
-    P "  GEMINI_API_KEY set (${#GK} chars)"
-    if [ "$CAP" = "0" ]; then
-      W "  AI_MAX_CALLS_PER_DAY=0 -> UNLIMITED Gemini calls; with a real key set it to 2000"
-    else
-      P "  AI quota guard active (AI_MAX_CALLS_PER_DAY=${CAP:-2000 default})"
-    fi
-  fi
-  if [ -n "$GK" ] && [ "$CAP" = "0" ]; then
-    grep -q "_judge_panel_from_notes" main.py 2>/dev/null \
-      || W "  key is live but main.py is P3 -> diary has no judge_votes; apply v7.1 before the AI day"
+    W "  Gemini key is absent or empty; AI decisions may be unavailable"
   fi
   DUP=$(grep -E "^[A-Z0-9_]+=" .env | cut -d= -f1 | sort | uniq -d | tr '\n' ' ')
-  if [ -n "$DUP" ]; then W "  .env has DUPLICATE keys (last wins, same as config.py): $DUP"; else P "  no duplicate keys in .env"; fi
+  if [ -n "$DUP" ]; then W "  duplicate .env key names detected: $DUP (last copy wins)"; else P "  no duplicate .env key names"; fi
 else
-  F ".env MISSING in this folder -> everything falls back to old defaults (conf 70, AI gate 10, spread 0.60)"
+  W ".env not found; config.py defaults may be used (this check does not prescribe values)"
 fi
 
 # ---------- 4. the evidence for that day ---------------------------------

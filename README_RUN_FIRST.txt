@@ -1,3 +1,8 @@
+LEGACY AUDIT-KIT NOTES — NOT THE CURRENT APP INSTALL GUIDE
+Current operator steps: see QUICK_START.md. This file contains dated audit-kit
+instructions and old value examples. Do not change .env or run old patch steps
+based on this file; use it only for historical audit-report details.
+
 GOLD-BOOKMAP AUDIT KIT -- double-click, read the day, copy it to chat
 ======================================================================
 

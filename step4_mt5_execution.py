@@ -70,17 +70,25 @@ class MT5Executor:
         self.magic = 234000  # unique id for this EA's orders
 
     # ------------------------------------------------------------------ #
-    def execute(self, decision, snapshot) -> ExecutionResult:
-        """Execute `decision` (from Step 3) using the Step 2 `snapshot`.
+    def execute(self, decision, snapshot, *,
+                execution_authorized: bool = False) -> ExecutionResult:
+        """Execute a Step-3 decision only with an explicit pipeline permit.
 
-        This method is deliberately defensive because tests, integrations and
-        future execution paths may call it directly rather than through
-        ``main._safety_gates``. The master switch and basic snapshot validity
-        must therefore be enforced here too.
+        The permit is default-deny so direct callers cannot bypass the pipeline's
+        session/feed/risk/overtrade checks. The existing executor gates remain
+        independent defense in depth after authorization.
         """
         now = datetime.now(timezone.utc)
 
-        # --- gate 0: master kill switch ----------------------------------------
+        # --- gate 0: non-overridable pipeline authorization --------------------
+        if execution_authorized is not True:
+            logger.info("STEP 4: SKIPPED — pipeline did not authorize a new entry.")
+            return ExecutionResult(
+                status="SKIPPED",
+                reason="pipeline did not authorize a new entry",
+                symbol=self.symbol, timestamp=now)
+
+        # --- gate 0a: master kill switch ---------------------------------------
         # Do not rely only on main.py: a direct caller must never be able to
         # bypass TRADING_ENABLED=0 and reach mt5.order_send().
         if not getattr(config, "TRADING_ENABLED", True):
@@ -428,6 +436,69 @@ class MT5Executor:
                     f"available {free_margin:.2f}")
         return None
 
+    def _broker_quote_check(self, tick, now_epoch: Optional[float] = None):
+        """Validate the live MT5 broker quote and apply the configured spread cap.
+
+        Missing, non-finite, locked/crossed, untimestamped, future or stale
+        quotes fail closed even when MAX_SPREAD_PCT=0 disables the width cap.
+        Returns (ok, reason, spread_pct, quote_age_seconds).
+        """
+        try:
+            raw_bid = getattr(tick, "bid", None)
+            raw_ask = getattr(tick, "ask", None)
+            if isinstance(raw_bid, bool) or isinstance(raw_ask, bool):
+                raise ValueError("boolean quote")
+            bid = float(raw_bid)
+            ask = float(raw_ask)
+        except (TypeError, ValueError, OverflowError):
+            return False, "broker quote bid/ask missing or invalid", None, None
+        if not math.isfinite(bid) or not math.isfinite(ask) or bid <= 0 or ask <= 0:
+            return False, "broker quote bid/ask missing or invalid", None, None
+        if ask <= bid:
+            return False, f"broker quote locked/crossed (bid={bid}, ask={ask})", None, None
+
+        try:
+            time_msc = int(getattr(tick, "time_msc", 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            time_msc = 0
+        try:
+            time_seconds = float(getattr(tick, "time", 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            time_seconds = 0.0
+        quote_epoch = (time_msc / 1000.0 if time_msc > 0 else time_seconds)
+        if not math.isfinite(quote_epoch) or quote_epoch <= 0:
+            return False, "broker quote timestamp unavailable", None, None
+        now_epoch = time.time() if now_epoch is None else float(now_epoch)
+        quote_age = now_epoch - quote_epoch
+        if not math.isfinite(quote_age) or quote_age < 0:
+            return False, "broker quote timestamp is future-dated/invalid", None, None
+        try:
+            max_age = float(getattr(config, "STALE_DATA_SECONDS", 300.0))
+            if not math.isfinite(max_age) or max_age <= 0:
+                raise ValueError("invalid stale-data threshold")
+        except (TypeError, ValueError, OverflowError):
+            return False, "invalid STALE_DATA_SECONDS configuration", None, quote_age
+        if quote_age > max_age:
+            return (False, f"broker quote stale ({quote_age:.3f}s > "
+                    f"{max_age:.3f}s)", None, quote_age)
+
+        spread_pct = (ask - bid) / bid * 100.0
+        if not math.isfinite(spread_pct) or spread_pct < 0:
+            return False, "broker spread invalid", None, quote_age
+        try:
+            raw_spread_limit = getattr(config, "MAX_SPREAD_PCT", 0.0)
+            if isinstance(raw_spread_limit, bool):
+                raise ValueError("boolean max spread")
+            spread_limit = float(raw_spread_limit)
+            if not math.isfinite(spread_limit) or spread_limit < 0:
+                raise ValueError("invalid max spread")
+        except (TypeError, ValueError, OverflowError):
+            return False, "invalid MAX_SPREAD_PCT configuration", spread_pct, quote_age
+        if spread_limit > 0 and spread_pct > spread_limit:
+            return (False, f"broker spread too wide {spread_pct:.3f}% > "
+                    f"{spread_limit:.3f}%", spread_pct, quote_age)
+        return True, "ok", spread_pct, quote_age
+
     def _place_order(self, action: str, snapshot,
                      news_state: str,
                      ai_confidence: float = 0.0) -> ExecutionResult:
@@ -436,6 +507,16 @@ class MT5Executor:
         tick = mt5.symbol_info_tick(self.symbol)
         if tick is None:
             return ExecutionResult(status="ERROR", reason="no tick data",
+                                   symbol=self.symbol, timestamp=now)
+        broker_quote_ok, broker_quote_reason, broker_spread_pct, broker_quote_age = \
+            self._broker_quote_check(tick)
+        logger.info("STEP 4 broker quote: spread=%s age=%s status=%s",
+                    f"{broker_spread_pct:.4f}%" if broker_spread_pct is not None else "n/a",
+                    f"{broker_quote_age:.3f}s" if broker_quote_age is not None else "n/a",
+                    broker_quote_reason)
+        if not broker_quote_ok:
+            return ExecutionResult(status="DEFERRED",
+                                   reason=f"broker quote guard: {broker_quote_reason}",
                                    symbol=self.symbol, timestamp=now)
 
         is_buy = action == "BUY"
@@ -507,18 +588,8 @@ class MT5Executor:
             self._last_basis = 0.0
             self._last_futures = 0.0
 
-        # CFD spread guard: main.py's spread gate watches the DATA feed
-        # (futures bid/ask); this checks the actual broker spread on the trade
-        # symbol right before ordering. A wide spread is an instant edge loss.
-        if config.MAX_SPREAD_PCT > 0 and tick.bid > 0 and tick.ask > 0:
-            cfd_spread_pct = (tick.ask - tick.bid) / tick.bid * 100.0
-            if cfd_spread_pct > config.MAX_SPREAD_PCT:
-                reason = (f"CFD spread too wide: {cfd_spread_pct:.3f}% > "
-                          f"{config.MAX_SPREAD_PCT:.3f}% — DEFERRED")
-                logger.warning("STEP 4: %s", reason)
-                return ExecutionResult(status="DEFERRED", reason=reason,
-                                       symbol=self.symbol, price=price,
-                                       timestamp=now)
+        # Broker quote/spread was validated above from a fresh MT5 tick. The
+        # independent data-feed spread guard remains in main._safety_gates.
 
         # v4.4 MEMORY GATE: recent same-direction loss and/or a losing day
         # raise the entry bar. Fresh robot, no losses, winning day -> this

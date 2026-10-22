@@ -7,7 +7,9 @@ Entry point — runs the complete 5-step gold trading pipeline.
           -> STEP 3 (AI) -> STEP 4 (execution) -> STEP 5 (monitoring)
 
 Usage:
-    python3 main.py                 # one full pass (demo data by default)
+    python3 main.py --doctor       # local read-only readiness checks
+    python3 main.py --no-new-entries [--loop]  # analyze/manage, but open no new entries
+    python3 main.py                 # one full pass (can open a demo entry if all gates pass)
     python3 main.py --loop          # continuous loop (Step 5 run_loop)
 
 Each step is isolated in try/except so a failure in one never takes down
@@ -18,8 +20,10 @@ from __future__ import annotations
 
 import argparse
 import csv
+import importlib.util
 import json
 import logging
+import math
 import os
 import re
 import sys
@@ -281,14 +285,389 @@ def _entries_paused() -> bool:
     return paused
 
 
-def _safety_gates(data) -> tuple:
-    """Return (allowed: bool, reason: str) for the pre-execution safety gates.
+def _preflight_data_reason(data, elapsed_since_acquire_seconds: float = 0.0):
+    """Return a fail-closed feed/quote/spread reason, or None when valid.
 
-    Order of checks:
-      0. master switch (TRADING_ENABLED=0 -> analyse only)
-      1. trading session (weekend / holiday / daily break)
-      2. stale feed (Rithmic silent for too long)
-      3. risk circuit-breaker (daily loss / max drawdown)
+    The data age captured by a provider is extended by monotonic pipeline time
+    before Step 4. This catches feeds that became stale during analysis/AI.
+    Demo/replay keep their historical synthetic-data behavior; live providers
+    must explicitly identify a valid quote and numeric spread.
+    """
+    if data is None or not isinstance(data, dict):
+        return "no market data available"
+    source = str(getattr(config, "DATA_SOURCE", "unknown") or "unknown").strip().lower()
+    maximum = getattr(config, "MAX_SPREAD_PCT", 0.05)
+    try:
+        if isinstance(maximum, bool):
+            return "invalid MAX_SPREAD_PCT configuration; no trading"
+        maximum = float(maximum)
+        if not math.isfinite(maximum) or maximum < 0:
+            return "invalid MAX_SPREAD_PCT configuration; no trading"
+    except (TypeError, ValueError, OverflowError):
+        return "invalid MAX_SPREAD_PCT configuration; no trading"
+
+    spread_raw = data.get("spread_pct")
+    spread = None
+    if isinstance(spread_raw, bool):
+        return "invalid spread value; no trading"
+    if spread_raw is not None:
+        try:
+            spread = float(spread_raw)
+            if not math.isfinite(spread) or spread < 0:
+                return "invalid spread value; no trading"
+        except (TypeError, ValueError, OverflowError):
+            return "invalid spread value; no trading"
+
+    if source in ("demo", "replay"):
+        if spread is not None and maximum > 0 and spread > maximum:
+            return f"data spread too wide {spread:.3f}% > {maximum:.3f}% — no trading"
+        return None
+
+    if data.get("has_data") is not True:
+        return "live feed empty/invalid; no trading"
+    try:
+        raw_recorded_age = data.get("last_data_age_seconds")
+        if isinstance(raw_recorded_age, bool):
+            return "live feed age unknown/invalid; no trading"
+        recorded_age = float(raw_recorded_age)
+        if isinstance(elapsed_since_acquire_seconds, bool):
+            return "live feed age unknown/invalid; no trading"
+        elapsed = float(elapsed_since_acquire_seconds or 0.0)
+        if (not math.isfinite(recorded_age) or recorded_age < 0 or
+                not math.isfinite(elapsed) or elapsed < 0):
+            return "live feed age unknown/invalid; no trading"
+    except (TypeError, ValueError, OverflowError):
+        return "live feed age unknown/invalid; no trading"
+    effective_age = recorded_age + elapsed
+    if not math.isfinite(effective_age):
+        return "live feed age unknown/invalid; no trading"
+    try:
+        raw_max_age = getattr(config, "STALE_DATA_SECONDS", 300.0)
+        if isinstance(raw_max_age, bool):
+            return "invalid STALE_DATA_SECONDS configuration; no trading"
+        max_age = float(raw_max_age)
+        if not math.isfinite(max_age) or max_age <= 0:
+            return "invalid STALE_DATA_SECONDS configuration; no trading"
+    except (TypeError, ValueError, OverflowError):
+        return "invalid STALE_DATA_SECONDS configuration; no trading"
+    data["decision_time_data_age_seconds"] = effective_age
+    _record_latency("feed age at pre-execution", effective_age * 1000.0)
+    if effective_age > max_age:
+        return (f"live feed stale at decision: {effective_age:.3f}s "
+                f"> {max_age:.3f}s — no trading")
+
+    quality = data.get("data_quality") or {}
+    if not isinstance(quality, dict):
+        return "live quote quality metadata invalid; no trading"
+    if str(quality.get("quote", "")).lower() != "valid":
+        return (f"live quote not validated ({quality.get('quote', 'unknown')}); "
+                "no trading")
+    try:
+        raw_bid, raw_ask = data.get("bid"), data.get("ask")
+        if isinstance(raw_bid, bool) or isinstance(raw_ask, bool):
+            raise ValueError("boolean quote")
+        bid, ask = float(raw_bid), float(raw_ask)
+        if (not math.isfinite(bid) or not math.isfinite(ask) or
+                bid <= 0 or ask <= 0):
+            return "live quote bid/ask missing or invalid; no trading"
+        if ask <= bid:
+            return "live quote locked/crossed; no trading"
+        if spread is not None and spread > 0:
+            quote_mid = (bid + ask) / 2.0
+            quote_spread = (ask - bid) / quote_mid * 100.0
+            if (not math.isfinite(quote_spread) or
+                    not math.isclose(spread, quote_spread,
+                                     rel_tol=1e-6, abs_tol=1e-8)):
+                return "live spread does not match bid/ask quote; no trading"
+    except (TypeError, ValueError, OverflowError):
+        return "live quote bid/ask missing or invalid; no trading"
+    try:
+        raw_quote_age = data.get("quote_age_seconds")
+        if isinstance(raw_quote_age, bool):
+            return "live quote age unknown/invalid; no trading"
+        quote_age = float(raw_quote_age)
+        if not math.isfinite(quote_age) or quote_age < 0:
+            return "live quote age unknown/invalid; no trading"
+    except (TypeError, ValueError, OverflowError):
+        return "live quote age unknown/invalid; no trading"
+    decision_quote_age = quote_age + elapsed
+    if not math.isfinite(decision_quote_age):
+        return "live quote age unknown/invalid; no trading"
+    data["decision_time_quote_age_seconds"] = decision_quote_age
+    _record_latency("quote age at pre-execution", decision_quote_age * 1000.0)
+    if decision_quote_age > max_age:
+        return (f"live quote stale at decision: {decision_quote_age:.3f}s "
+                f"> {max_age:.3f}s — no trading")
+
+    raw_depth_age = data.get("depth_age_seconds")
+    if raw_depth_age is not None:
+        try:
+            if isinstance(raw_depth_age, bool):
+                return "live L2 depth age unknown/invalid; no trading"
+            depth_age = float(raw_depth_age)
+            if not math.isfinite(depth_age) or depth_age < 0:
+                return "live L2 depth age unknown/invalid; no trading"
+        except (TypeError, ValueError, OverflowError):
+            return "live L2 depth age unknown/invalid; no trading"
+        decision_depth_age = depth_age + elapsed
+        if not math.isfinite(decision_depth_age):
+            return "live L2 depth age unknown/invalid; no trading"
+        data["decision_time_depth_age_seconds"] = decision_depth_age
+        _record_latency("depth age at pre-execution", decision_depth_age * 1000.0)
+        if decision_depth_age > max_age:
+            return (f"live L2 depth stale at decision: {decision_depth_age:.3f}s "
+                    f"> {max_age:.3f}s — no trading")
+    if spread is None or spread <= 0:
+        return "live spread unknown/invalid; no trading"
+    if maximum > 0 and spread > maximum:
+        return f"data spread too wide {spread:.3f}% > {maximum:.3f}% — no trading"
+
+    if source in {"bookmapbridge", "ninjabridge", "bookmap", "bmbridge",
+                  "bookmap_bridge", "ntbridge", "ninja"}:
+        l2_status = str(quality.get("level2", "unknown")).lower()
+        if l2_status != "validated":
+            return f"BookMap L2 not validated ({l2_status}); no trading"
+        if raw_depth_age is None:
+            return "BookMap L2 depth age unknown; no trading"
+        instrument_status = str(quality.get("instrument", "unknown")).lower()
+        if instrument_status != "matched":
+            if instrument_status in {"mismatch", "instrument_mismatch"}:
+                return "BookMap instrument mismatch; no trading"
+            return f"BookMap instrument not verified ({instrument_status}); no trading"
+        diagnostics = data.get("l2_diagnostics")
+        if not isinstance(diagnostics, dict):
+            return "BookMap L2 diagnostics unavailable; no trading"
+        if str(diagnostics.get("status", "")).lower() != "validated":
+            return "BookMap L2 diagnostics not validated; no trading"
+        if diagnostics.get("instrument_match") is not True:
+            return "BookMap L2 diagnostic instrument mismatch; no trading"
+        try:
+            diagnostic_bid = diagnostics.get("best_bid")
+            diagnostic_ask = diagnostics.get("best_ask")
+            if isinstance(diagnostic_bid, bool) or isinstance(diagnostic_ask, bool):
+                raise ValueError("boolean diagnostic quote")
+            diagnostic_bid = float(diagnostic_bid)
+            diagnostic_ask = float(diagnostic_ask)
+            if (not math.isfinite(diagnostic_bid) or
+                    not math.isfinite(diagnostic_ask) or
+                    not math.isclose(diagnostic_bid, bid, rel_tol=0.0, abs_tol=1e-9) or
+                    not math.isclose(diagnostic_ask, ask, rel_tol=0.0, abs_tol=1e-9)):
+                return "BookMap L2 quote does not match bid/ask; no trading"
+        except (TypeError, ValueError, OverflowError):
+            return "BookMap L2 quote diagnostics invalid; no trading"
+    return None
+
+
+def _market_quality_evidence(data, elapsed_since_acquire_seconds: float = 0.0,
+                             preflight_ok: Optional[bool] = None,
+                             preflight_reason: str = "") -> dict:
+    """Build a timestamped, read-only feed-quality receipt for shadow review."""
+    data = data if isinstance(data, dict) else {}
+    quality = data.get("data_quality") or {}
+    quality = quality if isinstance(quality, dict) else {}
+    try:
+        from step2_market_analysis import _snapshot_data_quality
+        quality = _snapshot_data_quality(data, data.get("tick_data") or [])
+    except Exception:
+        # Keep evidence capture resilient; raw provider metadata remains visible.
+        pass
+    try:
+        elapsed = float(elapsed_since_acquire_seconds or 0.0)
+        if not math.isfinite(elapsed) or elapsed < 0:
+            elapsed = None
+    except (TypeError, ValueError, OverflowError):
+        elapsed = None
+
+    def _age_at_decision(decision_key: str, age_key: str):
+        value = data.get(decision_key)
+        if value is None and elapsed is not None:
+            value = data.get(age_key)
+            if value is not None:
+                try:
+                    if isinstance(value, bool):
+                        return None
+                    value = float(value) + elapsed
+                except (TypeError, ValueError, OverflowError):
+                    return None
+        try:
+            if isinstance(value, bool):
+                return None
+            value = float(value)
+            return value if math.isfinite(value) and value >= 0 else None
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+    spread = data.get("spread_pct")
+    try:
+        if isinstance(spread, bool):
+            raise ValueError("boolean spread")
+        spread = float(spread) if spread is not None else None
+        if spread is not None and (not math.isfinite(spread) or spread < 0):
+            spread = "invalid"
+    except (TypeError, ValueError, OverflowError):
+        spread = "invalid" if data.get("spread_pct") is not None else None
+    quote_status = str(quality.get("quote", "unknown"))
+    if quote_status.lower() == "valid" and spread == "invalid":
+        quote_status = "invalid_spread"
+    elif quote_status.lower() == "valid" and spread is None:
+        quote_status = "spread_unknown"
+    elif quote_status.lower() == "valid" and spread <= 0:
+        quote_status = "invalid_spread"
+    if quote_status.lower() == "valid":
+        try:
+            raw_bid, raw_ask = data.get("bid"), data.get("ask")
+            if isinstance(raw_bid, bool) or isinstance(raw_ask, bool):
+                raise ValueError("boolean quote")
+            bid, ask = float(raw_bid), float(raw_ask)
+            if (not math.isfinite(bid) or not math.isfinite(ask) or
+                    bid <= 0 or ask <= 0):
+                quote_status = "invalid_quote"
+            elif ask <= bid:
+                quote_status = "crossed_quote"
+            elif spread is not None and isinstance(spread, (int, float)) and spread > 0:
+                quote_mid = (bid + ask) / 2.0
+                quote_spread = (ask - bid) / quote_mid * 100.0
+                if not math.isclose(spread, quote_spread,
+                                    rel_tol=1e-6, abs_tol=1e-8):
+                    quote_status = "spread_quote_mismatch"
+        except (TypeError, ValueError, OverflowError):
+            quote_status = "invalid_quote"
+    diagnostics = data.get("l2_diagnostics") or {}
+    if not isinstance(diagnostics, dict):
+        diagnostics = {"status": "invalid_metadata"}
+    warnings = data.get("feed_warnings") or []
+    if isinstance(warnings, str):
+        warnings = [warnings]
+    elif not isinstance(warnings, (list, tuple)):
+        warnings = [str(warnings)]
+    def _finite_number(value):
+        if isinstance(value, bool):
+            return None
+        try:
+            value = float(value)
+            return value if math.isfinite(value) else None
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+    return {
+        "captured_at": datetime.now(timezone.utc).isoformat(),
+        "data_source": str(getattr(config, "DATA_SOURCE", "unknown") or "unknown"),
+        "data_symbol": str(data.get("data_symbol") or data.get("symbol") or ""),
+        "trade_symbol": str(data.get("trade_symbol") or ""),
+        "price": _finite_number(data.get("price")),
+        "bid": _finite_number(data.get("bid")),
+        "ask": _finite_number(data.get("ask")),
+        "quote_timestamp": data.get("quote_timestamp"),
+        "depth_timestamp": data.get("depth_timestamp"),
+        "last_trade": _finite_number(data.get(
+            "last_trade", diagnostics.get("last_trade"))),
+        "last_trade_timestamp": data.get(
+            "last_trade_timestamp", diagnostics.get("last_trade_timestamp")),
+        "last_trade_age_seconds_at_decision": _age_at_decision(
+            "decision_time_last_trade_age_seconds", "last_trade_age_seconds"),
+        "last_order_event_timestamp": data.get("last_order_event_timestamp"),
+        "last_order_event_age_seconds_at_decision": _age_at_decision(
+            "decision_time_last_order_event_age_seconds",
+            "last_order_event_age_seconds"),
+        "quote_status": quote_status,
+        "spread_pct": spread,
+        "max_spread_pct": getattr(config, "MAX_SPREAD_PCT", None),
+        "feed_age_seconds_at_decision": _age_at_decision(
+            "decision_time_data_age_seconds", "last_data_age_seconds"),
+        "quote_age_seconds_at_decision": _age_at_decision(
+            "decision_time_quote_age_seconds", "quote_age_seconds"),
+        "depth_age_seconds_at_decision": _age_at_decision(
+            "decision_time_depth_age_seconds", "depth_age_seconds"),
+        "depth_age_seconds": data.get("depth_age_seconds"),
+        "tick_size": diagnostics.get("tick_size"),
+        "tick_value": diagnostics.get("tick_value"),
+        "price_units": diagnostics.get("price_units", "unknown"),
+        "tick_value_units": diagnostics.get("tick_value_units", "unknown"),
+        "depth_size_units": diagnostics.get("depth_size_units", "unknown"),
+        "timestamp_basis": diagnostics.get("timestamp_basis", "provider_unverified"),
+        "source_event_time_verified": diagnostics.get(
+            "source_event_time_verified"),
+        "level2_status": str(quality.get("level2", "unknown")),
+        "l2_diagnostics": dict(diagnostics),
+        "l3_capabilities": {
+            key: str(quality.get(key, "unknown"))
+            for key in ("level3", "level3_events", "l3_aggressive_flow",
+                        "l3_aggr_limit")
+        },
+        "feed_warnings": [str(item) for item in list(warnings)[:20]],
+        "safety_gate_status": ("PASS" if preflight_ok is True else
+                                "BLOCKED" if preflight_ok is False else "UNKNOWN"),
+        "safety_gate_reason": str(preflight_reason or ""),
+    }
+
+
+def _attach_quality_evidence_to_shadow_candidates(snapshot) -> None:
+    """Attach this cycle's receipt to every non-executable shadow candidate.
+
+    Step 3 evaluates candidates before the post-analysis safety gate, so the
+    first copy on the candidate may be empty or from the previous cycle. Refresh
+    it after preflight, before decision-journal serialization; authorization
+    and candidate eligibility fields are deliberately untouched.
+    """
+    if snapshot is None:
+        return
+    evidence = getattr(snapshot, "quality_evidence", None)
+    if not isinstance(evidence, dict) or not evidence:
+        return
+
+    def _attach(container):
+        if not isinstance(container, dict):
+            return
+        for candidate in container.values():
+            if isinstance(candidate, dict):
+                candidate["market_quality_evidence"] = dict(evidence)
+
+    _attach(getattr(snapshot, "shadow_candidates", None))
+    shot = getattr(snapshot, "shot", None)
+    if isinstance(shot, dict):
+        _attach(shot.get("shadow_candidates"))
+
+
+def _persist_market_quality_snapshot(snapshot) -> bool:
+    """Refresh the latest snapshot after its post-analysis quality receipt exists."""
+    if snapshot is None:
+        return False
+    temporary = None
+    try:
+        from step2_market_analysis import _json_safe, snapshot_to_json
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        destination = DATA_DIR / "market_snapshot.json"
+        temporary = destination.with_name(destination.name + ".quality.tmp")
+        temporary.write_text(snapshot_to_json(snapshot), encoding="utf-8")
+        os.replace(temporary, destination)
+
+        snapshot_timestamp = getattr(snapshot, "timestamp", None)
+        receipt = {
+            "snapshot_timestamp": snapshot_timestamp,
+            "quality_evidence": getattr(snapshot, "quality_evidence", {}) or {},
+            "shadow_candidates": getattr(snapshot, "shadow_candidates", {}) or {},
+        }
+        evidence_path = DATA_DIR / "market_quality_evidence.jsonl"
+        with evidence_path.open("a", encoding="utf-8") as evidence_file:
+            evidence_file.write(json.dumps(
+                _json_safe(receipt), sort_keys=True, separators=(",", ":")) + "\n")
+        return True
+    except Exception as exc:
+        logger.warning("market-quality snapshot persistence failed: %s", exc)
+        try:
+            if temporary is not None and temporary.exists():
+                temporary.unlink()
+        except OSError:
+            pass
+        return False
+
+
+def _safety_gates(data, elapsed_since_acquire_seconds: float = 0.0) -> tuple:
+    """Return (allowed: bool, reason: str) for pre-execution safety gates.
+
+    Live data must remain fresh through analysis, carry an explicit valid quote
+    and spread, and (for BookMap) have a validated L2 book. The separate MT5
+    broker-spread guard still runs immediately before order submission.
     """
     from session import is_market_open, describe_now
 
@@ -302,21 +681,11 @@ def _safety_gates(data) -> tuple:
         _record("SAFETY: SESSION", f"CLOSED — {describe_now()} — no trading")
         return False, f"market closed ({describe_now()})"
 
-    # 2) stale feed (only meaningful for live providers)
-    if config.DATA_SOURCE not in ("demo", "replay") and data is not None:
-        age = float(data.get("last_data_age_seconds", 0.0) or 0.0)
-        if not data.get("has_data") or age > config.STALE_DATA_SECONDS:
-            _record("SAFETY: FEED", f"STALE/EMPTY — age {age:.0f}s — no trading")
-            return False, f"no fresh data (age {age:.0f}s)"
-
-    # 2b) spread guard — brokers widen the spread at news/low liquidity;
-    #     trading into a wide spread is an instant loss of edge.
-    if data is not None:
-        spread = float(data.get("spread_pct") or 0.0)
-        if 0 < spread and config.MAX_SPREAD_PCT and spread > config.MAX_SPREAD_PCT:
-            _record("SAFETY: SPREAD", f"too wide {spread:.3f}% > "
-                    f"{config.MAX_SPREAD_PCT:.3f}% — no trading")
-            return False, f"spread too wide ({spread:.3f}%)"
+    # 2) live feed / quote / spread / L2 integrity
+    feed_reason = _preflight_data_reason(data, elapsed_since_acquire_seconds)
+    if feed_reason:
+        _record("SAFETY: FEED", feed_reason)
+        return False, feed_reason
 
     # 3) risk limits
     try:
@@ -332,12 +701,10 @@ def _safety_gates(data) -> tuple:
     try:
         if getattr(config, "RL_ENABLED", True):
             import trade_history as th
-            # Get current regime from snapshot if available? Here we only have data, not snapshot.
-            # For safety gates we check general loss streak (any regime)
             rl_res = th.check_loss_streak_regime("", within_hours=24.0)
             if rl_res.get("should_pause"):
                 _record("SAFETY: RL_PAUSE", f"BLOCKED — {rl_res.get('reason')}")
-                return False, rl_res.get('reason','RL pause: 4 losses streak')
+                return False, rl_res.get('reason', 'RL pause: 4 losses streak')
     except Exception as exc:
         logger.warning(f"RL check failed: {exc}")
 
@@ -352,7 +719,6 @@ def _safety_gates(data) -> tuple:
         logger.warning("Trade-guard check failed (proceeding): %s", exc)
 
     return True, "ok"
-
 
 _DECISION_LOG_FIELDS = [
     "timestamp", "symbol", "price", "signal_direction", "signal_strength",
@@ -919,6 +1285,8 @@ def _shooting_execution_gate(decision, snapshot):
                         "passive_route_candidate": dict(_passive_shadow)
                         if _passive_shadow_ok else None,
                         "plan_reason": _plan_reason,
+                        "market_quality_evidence": dict(
+                            getattr(snapshot, "quality_evidence", {}) or {}),
                         "execution_outcome": ("BLOCKED_SHADOW_ONLY" if _eligible
                                               else "NOT_AUTHORIZED_SHADOW_REJECTED"),
                     }
@@ -1021,9 +1389,27 @@ def _shooting_execution_gate(decision, snapshot):
     return True, "corridor open: plan GO + POWER agree -> python executor"
 
 
-def run_step4(decision, snapshot):
-    """Route execution to exactly one owner, after the Shooting/Power-v2 gate."""
+def run_step4(decision, snapshot, *, execution_authorized: bool = False,
+              authorization_reason: str = ""):
+    """Route a new entry only after a non-overridable pipeline authorization.
+
+    The explicit permit is separate from the Step-3 action: a HOLD can be
+    promoted by the configured POWER carry, so a safety-generated HOLD must
+    never be used as the only encoding of a failed hard gate. Direct callers
+    fail closed unless they deliberately pass the permit.
+    """
     from step4_mt5_execution import ExecutionResult, MT5Executor
+
+    if execution_authorized is not True:
+        reason = (str(authorization_reason or
+                      "hard safety gate did not authorize a new entry"))
+        result = ExecutionResult(
+            status="SKIPPED",
+            reason=f"new-entry authorization blocked: {reason}",
+            symbol=config.MT5_SYMBOL,
+            timestamp=datetime.now().astimezone())
+        _record("STEP 4  EXECUTION", f"{result.status} — {result.reason}")
+        return result
 
     mode = getattr(config, "EXECUTION_MODE", "none")
     allowed, gate_reason = _shooting_execution_gate(decision, snapshot)
@@ -1052,7 +1438,10 @@ def run_step4(decision, snapshot):
             symbol=config.MT5_SYMBOL,
             timestamp=datetime.now().astimezone())
     elif mode == "python":
-        result = MT5Executor().execute(decision, snapshot)
+        # run_step4 only reaches this point after the caller's hard permit and
+        # this independent strategy/execution gate both pass.
+        result = MT5Executor().execute(
+            decision, snapshot, execution_authorized=True)
     else:
         # config.py normalises invalid values to none, but keep this defensive
         # fallback in case a caller changes the module value directly.
@@ -1074,19 +1463,26 @@ def run_step5():
     return positions
 
 
-def run_signal_bridge(snapshot, decision) -> None:
-    """Write the MT5 signal file, with EA as the only actionable owner."""
+def run_signal_bridge(snapshot, decision, *, allow_new_entries: bool = True) -> None:
+    """Write a neutral or approved MT5 signal; blocked modes clear old signals."""
     from mt5_signal_bridge import write_signal
     from step3_ai_decision import Decision
 
     mode = getattr(config, "EXECUTION_MODE", "none")
-    allowed, gate_reason = _shooting_execution_gate(decision, snapshot)
+    if allow_new_entries is not True:
+        allowed = False
+        gate_reason = "new entries are disabled by the selected run mode"
+        decision = Decision(
+            action="HOLD", confidence=0.0,
+            rationale=f"signal neutralised: {gate_reason}")
+    else:
+        allowed, gate_reason = _shooting_execution_gate(decision, snapshot)
     action = str(getattr(decision, "action", "HOLD") or "HOLD").upper()
-    if not allowed:
+    if allow_new_entries is True and not allowed:
         decision = Decision(
             action="HOLD", confidence=0.0,
             rationale=f"signal neutralised by Shooting/POWER v2: {gate_reason}")
-    elif mode != "ea":
+    elif allowed and mode != "ea":
         # Clear any old actionable EA signal when Python or no execution owns
         # the run. This prevents a previously attached EA from acting on stale
         # instructions after the mode is changed.
@@ -1533,10 +1929,14 @@ def log_trade_outcome(order_id, symbol, side, pnl, exit_price,
 # --------------------------------------------------------------------------- #
 # Orchestration
 # --------------------------------------------------------------------------- #
-def run_pipeline() -> None:
-    """One full pass through all 5 steps."""
+def run_pipeline(allow_new_entries: bool = True) -> None:
+    """One full pass; no-new-entry mode still manages and monitors open positions."""
     STATUS.clear()
     config.reload_env()   # pick up edited .env (credentials/markets) each cycle
+    if allow_new_entries is True:
+        _record("ENTRY MODE", "new entries subject to all hard safety gates")
+    else:
+        _record("ENTRY MODE", "NO NEW ENTRIES; position management/monitoring continue")
     t_pipeline_start = time.time()
     _LATENCY_LOG.clear()
     plumbing_position_ids = _load_plumbing_test_position_ids()
@@ -1558,12 +1958,61 @@ def run_pipeline() -> None:
 
     # STEP 1
     t0 = time.time()
+    data_acquired_monotonic = None
     try:
         data = run_step1()
+        data_acquired_monotonic = time.monotonic()
         _record_latency("STEP1 acquire", (time.time()-t0)*1000)
         if data:
-            age = float(data.get("last_data_age_seconds", 0.0) or 0.0)
-            _record_latency(f"BookMap feed age {age:.1f}s", age*1000)
+            age = data.get("last_data_age_seconds")
+            if age is None:
+                logger.warning("FEED AGE at acquisition is unknown")
+            else:
+                try:
+                    if isinstance(age, bool):
+                        raise ValueError("boolean feed age")
+                    age = float(age)
+                    if not math.isfinite(age):
+                        raise ValueError("non-finite feed age")
+                    _record_latency(f"feed age at acquisition {age:.3f}s",
+                                    age * 1000.0)
+                except (TypeError, ValueError, OverflowError):
+                    logger.warning("FEED AGE at acquisition is invalid")
+            quote_age = data.get("quote_age_seconds")
+            _quote_age_value = None
+            if quote_age is None:
+                _quote_age_display = "unknown"
+            else:
+                try:
+                    if isinstance(quote_age, bool):
+                        raise ValueError("boolean quote age")
+                    _quote_age_value = float(quote_age)
+                    if not math.isfinite(_quote_age_value):
+                        raise ValueError("non-finite quote age")
+                    _quote_age_display = f"{_quote_age_value:.3f}s"
+                except (TypeError, ValueError, OverflowError):
+                    _quote_age_value = None
+                    _quote_age_display = "invalid"
+            logger.info("QUOTE AGE at acquisition: %s", _quote_age_display)
+            if _quote_age_value is not None:
+                _record_latency("quote age at acquisition",
+                                _quote_age_value * 1000.0)
+            _dq = data.get("data_quality") or {}
+            if not isinstance(_dq, dict):
+                _dq = {}
+            _spread = data.get("spread_pct")
+            try:
+                _spread_display = f"{float(_spread):.4f}%" if _spread is not None else "unknown"
+            except (TypeError, ValueError, OverflowError):
+                _spread_display = "invalid"
+            logger.info(
+                "FEED QUALITY at acquisition: quote=%s spread=%s L2=%s L3=%s "
+                "L3_aggressor=%s l3_aggr_limit=%s",
+                _dq.get("quote", "unknown"),
+                _spread_display,
+                _dq.get("level2", "unknown"), _dq.get("level3", "unknown"),
+                _dq.get("l3_aggressive_flow", "unknown"),
+                _dq.get("l3_aggr_limit", "unknown"))
     except NotImplementedError as exc:
         _record("STEP 1  DATA ACQUISITION", f"NOT IMPLEMENTED — {exc}")
         data = None
@@ -1678,7 +2127,9 @@ def run_pipeline() -> None:
     # SAFETY GATES before execution: session, stale feed, risk limits.
     # On weekends / holidays / feed drops / big losses the bot must NOT trade.
     # ------------------------------------------------------------------ #
-    gate_ok, gate_reason = _safety_gates(data)
+    _feed_elapsed = (max(0.0, time.monotonic() - data_acquired_monotonic)
+                    if data_acquired_monotonic is not None else 0.0)
+    gate_ok, gate_reason = _safety_gates(data, _feed_elapsed)
     if not gate_ok:
         from step3_ai_decision import Decision
         # 24m/A1d: the AI is never called when a safety gate blocks the cycle, so the
@@ -1688,6 +2139,18 @@ def run_pipeline() -> None:
                             model="none-safety-gate")
         if snapshot is not None:
             snapshot.notes.append(gate_reason)
+    if snapshot is not None:
+        try:
+            snapshot.quality_evidence = _market_quality_evidence(
+                data, _feed_elapsed, gate_ok, gate_reason)
+        except Exception as exc:
+            logger.warning("market-quality evidence capture failed: %s", exc)
+            snapshot.quality_evidence = {
+                "captured_at": datetime.now(timezone.utc).isoformat(),
+                "safety_gate_status": "UNKNOWN",
+                "capture_error": type(exc).__name__,
+            }
+        _attach_quality_evidence_to_shadow_candidates(snapshot)
 
     # L5 RL size multiplier check after snapshot
     if snapshot is not None:
@@ -1720,11 +2183,55 @@ def run_pipeline() -> None:
         except Exception:
             logger.exception("position manager failed (non-fatal)")
 
+    # Recheck the data-side feed immediately before the execution step. The
+    # earlier full safety gate also checked risk/session/trade guards; this
+    # second check only ages the acquired quote/depth through Step 3/4 prep.
+    if decision is not None and gate_ok:
+        _execution_feed_elapsed = (
+            max(0.0, time.monotonic() - data_acquired_monotonic)
+            if data_acquired_monotonic is not None else 0.0)
+        _execution_feed_reason = _preflight_data_reason(
+            data, _execution_feed_elapsed)
+        if _execution_feed_reason:
+            _record("SAFETY: EXECUTION FEED", _execution_feed_reason)
+            gate_ok = False
+            gate_reason = _execution_feed_reason
+            from step3_ai_decision import Decision as _ExecutionDecision
+            decision = _ExecutionDecision(
+                action="HOLD", confidence=0.0,
+                rationale=f"execution feed gate: {_execution_feed_reason}",
+                model="none-execution-feed-gate")
+            if snapshot is not None:
+                if _execution_feed_reason not in snapshot.notes:
+                    snapshot.notes.append(_execution_feed_reason)
+        if snapshot is not None:
+            try:
+                snapshot.quality_evidence = _market_quality_evidence(
+                    data, _execution_feed_elapsed, gate_ok, gate_reason)
+            except Exception as exc:
+                logger.warning("execution-time quality capture failed: %s", exc)
+                snapshot.quality_evidence = {
+                    "captured_at": datetime.now(timezone.utc).isoformat(),
+                    "safety_gate_status": "UNKNOWN",
+                    "capture_error": type(exc).__name__,
+                }
+            _attach_quality_evidence_to_shadow_candidates(snapshot)
+
     # STEP 4
     exec_result = None
+    entry_authorized = (gate_ok is True and allow_new_entries is True)
+    if not allow_new_entries:
+        authorization_reason = "operator selected --no-new-entries"
+    elif gate_ok is not True:
+        authorization_reason = str(gate_reason or "safety gate blocked")
+    else:
+        authorization_reason = ""
     if decision is not None:
         try:
-            exec_result = run_step4(decision, snapshot)
+            exec_result = run_step4(
+                decision, snapshot,
+                execution_authorized=entry_authorized,
+                authorization_reason=authorization_reason)
             # A position was actually opened -> remember its position ID for
             # reliable post-close history lookup and record the cooldown/cap.
             if exec_result is not None and getattr(exec_result, "status", "") == "EXECUTED":
@@ -1799,9 +2306,15 @@ def run_pipeline() -> None:
     # MT5 signal bridge (for the EA / indicator on MT5)
     if snapshot is not None and decision is not None:
         try:
-            run_signal_bridge(snapshot, decision)
+            run_signal_bridge(
+                snapshot, decision, allow_new_entries=entry_authorized)
         except Exception as exc:
             logger.warning("MT5 signal bridge failed: %s", exc)
+
+    # Persist only after Step 4 has had a chance to create/update its shadow
+    # candidate, so the receipt and candidate carry the same current-cycle data.
+    if snapshot is not None:
+        _persist_market_quality_snapshot(snapshot)
 
     # decision journal (for later tuning / backtesting)
     if snapshot is not None and decision is not None:
@@ -1824,6 +2337,13 @@ def print_summary() -> None:
     print("=" * 70)
     for step, status in STATUS:
         print(f"  {step:<28} {status}")
+    entry_mode = next((status for step, status in STATUS
+                       if step == "ENTRY MODE"), "mode unavailable")
+    entry_result = next((status for step, status in reversed(STATUS)
+                         if step == "STEP 4  EXECUTION"), "not reached")
+    if len(entry_result) > 180:
+        entry_result = entry_result[:177] + "..."
+    print(f"  QUICK STATUS: {entry_mode} | ENTRY: {entry_result}")
     print("=" * 70)
 
 
@@ -2067,11 +2587,113 @@ def _log_session_start(mode: str) -> None:
                 getattr(config, "DATA_SOURCE", "?"), getattr(config, "MT5_SYMBOL", "?"))
 
 
+def run_doctor() -> int:
+    """Run local readiness checks without starting the trading pipeline.
+
+    This command does not call the AI, initialize/connect MT5, acquire the bot
+    lock, write run-config/evidence files, edit .env, or submit orders. Importing
+    the existing config module may ensure the empty data/logs folders exist.
+    Live feed/account facts are clearly reported as unknown.
+    """
+    root = Path(__file__).resolve().parent
+    blockers = 0
+    print("GOLD BOOKMAP — LOCAL READINESS CHECK")
+    print("Read-only: no AI request, MT5 connection, live-feed check, or order.")
+    print("No .env or evidence writes; config import may ensure empty data/logs folders exist.")
+
+    def report(level: str, message: str) -> None:
+        nonlocal blockers
+        print(f"[{level}] {message}")
+        if level == "BLOCK":
+            blockers += 1
+
+    required_files = (
+        "main.py", "config.py", "step1_data_acquisition.py",
+        "step2_market_analysis.py", "step3_ai_decision.py",
+        "step4_mt5_execution.py", "step5_monitoring.py",
+        "requirements.txt",
+    )
+    for name in required_files:
+        if (root / name).is_file():
+            report("PASS", f"required file present: {name}")
+        else:
+            report("BLOCK", f"required file missing: {name}")
+
+    env_file = root / ".env"
+    if env_file.is_file():
+        report("PASS", ".env exists (contents hidden; not changed)")
+    else:
+        report("WARN", ".env not found; configured defaults may be used")
+
+    source = str(getattr(config, "DATA_SOURCE", "unknown") or "unknown").strip().lower()
+    report("PASS" if source else "WARN",
+           f"configured data source: {source or 'unknown'}")
+    if source in {"bookmapbridge", "bookmap_bridge", "bookmap", "bmbridge",
+                  "ntbridge", "ninjabridge", "ninja"}:
+        bridge_path = str(getattr(config, "BOOKMAP_BRIDGE_FILE", "") or "").strip()
+        if not bridge_path:
+            report("WARN", "BookMap bridge path is not configured")
+        else:
+            try:
+                exists = Path(bridge_path).expanduser().is_file()
+            except (OSError, ValueError):
+                exists = False
+            report("PASS" if exists else "WARN",
+                   "BookMap bridge file is present" if exists else
+                   "configured BookMap bridge file is not visible from this folder")
+
+    def module_available(name: str) -> bool:
+        try:
+            return importlib.util.find_spec(name) is not None
+        except (ImportError, ModuleNotFoundError, ValueError):
+            return False
+
+    for module in ("numpy", "pandas", "requests"):
+        if module_available(module):
+            report("PASS", f"required package importable: {module}")
+        else:
+            report("BLOCK", f"required package unavailable: {module}")
+
+    if module_available("google.genai"):
+        report("PASS", "AI client package is importable")
+    else:
+        report("WARN", "AI client package is missing; AI decisions may be unavailable")
+
+    execution_mode = str(getattr(config, "EXECUTION_MODE", "none") or "none")
+    trading_enabled = bool(getattr(config, "TRADING_ENABLED", False))
+    live_flag = bool(getattr(config, "ALLOW_LIVE_TRADING", False))
+    if execution_mode == "python" and not module_available("MetaTrader5"):
+        report("WARN", "Python execution selected but MetaTrader5 package is not importable")
+    if trading_enabled and execution_mode in {"python", "ea"}:
+        report("WARN", "normal mode may open DEMO entries when all gates pass; "
+               "ALLOW_LIVE_TRADING only guards REAL accounts")
+    else:
+        report("PASS", "current execution settings do not enable a new-entry route")
+    report("INFO", f"execution mode={execution_mode}; TRADING_ENABLED={trading_enabled}; "
+           f"ALLOW_LIVE_TRADING={live_flag}; actual MT5 account type not checked")
+    report("INFO", "live feed freshness and broker connection are not tested by doctor")
+
+    if blockers:
+        print(f"RESULT: BLOCKED — {blockers} required local check(s) failed")
+        return 1
+    print("RESULT: local checks complete; this is not a live-feed/account certification")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Gold trading system pipeline")
+    parser.add_argument("--doctor", action="store_true",
+                        help="local read-only readiness check; does not start trading")
+    parser.add_argument("--no-new-entries", action="store_true",
+                        help="block new entries/signals; position management and monitoring continue")
     parser.add_argument("--loop", action="store_true",
                         help="run continuously (Step 5 monitoring loop)")
     args = parser.parse_args()
+
+    if args.doctor:
+        if args.loop or args.no_new_entries:
+            parser.error("--doctor must be used by itself")
+        return run_doctor()
 
     setup_logging()
     creds = config.credentials_configured()
@@ -2103,14 +2725,22 @@ def main() -> int:
         return 1
 
     _write_run_config()
-    _log_session_start("loop" if args.loop else "once")
+    session_mode = "loop" if args.loop else "once"
+    if args.no_new_entries:
+        session_mode += "/no-new-entries"
+        logger.warning("NO-NEW-ENTRIES mode: no new Python orders or actionable EA signals; "
+                       "open-position management and monitoring continue.")
+    _log_session_start(session_mode)
+
+    def run_selected_cycle():
+        return run_pipeline(allow_new_entries=not args.no_new_entries)
 
     try:
         if args.loop:
             from step5_monitoring import TradeMonitor
-            TradeMonitor().run_loop(run_pipeline)
+            TradeMonitor().run_loop(run_selected_cycle)
         else:
-            run_pipeline()
+            run_selected_cycle()
     except KeyboardInterrupt:
         logger.info("SESSION interrupted from the console (Ctrl-C) - closing the day cleanly")
     finally:

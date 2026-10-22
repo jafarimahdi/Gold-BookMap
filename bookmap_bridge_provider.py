@@ -25,6 +25,7 @@ from __future__ import annotations
 import csv
 import gzip
 import logging
+import math
 import os
 import re
 import shutil
@@ -221,14 +222,15 @@ class _BridgeTail:
         operation = parts[5].strip()
         dt = _parse_ts(parts[0])
         if dt is None:
-            dt = datetime.now().astimezone()
+            self.bad_lines += 1
+            return
 
         st = self._state_for(instrument)
         self.line_count += 1
 
         if event == "Last":
             op_low = operation.lower()
-            if op_low in ("buy", "b", "bid", "sell", "s", "ask"):
+            if op_low in ("buy", "b", "sell", "s"):
                 side = "BUY" if op_low in ("buy", "b") else "SELL"
                 try:
                     self.direct_side_hits += 1
@@ -243,7 +245,7 @@ class _BridgeTail:
                 elif st.ticks:
                     side = st.ticks[-1]["side"]
                 else:
-                    side = "BUY"
+                    side = ""  # genuinely unknown; do not fabricate BUY flow
                 is_direct = False
             st.ticks.append({"price": price, "volume": size, "side": side, "ts": dt, "is_direct": is_direct, "operation": operation})
             st.last_dt = dt
@@ -612,7 +614,8 @@ class _MboTail:
 
         dt = _parse_ts(ts_raw)
         if dt is None:
-            dt = datetime.now().astimezone()
+            self.bad_lines += 1
+            return
 
         st = self._state_for(instrument.strip() or "?")
         self.line_count += 1
@@ -820,19 +823,203 @@ def _get_mbo_tail() -> _MboTail:
         return _MBO_TAIL
 
 
+def _instrument_root(value: str) -> str:
+    """Return a stable feed root for GC/MGC contracts and vendor aliases."""
+    text = str(value or "").strip().upper()
+    token = text.split()[0] if text else ""
+    token = re.split(r"[.@:=/\\-]", token, maxsplit=1)[0]
+    if token.startswith("MGC"):
+        return "MGC"
+    if token.startswith("GC"):
+        return "GC"
+    return token
+
+
+_MONTH_CODES = {1: "F", 2: "G", 3: "H", 4: "J", 5: "K", 6: "M",
+                7: "N", 8: "Q", 9: "U", 10: "V", 11: "X", 12: "Z"}
+def _instrument_contract(value: str):
+    """Normalize common vendor symbols and ``ROOT MM-YY`` contract labels."""
+    text = str(value or "").strip().upper()
+    if not text:
+        return _instrument_root(""), None, None
+    parts = text.split()
+    token = re.split(r"[.@:=/\\]", parts[0], maxsplit=1)[0]
+    match = re.fullmatch(r"(MGC|GC)([FGHJKMNQUVXZ])(\d{1,4})", token)
+    if match:
+        return match.group(1), match.group(2), match.group(3)
+    root = _instrument_root(token)
+    expiry = None
+    for part in parts[1:]:
+        expiry = re.fullmatch(r"(\d{1,2})-(\d{2,4})", part)
+        if expiry:
+            month = int(expiry.group(1))
+            if month in _MONTH_CODES:
+                return root, _MONTH_CODES[month], expiry.group(2)
+        reverse = re.fullmatch(r"(\d{4})-(\d{1,2})", part)
+        if reverse:
+            month = int(reverse.group(2))
+            if month in _MONTH_CODES:
+                return root, _MONTH_CODES[month], reverse.group(1)
+    return root, None, None
+
+
+def _contract_years_match(left: str, right: str) -> bool:
+    left, right = str(left), str(right)
+    if left == right:
+        return True
+    if len(left) == 1 and right.endswith(left):
+        return True
+    if len(right) == 1 and left.endswith(right):
+        return True
+    if len(left) == 2 and len(right) == 4:
+        return right.endswith(left)
+    if len(right) == 2 and len(left) == 4:
+        return left.endswith(right)
+    return False
+
+
+def _instrument_matches(desired: str, selected: str) -> bool:
+    """Compare roots and expiries when the configured symbol names one."""
+    desired_root, desired_month, desired_year = _instrument_contract(desired)
+    selected_root, selected_month, selected_year = _instrument_contract(selected)
+    if not desired_root or desired_root != selected_root:
+        return False
+    if desired_month is None:
+        return True
+    return (selected_month == desired_month and selected_year is not None and
+            _contract_years_match(desired_year, selected_year))
+
+
 def _choose_instrument(instruments: Dict[str, _InstrumentState]) -> str:
+    """Choose the configured data contract; never silently fall back to another."""
     desired = (getattr(config, "DATA_SYMBOL", "") or "").strip()
-    if desired:
-        root = desired.split()[0].upper()
-        for name, st in instruments.items():
-            if name.split()[0].upper() == root and (st.ticks or st.bids or st.asks or st.mbo_events):
-                return name
+    desired_root = _instrument_root(desired)
+    if desired_root:
+        active = [(name, st) for name, st in instruments.items()
+                  if _instrument_root(name) == desired_root and
+                  (st.ticks or st.bids or st.asks or st.mbo_events)]
+        if _instrument_contract(desired)[1] is not None:
+            active = [(name, st) for name, st in active
+                      if _instrument_matches(desired, name)]
+        return active[0][0] if len(active) == 1 else ""
     best_name, best_score = "", -1
     for name, st in instruments.items():
         score = len(st.ticks) + len(st.bids) + len(st.asks) + len(st.mbo_events)
         if score > best_score:
             best_name, best_score = name, score
     return best_name
+
+
+def _fresh_depth_levels(levels: Dict[float, float], timestamps: Dict[float, Any],
+                        now_epoch: float, max_age_seconds: float):
+    """Return only finite, positive levels with a valid recent per-level stamp.
+
+    Missing, future-dated, and expired timestamps are rejected rather than
+    allowed to influence the book. Counts are retained for diagnostics.
+    """
+    fresh: Dict[float, float] = {}
+    fresh_ts: Dict[float, float] = {}
+    counts = {"kept": 0, "missing_timestamp": 0, "future_timestamp": 0,
+              "stale": 0, "invalid": 0}
+    for raw_price, raw_size in (levels or {}).items():
+        try:
+            if isinstance(raw_price, bool) or isinstance(raw_size, bool):
+                counts["invalid"] += 1
+                continue
+            price, size = float(raw_price), float(raw_size)
+            if not math.isfinite(price) or not math.isfinite(size) or price <= 0 or size <= 0:
+                counts["invalid"] += 1
+                continue
+            stamp = (timestamps or {}).get(raw_price)
+            if stamp is None:
+                counts["missing_timestamp"] += 1
+                continue
+            if isinstance(stamp, str):
+                stamp = _parse_ts(stamp)
+            if stamp is None:
+                counts["invalid"] += 1
+                continue
+            if stamp.tzinfo is None:
+                stamp = stamp.replace(tzinfo=timezone.utc)
+            epoch = float(stamp.timestamp())
+            age = now_epoch - epoch
+            if not math.isfinite(age):
+                counts["invalid"] += 1
+                continue
+            if age < 0:
+                counts["future_timestamp"] += 1
+                continue
+            if age > max_age_seconds:
+                counts["stale"] += 1
+                continue
+            fresh[price] = size
+            fresh_ts[price] = epoch
+            counts["kept"] += 1
+        except (TypeError, ValueError, OverflowError, AttributeError, OSError):
+            counts["invalid"] += 1
+    return fresh, fresh_ts, counts
+
+
+def _top_depth_receipt(levels: Dict[float, float], timestamps: Dict[float, Any],
+                       now_epoch: float, max_age_seconds: float,
+                       side: str) -> List[Dict[str, Any]]:
+    """Return the raw top-five levels with per-level timestamp/age status."""
+    candidates = []
+    for raw_price, raw_size in (levels or {}).items():
+        try:
+            if isinstance(raw_price, bool):
+                continue
+            price = float(raw_price)
+            if math.isfinite(price) and price > 0:
+                candidates.append((price, raw_price, raw_size))
+        except (TypeError, ValueError, OverflowError):
+            continue
+    reverse = str(side).lower() == "bid"
+    candidates.sort(key=lambda row: row[0], reverse=reverse)
+    receipt = []
+    for price, raw_price, raw_size in candidates[:5]:
+        item: Dict[str, Any] = {"price": price, "size": None,
+                                "timestamp": None, "age_seconds": None,
+                                "status": "invalid_size"}
+        try:
+            if isinstance(raw_size, bool):
+                raise ValueError("boolean size")
+            size = float(raw_size)
+            if math.isfinite(size) and size > 0:
+                item["size"] = size
+                item["status"] = "missing_timestamp"
+        except (TypeError, ValueError, OverflowError):
+            size = None
+
+        stamp = (timestamps or {}).get(raw_price)
+        if stamp is None:
+            stamp = (timestamps or {}).get(price)
+        try:
+            if isinstance(stamp, str):
+                stamp = _parse_ts(stamp)
+            if stamp is None:
+                if item["status"] != "invalid_size":
+                    item["status"] = "missing_timestamp"
+            else:
+                if stamp.tzinfo is None:
+                    stamp = stamp.replace(tzinfo=timezone.utc)
+                epoch = float(stamp.timestamp())
+                age = now_epoch - epoch
+                if not math.isfinite(age):
+                    item["status"] = "invalid_timestamp"
+                else:
+                    item["timestamp"] = stamp.isoformat()
+                    item["age_seconds"] = age
+                    if age < 0:
+                        item["status"] = "future_timestamp"
+                    elif age > max_age_seconds:
+                        item["status"] = "stale"
+                    elif item["size"] is not None:
+                        item["status"] = "fresh"
+        except (TypeError, ValueError, OverflowError, AttributeError, OSError):
+            item["status"] = "invalid_timestamp"
+        receipt.append(item)
+    return receipt
 
 
 class BookmapBridgeProvider(BaseProvider):
@@ -850,195 +1037,402 @@ class BookmapBridgeProvider(BaseProvider):
 
     def acquire(self, symbol: str = "", **kwargs) -> Dict[str, Any]:
         waited = 0.0
-        wait_max = float(getattr(config, "BOOKMAP_WAIT_SECONDS", getattr(config, "NT_WAIT_SECONDS", 5)))
+        wait_max = float(getattr(config, "BOOKMAP_WAIT_SECONDS",
+                                 getattr(config, "NT_WAIT_SECONDS", 5)))
         while waited < wait_max:
             with self.tail.lock:
-                has = any(st.ticks or st.bids or st.asks for st in self.tail.instruments.values())
+                has = any(st.ticks or st.bids or st.asks
+                          for st in self.tail.instruments.values())
             if has:
                 break
             time.sleep(0.25)
             waited += 0.25
 
+        # Snapshot the selected instrument under the tail lock. Never combine
+        # its depth with MBO events from a different instrument.
         with self.tail.lock:
             name = _choose_instrument(self.tail.instruments)
-            st = self.tail.instruments.get(name)
+            st = self.tail.instruments.get(name) if name else None
             if st is not None:
-                # M1: Preserve is_direct flag for footprint
-                self.tick_data = [
-                    {"price": t["price"], "volume": t["volume"], "side": t["side"],
-                     "is_direct": t.get("is_direct", False), "is_bookmap_direct": t.get("is_direct", False),
-                     "timestamp": t["ts"].isoformat(), "operation": t.get("operation", "")}
-                    for t in st.ticks
-                ]
-                self._trades = [{"timestamp": t["ts"].isoformat(), "price": t["price"], "volume": t["volume"]} for t in st.ticks]
+                ticks = list(st.ticks)
                 raw_bids = dict(st.bids)
                 raw_asks = dict(st.asks)
-                if raw_bids and raw_asks:
-                    best_bid_depth = max(raw_bids.keys()) if raw_bids else 0.0
-                    best_ask_depth = min(raw_asks.keys()) if raw_asks else 0.0
-                    if best_bid_depth and best_ask_depth and best_bid_depth >= best_ask_depth:
-                        raw_bids = {p: s for p, s in raw_bids.items() if p < best_ask_depth}
-                        raw_asks = {p: s for p, s in raw_asks.items() if p > best_bid_depth}
-                        if raw_bids and raw_asks:
-                            best_bid_depth = max(raw_bids.keys())
-                            best_ask_depth = min(raw_asks.keys())
-                            if best_bid_depth >= best_ask_depth:
-                                sorted_bids = sorted(raw_bids.items(), key=lambda kv: -kv[0])
-                                sorted_asks = sorted(raw_asks.items(), key=lambda kv: kv[0])
-                                mid_price = 0.0
-                                if st.ticks:
-                                    mid_price = st.ticks[-1]["price"]
-                                elif sorted_bids and sorted_asks:
-                                    mid_price = (sorted_bids[0][0] + sorted_asks[0][0]) / 2.0
-                                if mid_price > 0:
-                                    raw_bids = {p: s for p, s in sorted_bids if p < mid_price}
-                                    raw_asks = {p: s for p, s in sorted_asks if p > mid_price}
-                if st.best_ask:
-                    kept = {p: s for p, s in raw_bids.items() if p <= st.best_ask}
-                    if kept:
-                        raw_bids = kept
-                if st.best_bid:
-                    kept = {p: s for p, s in raw_asks.items() if p >= st.best_bid}
-                    if kept:
-                        raw_asks = kept
-                raw_bids = dict(sorted(raw_bids.items(), key=lambda kv: -kv[0])[:_MAX_BOOK_LEVELS])
-                raw_asks = dict(sorted(raw_asks.items(), key=lambda kv: kv[0])[:_MAX_BOOK_LEVELS])
-                self.bid_depth = raw_bids
-                self.ask_depth = raw_asks
-                self.order_book = {
-                    "bids": [(p, s) for p, s in sorted(raw_bids.items(), reverse=True)],
-                    "asks": [(p, s) for p, s in sorted(raw_asks.items())],
-                }
-                # Merge MBO events from ticks.csv + mbo.csv
-                mbo_from_ticks = list(st.mbo_events[-2000:]) if st.mbo_events else []
-                mbo_from_file: List[Dict] = []
-                if self.mbo_tail:
-                    try:
-                        with self.mbo_tail.lock:
-                            mbo_state = self.mbo_tail.instruments.get(name)
-                            if mbo_state and mbo_state.mbo_events:
-                                mbo_from_file = list(mbo_state.mbo_events[-3000:])
-                            else:
-                                # Try any instrument with events
-                                for ist in self.mbo_tail.instruments.values():
-                                    if ist.mbo_events:
-                                        mbo_from_file.extend(ist.mbo_events[-1000:])
-                    except Exception:
-                        pass
-                # Combine, deduplicate by (order_id, type, price) keeping latest
-                # v5.3 fix: filter invalid order_ids (-1) that cause iceberg spam
-                # v7.0 P2 FIX: proper dedup to avoid double counting same MBO from ticks.csv + mbo.csv
-                combined_raw = mbo_from_ticks + mbo_from_file
-                filtered = [e for e in combined_raw if str(e.get("order_id","")).strip() not in ("-1","0","","None")]
-                # Deduplicate: keep latest by (order_id, type, price) key
-                dedup_dict = {}
-                for ev in filtered:
-                    key = (str(ev.get("order_id","")), str(ev.get("type","")).upper(), round(float(ev.get("price",0)),2))
-                    # Keep latest timestamp (overwrite)
-                    dedup_dict[key] = ev
-                combined = list(dedup_dict.values())
-                # Sort by timestamp to preserve order
-                try:
-                    combined.sort(key=lambda x: x.get("timestamp",""))
-                except Exception:
-                    pass
-                # Keep last 5000
-                if len(combined) > 2000:  # P3 M5 FAIR
-                    combined = combined[-2000:]  # P3
-                self.order_events = combined
-                if st.last_dt is not None:
-                    self._touch(st.last_dt)
+                bid_level_ts = dict(st.level_ts_b)
+                ask_level_ts = dict(st.level_ts_a)
+                last_data_dt = st.last_dt
+                mbo_from_ticks = list(st.mbo_events[-2000:])
             else:
-                name = symbol or getattr(config, "DATA_SYMBOL", "MGC 12-26")
+                ticks = []
+                raw_bids, raw_asks = {}, {}
+                bid_level_ts, ask_level_ts = {}, {}
+                last_data_dt = None
+                mbo_from_ticks = []
+            direct_side_hits = self.tail.direct_side_hits
+            total_lines = self.tail.line_count
+
+        mbo_from_file: List[Dict] = []
+        if name and self.mbo_tail:
+            try:
+                with self.mbo_tail.lock:
+                    mbo_state = self.mbo_tail.instruments.get(name)
+                    if mbo_state and mbo_state.mbo_events:
+                        mbo_from_file = list(mbo_state.mbo_events[-3000:])
+            except Exception:
+                logger.exception("BookMap MBO snapshot failed for %s", name)
+
+        combined_raw = mbo_from_ticks + mbo_from_file
+        filtered = [e for e in combined_raw
+                    if str(e.get("order_id", "")).strip()
+                    not in ("-1", "0", "", "None", "null")]
+        dedup: Dict[tuple, Dict] = {}
+        for event in filtered:
+            try:
+                key = (str(event.get("order_id", "")),
+                       str(event.get("type", "")).upper(),
+                       round(float(event.get("price", 0)), 2))
+                dedup[key] = event
+            except (TypeError, ValueError, OverflowError):
+                continue
+        order_events = list(dedup.values())
+        order_events.sort(key=lambda event: str(event.get("timestamp", "")))
+        if len(order_events) > 2000:
+            order_events = order_events[-2000:]
+
+        # The level-age setting was previously read but not exposed by config;
+        # now the documented fallback is also the actual source default.
+        max_age_limit_invalid = False
+        try:
+            max_age = float(getattr(config, "BOOKMAP_LEVEL_MAX_AGE", 900.0))
+            if not math.isfinite(max_age) or max_age <= 0:
+                raise ValueError("invalid level age")
+        except (TypeError, ValueError, OverflowError):
+            max_age = 0.0
+            max_age_limit_invalid = True
+        now_epoch = time.time()
+        fresh_bids, fresh_bid_ts, bid_counts = _fresh_depth_levels(
+            raw_bids, bid_level_ts, now_epoch, max_age)
+        fresh_asks, fresh_ask_ts, ask_counts = _fresh_depth_levels(
+            raw_asks, ask_level_ts, now_epoch, max_age)
+
+        raw_best_bid = max(fresh_bids) if fresh_bids else 0.0
+        raw_best_ask = min(fresh_asks) if fresh_asks else 0.0
+        crossed = bool(raw_best_bid and raw_best_ask and raw_best_bid >= raw_best_ask)
+        # Do not silently "repair" a crossed book by dropping levels: that
+        # invents a different book. Preserve the raw top in diagnostics and
+        # pass no L2 levels to analytics until the source sends a valid book.
+        if crossed:
+            analysis_bids, analysis_asks = {}, {}
+        else:
+            analysis_bids = dict(sorted(fresh_bids.items(),
+                                        key=lambda item: -item[0])[:_MAX_BOOK_LEVELS])
+            analysis_asks = dict(sorted(fresh_asks.items(),
+                                        key=lambda item: item[0])[:_MAX_BOOK_LEVELS])
+
+        self.tick_data = [
+            {"price": t["price"], "volume": t["volume"], "side": t["side"],
+             "is_direct": bool(t.get("is_direct", False)),
+             "is_bookmap_direct": bool(t.get("is_direct", False)),
+             "timestamp": t["ts"].isoformat(),
+             "operation": t.get("operation", "")}
+            for t in ticks
+        ]
+        self._trades = [
+            {"timestamp": t["ts"].isoformat(), "price": t["price"],
+             "volume": t["volume"]} for t in ticks
+        ]
+        self.order_events = order_events
+        self.book_updates = []
+        self.bid_depth = analysis_bids
+        self.ask_depth = analysis_asks
+        self.order_book = {
+            "bids": [(p, s) for p, s in sorted(analysis_bids.items(), reverse=True)],
+            "asks": [(p, s) for p, s in sorted(analysis_asks.items())],
+        }
+        self.last_data_ts = last_data_dt
 
         symbol_out = name or symbol or getattr(config, "DATA_SYMBOL", "MGC 12-26")
         data = self.build_market_data(symbol=symbol_out)
-        # bridge-fix-2026-10-07: TRUE touch + last-trade anchor + feed guard.
-        try:
-            with self.tail.lock:
-                st_fix = self.tail.instruments.get(symbol_out)
-            if st_fix is not None:
-                if st_fix.ticks:
-                    data["price"] = float(st_fix.ticks[-1]["price"])
-                # book-hygiene: bid/ask from the FRESH book (levels touched
-                # within BOOKMAP_LEVEL_MAX_AGE). Ghost levels cannot publish.
-                tb = ta = 0.0
-                max_age = float(getattr(config, "BOOKMAP_LEVEL_MAX_AGE", 900.0) or 900.0)
-                now_ts = time.time()
-                try:
-                    fb = [p for p in st_fix.bids
-                          if p > 0 and st_fix.level_ts_b.get(p) is not None
-                          and (now_ts - st_fix.level_ts_b[p].timestamp()) <= max_age]
-                    fa = [p for p in st_fix.asks
-                          if p > 0 and st_fix.level_ts_a.get(p) is not None
-                          and (now_ts - st_fix.level_ts_a[p].timestamp()) <= max_age]
-                    if fb:
-                        tb = max(fb)
-                    if fa:
-                        ta = min(fa)
-                except Exception:
-                    tb = ta = 0.0
-                if not (tb > 0 and ta > 0 and ta >= tb):
-                    # fallback: the fresh-touch tracker (bridge-fix)
-                    tb = ta = 0.0
-                    if st_fix.depth_touch:
-                        cutoff_ts = st_fix.depth_touch[-1][0].timestamp() - 30.0
-                        cb = [p for ts, sd, p in st_fix.depth_touch
-                              if sd == "B" and ts.timestamp() >= cutoff_ts and p > 0]
-                        ca = [p for ts, sd, p in st_fix.depth_touch
-                              if sd == "A" and ts.timestamp() >= cutoff_ts and p > 0]
-                        if cb:
-                            tb = max(cb)
-                        if ca:
-                            ta = min(ca)
-                if tb > 0 and ta > 0 and ta >= tb:
-                    data["bid"], data["ask"] = tb, ta
-                last_px = float(data.get("price") or 0.0)
-                bid = float(data.get("bid") or 0.0)
-                ask = float(data.get("ask") or 0.0)
-                warnings = []
-                if bid > 0 and ask > 0:
-                    spread_pct = 100.0 * (ask - bid) / bid
-                    if spread_pct > 0.5:
-                        warnings.append(f"quote spread {spread_pct:.3f}% implausible")
-                    mid = (ask + bid) / 2.0
-                    if last_px > 0 and abs(mid - last_px) > max(1.0, 0.001 * last_px):
-                        warnings.append(
-                            f"mid {mid:.2f} vs last trade {last_px:.2f} disagree")
-                if warnings:
-                    logger.warning("FEED GUARD (bridge-fix): %s", "; ".join(warnings))
-                data["feed_warnings"] = warnings
-        except Exception:
-            logger.exception("bridge-fix touch calculation failed")
-        with self.tail.lock:
-            direct = self.tail.direct_side_hits
-            total = self.tail.line_count
-        mbo_count = len(data.get("order_events", []))
-        # v5.6 improved depth logging: show total size and spread
-        try:
-            bid_depth = data.get("bid_depth", {})
-            ask_depth = data.get("ask_depth", {})
-            total_bid_size = sum(float(v) for v in bid_depth.values()) if bid_depth else 0.0
-            total_ask_size = sum(float(v) for v in ask_depth.values()) if ask_depth else 0.0
-            spread = 0.0
-            if bid_depth and ask_depth:
-                best_bid = max(bid_depth.keys()) if bid_depth else 0.0
-                best_ask = min(ask_depth.keys()) if ask_depth else 0.0
-                if best_bid and best_ask:
-                    spread = best_ask - best_bid
-            logger.info("BookMapBridge v5.6: %d ticks (%d direct), %d bid/%.1f lots / %d ask/%.1f lots spread %.2f, %d MBO (L3) for %s (lines: %d) [GC max 20 levels, MGC 10, MBO 3000 = real depth]",
-                        len(data.get("tick_data", [])), direct,
-                        len(bid_depth), total_bid_size,
-                        len(ask_depth), total_ask_size,
-                        spread,
-                        mbo_count, symbol_out, total)
-        except Exception as e:
-            logger.info("BookMapBridge v5.3: %d ticks (%d direct), %d bid/%d ask, %d MBO (ticks+file) for %s (lines: %d)",
-                        len(data.get("tick_data", [])), direct,
-                        len(data.get("bid_depth", {})), len(data.get("ask_depth", {})),
-                        mbo_count, symbol_out, total)
-        return data
+        data["bid_depth"] = dict(analysis_bids)
+        data["ask_depth"] = dict(analysis_asks)
+        data["order_book"] = {"bids": list(self.order_book["bids"]),
+                              "asks": list(self.order_book["asks"])}
+        data["order_events"] = list(order_events)
+        data["book_updates"] = []
 
+        configured_symbol = str(getattr(config, "DATA_SYMBOL", "") or "").strip()
+        desired_root = _instrument_root(configured_symbol)
+        instrument_match = (not desired_root or
+                            (bool(name) and _instrument_matches(
+                                configured_symbol, symbol_out)))
+        if not instrument_match:
+            analysis_bids, analysis_asks = {}, {}
+            data["bid_depth"] = {}
+            data["ask_depth"] = {}
+            data["order_book"] = {"bids": [], "asks": []}
+            data["order_events"] = []
+            data["bid"] = data["ask"] = 0.0
+            self.bid_depth, self.ask_depth = {}, {}
+            self.order_book = {"bids": [], "asks": []}
+
+        best_bid = max(analysis_bids) if analysis_bids else 0.0
+        best_ask = min(analysis_asks) if analysis_asks else 0.0
+        quote_valid = bool(instrument_match and not crossed and
+                           best_bid > 0 and best_ask > best_bid)
+        quote_mid = (best_bid + best_ask) / 2.0 if quote_valid else 0.0
+        quote_age = None
+        quote_ts = None
+        quote_stale = False
+        quote_future = False
+        quote_age_limit_invalid = max_age_limit_invalid
+        if quote_valid:
+            bid_epoch = fresh_bid_ts.get(best_bid)
+            ask_epoch = fresh_ask_ts.get(best_ask)
+            if bid_epoch is not None and ask_epoch is not None:
+                quote_age = max(now_epoch - bid_epoch, now_epoch - ask_epoch)
+                quote_ts = datetime.fromtimestamp(min(bid_epoch, ask_epoch),
+                                                   tz=timezone.utc).isoformat()
+                try:
+                    max_quote_age = float(getattr(
+                        config, "STALE_DATA_SECONDS", 300.0))
+                    if not math.isfinite(max_quote_age) or max_quote_age <= 0:
+                        raise ValueError("invalid quote-age limit")
+                except (TypeError, ValueError, OverflowError):
+                    max_quote_age = None
+                if max_quote_age is None:
+                    quote_valid = False
+                    quote_age_limit_invalid = True
+                elif not math.isfinite(quote_age) or quote_age < 0:
+                    quote_valid = False
+                    quote_future = True
+                elif quote_age > max_quote_age:
+                    quote_valid = False
+                    quote_stale = True
+            else:
+                quote_valid = False
+
+        latest_tick = max(ticks, key=lambda item: item["ts"].timestamp()) if ticks else None
+        last_price = 0.0
+        last_trade_age = None
+        last_trade_ts = None
+        if latest_tick is not None:
+            try:
+                last_price = float(latest_tick.get("price", 0.0) or 0.0)
+                last_epoch = float(latest_tick["ts"].timestamp())
+                last_trade_age = now_epoch - last_epoch
+                last_trade_ts = latest_tick["ts"].isoformat()
+                if not math.isfinite(last_trade_age) or last_trade_age < 0:
+                    last_trade_age = None
+            except (TypeError, ValueError, OverflowError, AttributeError, OSError):
+                last_price = 0.0
+                last_trade_age = None
+                last_trade_ts = None
+
+        last_order_event_epoch = None
+        for event in order_events:
+            try:
+                raw_event_ts = event.get("timestamp")
+                event_ts = (raw_event_ts if isinstance(raw_event_ts, datetime)
+                            else _parse_ts(str(raw_event_ts)))
+                if event_ts is None:
+                    continue
+                event_epoch = float(event_ts.timestamp())
+                if math.isfinite(event_epoch) and event_epoch <= now_epoch:
+                    last_order_event_epoch = max(
+                        last_order_event_epoch or event_epoch, event_epoch)
+            except (TypeError, ValueError, OverflowError, AttributeError, OSError):
+                continue
+        last_order_event_age = (now_epoch - last_order_event_epoch
+                                if last_order_event_epoch is not None else None)
+        last_order_event_ts = (datetime.fromtimestamp(
+            last_order_event_epoch, tz=timezone.utc).isoformat()
+            if last_order_event_epoch is not None else None)
+
+        raw_spread_pct = (100.0 * (best_ask - best_bid) / quote_mid
+                          if best_bid > 0 and best_ask > best_bid and quote_mid > 0
+                          else None)
+        if quote_valid:
+            data["bid"], data["ask"] = best_bid, best_ask
+        else:
+            data["bid"] = data["ask"] = 0.0
+        # Keep measured spread as telemetry when quote age/validation fails;
+        # quality status below prevents it being treated as executable.
+        data["spread_pct"] = raw_spread_pct
+        if last_price > 0 and instrument_match:
+            data["price"] = last_price
+        elif quote_mid > 0:
+            data["price"] = quote_mid
+
+        if last_data_dt is not None:
+            data_age = now_epoch - last_data_dt.timestamp()
+            data["last_data_age_seconds"] = (data_age if math.isfinite(data_age)
+                                               and data_age >= 0 else None)
+            data["last_data_timestamp"] = last_data_dt.isoformat()
+        else:
+            data["last_data_age_seconds"] = None
+            data["last_data_timestamp"] = None
+        data["quote_age_seconds"] = quote_age
+        data["quote_timestamp"] = quote_ts
+        # Depth freshness is the older of the two current best-side levels.
+        # Keep the same receipt available under the depth-specific schema too.
+        data["depth_age_seconds"] = quote_age
+        data["depth_timestamp"] = quote_ts
+        data["last_trade_age_seconds"] = last_trade_age
+        data["last_trade_timestamp"] = last_trade_ts
+        data["last_order_event_age_seconds"] = last_order_event_age
+        data["last_order_event_timestamp"] = last_order_event_ts
+
+        warnings = []
+        if not instrument_match:
+            l2_status = "instrument_mismatch"
+            quote_status = "unavailable"
+            warnings.append(f"configured data root {desired_root or '?'} did not match selected instrument")
+        elif crossed:
+            l2_status = "crossed_book"
+            quote_status = "crossed"
+            warnings.append(f"crossed fresh depth: bid {raw_best_bid:.2f} >= ask {raw_best_ask:.2f}; L2 suppressed")
+        elif quote_stale:
+            l2_status = "stale_or_missing_levels"
+            quote_status = "stale"
+            warnings.append(f"quote/depth is stale at {quote_age:.3f}s; L2 suppressed")
+        elif quote_future:
+            l2_status = "future_timestamp"
+            quote_status = "future_timestamp"
+            warnings.append("quote/depth timestamp is future-dated; L2 suppressed")
+        elif quote_age_limit_invalid:
+            l2_status = "unverified_quote_age_limit"
+            quote_status = "invalid_age_limit"
+            warnings.append("quote-age threshold invalid; L2 suppressed")
+        elif not (fresh_bids and fresh_asks and quote_valid):
+            l2_status = "stale_or_missing_levels"
+            quote_status = "unavailable"
+            warnings.append("no valid fresh two-sided depth quote; L2 suppressed")
+        else:
+            quote_status = "valid"
+            if last_price <= 0 or last_trade_age is None:
+                l2_status = "unverified_last_trade_missing"
+                warnings.append("no valid last-trade anchor; L2 not independently checked")
+            else:
+                try:
+                    max_trade_age = float(getattr(config, "POWER_MAX_TICK_AGE_SECONDS", 60.0))
+                    if not math.isfinite(max_trade_age) or max_trade_age <= 0:
+                        max_trade_age = 60.0
+                except (TypeError, ValueError, OverflowError):
+                    max_trade_age = 60.0
+                deviation = abs(quote_mid - last_price)
+                allowed_deviation = max(1.0, 0.001 * last_price)
+                if last_trade_age > max_trade_age:
+                    l2_status = "unverified_last_trade_stale"
+                    warnings.append(f"last-trade anchor stale ({last_trade_age:.1f}s); L2 not independently checked")
+                elif deviation > allowed_deviation:
+                    l2_status = "misaligned_quote_vs_last"
+                    warnings.append(
+                        f"fresh depth mid {quote_mid:.2f} vs last trade {last_price:.2f} "
+                        f"differ by {deviation:.2f} (existing feed tolerance {allowed_deviation:.2f}); L2 suppressed")
+                else:
+                    l2_status = "validated"
+
+        spread = data.get("spread_pct")
+        if spread is not None and (not math.isfinite(float(spread)) or float(spread) < 0):
+            data["spread_pct"] = None
+            quote_status = "invalid"
+            warnings.append("spread calculation invalid")
+        elif spread is not None and float(spread) > 0.5:
+            warnings.append(f"quote spread {float(spread):.3f}% implausible")
+
+        direct_ticks = sum(1 for tick in self.tick_data
+                           if tick.get("is_direct") is True and
+                           str(tick.get("side", "")).upper() in ("BUY", "SELL"))
+        valid_event_sides = {"BUY", "SELL", "BID", "ASK"}
+        mbo_market_events = sum(1 for event in order_events
+                                if event.get("is_market_order") is True and
+                                str(event.get("side", "")).upper() in valid_event_sides)
+        passive_order_events = sum(
+            1 for event in order_events
+            if str(event.get("type", "")).upper() in
+            {"NEW", "ADD", "OPEN", "BID_NEW", "ASK_NEW"} and
+            str(event.get("side", "")).upper() in valid_event_sides)
+        if mbo_market_events and passive_order_events:
+            l3_aggr_limit = "partial_mbo_tags"
+        elif mbo_market_events:
+            l3_aggr_limit = "market_order_events_only"
+        elif passive_order_events:
+            l3_aggr_limit = "passive_order_events_only"
+        else:
+            l3_aggr_limit = "not_emitted"
+        try:
+            from markets import MARKETS
+            _market_profile = MARKETS.get(_instrument_root(symbol_out))
+        except Exception:
+            _market_profile = None
+        tick_size = (_market_profile.tick_size
+                     if _market_profile is not None else None)
+        tick_value = (_market_profile.tick_value
+                      if _market_profile is not None else None)
+        data["data_quality"] = {
+            "quote": quote_status,
+            "level2": l2_status,
+            "level3": "available" if order_events else "unavailable",
+            "level3_events": "partial_window" if order_events else "unavailable",
+            "l3_aggressive_flow": ("partial_mbo_market_order_events" if mbo_market_events else
+                                    "direct_trade_prints_only" if direct_ticks else
+                                    "unavailable"),
+            "l3_aggr_limit": l3_aggr_limit,
+            "trade_prints": "available" if ticks else "unavailable",
+            "order_flow": "direct_trade_side" if direct_ticks else "tick_rule_or_unavailable",
+            "instrument": "matched" if instrument_match else "mismatch",
+        }
+        data["feed_warnings"] = warnings
+        data["l2_diagnostics"] = {
+            "status": l2_status,
+            "configured_data_symbol": str(getattr(config, "DATA_SYMBOL", "") or ""),
+            "selected_data_symbol": symbol_out,
+            "instrument_match": instrument_match,
+            "fresh_level_max_age_seconds": (None if max_age_limit_invalid else max_age),
+            "fresh_bid_levels": len(fresh_bids),
+            "fresh_ask_levels": len(fresh_asks),
+            "bid_level_counts": bid_counts,
+            "ask_level_counts": ask_counts,
+            "best_bid": raw_best_bid,
+            "best_ask": raw_best_ask,
+            "depth_mid": quote_mid,
+            "top5_bid_levels": _top_depth_receipt(
+                raw_bids, bid_level_ts, now_epoch, max_age, "bid"),
+            "top5_ask_levels": _top_depth_receipt(
+                raw_asks, ask_level_ts, now_epoch, max_age, "ask"),
+            "tick_size": tick_size,
+            "tick_value": tick_value,
+            "price_units": ("USD per troy ounce" if _market_profile is not None
+                            else "source units not verified"),
+            "tick_value_units": ("USD per contract/lot" if _market_profile is not None
+                                 else "source units not verified"),
+            "depth_size_units": "feed-provided size; contract/lot semantics not verified",
+            "last_trade": last_price,
+            "last_trade_age_seconds": last_trade_age,
+            "last_trade_timestamp": last_trade_ts,
+            "quote_age_seconds": quote_age,
+            "quote_timestamp": quote_ts,
+            "depth_age_seconds": quote_age,
+            "depth_timestamp": quote_ts,
+            # The bundled BookMap addon stamps rows in its callback using local
+            # wall time; this measures bridge receipt age, not exchange latency.
+            "timestamp_basis": "bridge_receive_time",
+            "source_event_time_verified": False,
+            "mid_last_deviation_points": (abs(quote_mid - last_price)
+                                           if quote_mid > 0 and last_price > 0 else None),
+        }
+        if warnings:
+            logger.warning("BookMap feed quality for %s: %s", symbol_out,
+                           "; ".join(warnings))
+        logger.info(
+            "BookMapBridge quality: %s instrument=%s quote=%s spread=%s L2=%s "
+            "depth=%d/%d last_age=%s stale_levels=%d/%d MBO=%d direct_ticks=%d (lines=%d)",
+            symbol_out, data["data_quality"]["instrument"], quote_status,
+            f"{float(data['spread_pct']):.4f}%" if data.get("spread_pct") is not None else "n/a",
+            l2_status, len(fresh_bids), len(fresh_asks),
+            f"{last_trade_age:.1f}s" if last_trade_age is not None else "n/a",
+            bid_counts["stale"], ask_counts["stale"], len(order_events),
+            direct_ticks, total_lines)
+        return data
 
 class NinjaBridgeProvider(BookmapBridgeProvider):
     name = "ninjabridge"
