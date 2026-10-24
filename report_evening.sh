@@ -1,121 +1,341 @@
 #!/usr/bin/env bash
-# report_evening.sh -- the ONE evening command (the report team's chief of staff).
-#   bash report_evening.sh              # today's paper
-#   bash report_evening.sh 2026-10-09   # a specific day
-#   bash report_evening.sh --full       # also re-run the Editor (audit_day) first, ~1-3 min
+# ==============================================================================
+# report_evening.sh -- THE ONE EVENING COMMAND (Company 2: The Report Office).
 #
-# Runs the whole report team in order and prints TODAY'S PAPER:
-#   1. the Accountant (decision_ledger.py)  - who stopped each signal, was it right
-#   2. the Geometer   (tf_study.py)         - edge persistence across exit geometries
-#   3. the Shadow     (shadow_replay.py)    - the robot's OWN wall logic on the day
-#   4. the Lens       (tf_lens.py)          - would finer clocks have SEEN more? (M2/M3/M8/M10 vs M5)
-#   5. the Anatomist  (fish_anatomy.py)     - the day's fish opened up: WHEN/SIZE/HEAT/PANEL
-#   6. the Universes  (tf_robot_replay.py)  - the REAL robot brain replayed at 1/3/5/8/10 min (SLOW ~5-10 min)
-#   7. the Clocks     (clocks_verdict.py)   - the 5-day rules read honestly (C1/C2/C3/C6)
-#   8. the Editor's verdict (from data/day_metrics_<date>.json if present)
-#   9. the Watchman's day (data/tape_watchdog.log lines for the date)
-# plus the RECONCILIATION LINE: Accountant total vs Geometer 'M5 (audit)' row vs
-# the Editor's what-if. All three must tell the same story.
-# v1.3: desks 6+7 added (the Universes + the Clocks). --fast skips desks 4-7.
-# v1.4 (report v2, 2026-10-15): desk 8 added - the AI COST line (paid calls +
-# where the full cost story lives). Reconciliation line untouched.
+#   bash report_evening.sh                # newest trading day: ALL tests + ALL reports + opens ONE HTML page
+#   bash report_evening.sh 2026-10-23     # same, for a specific trading day
+#   bash report_evening.sh --fast         # ~45s quick evening check (skips slow replay Desks 4-6 & flow_probe)
+#   bash report_evening.sh --paper-only   # run only Today's Paper desks (Desks 1-10) + update master HTML
+#   bash report_evening.sh --with-book-probe  # also run heavy MBO book_probe.py (~1-2 min on 3.5M MBO rows)
+#   bash report_evening.sh --no-tests     # skip pytest/rigs (still runs daily_check.sh --check auditor gate)
+#   bash report_evening.sh --no-browser   # write all reports & HTML without opening a browser tab
+#   bash report_evening.sh --open         # re-open the latest master HTML report immediately, run nothing
 #
-# Read-only with respect to trading: these are report tools; the robot never
-# imports them. Outputs land in data/ as always.
+# Covers EVERY department of COMPANY 2 -- THE REPORT OFFICE in one run:
+#   Stage 1/6: Toolkit & Code Self-Tests (daily_check.sh --check, pytest -q, rig_g11, rig_memory, rig_tf_robot)
+#   Stage 2/6: Setup Preflight + 17-Test Day Audit (audit_day.py + 4 diagnostics) + All-Days History
+#   Stage 3/6: The Truck Camera (tail_probe.py -- STEP1/STEP2/STEP3 full-pipeline latency attribution)
+#   Stage 4/6: The Spies (flow_probe.py print tilt/LIFT + optional book_probe.py MBO eOFI)
+#   Stage 5/6: Today's Paper (Desks 1 Accountant, 2 Geometer, 3 Shadow, 9 POWER Card, 10 Council Shadow,
+#              4 Lens, 5 Anatomist, 6 Universes M1-M10, 7 Clocks C1/C2/C3/C6, Watchman, 8 the AI COST line,
+#              + 3-Desk Reconciliation Law)
+#   Stage 6/6: Stitches EVERYTHING into ONE self-contained browser page: data/report_<DATE>.html
+#              and saves the full terminal transcript to: data/evening_suite_<DATE>.log
+#
+# Read-only with respect to trading: no robot runtime state, .env, threshold, or order is ever touched.
+# ==============================================================================
+set -o pipefail
 cd "$(dirname "$0")" || { echo "put this file in the project folder"; exit 1; }
 
 PY=$(command -v python || command -v python3)
 DATE=""
-FULL=0
 FAST=0
+PAPER_ONLY=0
+RUN_TESTS=1
+RUN_CHECK=1
+BOOK_PROBE=0
+NO_BROWSER=0
+OPEN_ONLY=0
+CONTINUE_ON_TEST_FAIL=0
+WINDOW=""
+
 for a in "$@"; do
   case "$a" in
-    --full) FULL=1 ;;
+    --full) PAPER_ONLY=0 ;;
     --fast) FAST=1 ;;
+    --paper-only) PAPER_ONLY=1 ;;
+    --no-tests) RUN_TESTS=0 ;;
+    --no-check) RUN_CHECK=0 ;;
+    --with-book-probe|--book-probe) BOOK_PROBE=1 ;;
+    --no-browser|--quiet) NO_BROWSER=1 ;;
+    --open) OPEN_ONLY=1 ;;
+    --continue-on-test-fail) CONTINUE_ON_TEST_FAIL=1 ;;
+    --window) WINDOW=--window ;;
+    --latest) DATE="" ;;
     *) DATE="$a" ;;
   esac
 done
-[ -z "$DATE" ] && DATE=$(date +%Y-%m-%d)
-COMPACT=${DATE//-/}
+
+[ -n "${GBM_NO_BROWSER:-}" ] && NO_BROWSER=1
+
+# ---------- "--open": reopen the master report in <1s, run nothing ----------
+if [ "$OPEN_ONLY" = 1 ]; then
+  if [ -n "$DATE" ] && [ -f "data/report_${DATE}.html" ]; then
+    TARGET="data/report_${DATE}.html"
+  else
+    TARGET=$(ls data/report_*.html 2>/dev/null | sort | tail -1)
+    [ -z "$TARGET" ] && TARGET=$(ls data/day_report_*.html 2>/dev/null | sort | tail -1)
+  fi
+  if [ -n "$TARGET" ] && [ -f "$TARGET" ]; then
+    [ -f audit_day.py ] && "$PY" audit_day.py --open-html "$TARGET" >/dev/null 2>&1 || true
+    echo "[chief of staff] opened: $TARGET"
+    exit 0
+  fi
+  echo "[warn] no evening report found yet - run:  bash report_evening.sh"
+  exit 1
+fi
+
+# ---------- Smart date resolution: newest trading log day when omitted ----------
+DATE_NOTE=""
+if [ -z "$DATE" ]; then
+  NEWEST_LOG=$(ls logs/trading_*.log 2>/dev/null | sort | tail -1)
+  if [ -n "$NEWEST_LOG" ]; then
+    BASE_LOG=$(basename "$NEWEST_LOG" .log)
+    D8=${BASE_LOG#trading_}
+    if [ "${#D8}" = 8 ]; then
+      DATE="${D8:0:4}-${D8:4:2}-${D8:6:2}"
+      DATE_NOTE="[chief of staff] no date given -> newest trading log: $DATE"
+    fi
+  fi
+  if [ -z "$DATE" ]; then
+    DATE=$(date +%Y-%m-%d)
+    DATE_NOTE="[chief of staff] no trading log found -> defaulting to calendar date: $DATE"
+  fi
+fi
+
+mkdir -p data
+
+# ---------- Auto-capture complete evening transcript to data/evening_suite_<DATE>.log ----------
+SUITE_LOG="data/evening_suite_${DATE}.log"
+ABS_SUITE_LOG="$(pwd)/$SUITE_LOG"
+if [ "${GBM_EVENING_SUITE_ACTIVE_LOG:-}" != "$ABS_SUITE_LOG" ] && [ -z "${GBM_DISABLE_AUTO_TEE:-}" ]; then
+  GBM_EVENING_SUITE_ACTIVE_LOG="$ABS_SUITE_LOG" bash "$0" "$@" 2>&1 | tee "$SUITE_LOG"
+  exit "${PIPESTATUS[0]}"
+fi
 
 hr() { printf '%s\n' "--------------------------------------------------------------------------------------------------------------"; }
 title() { printf '\n%s\n%s\n%s\n' "==============================================================================================================" "$1" "=============================================================================================================="; }
 
-title "TODAY'S PAPER - $DATE  (report_evening.sh - the one evening command)"
+[ -n "$DATE_NOTE" ] && echo "$DATE_NOTE"
+title "COMPANY 2 -- THE REPORT OFFICE -- $DATE  (report_evening.sh: one command, one report)"
 
-if [ "$FULL" = 1 ]; then
-  echo "[chief of staff] --full: running the Editor first (audit_day, ~1-3 min)..."
-  GBM_NO_BROWSER=1 "$PY" audit_day.py --date "$DATE" --no-browser >/dev/null 2>&1 \
-    && echo "[chief of staff] Editor done." \
-    || echo "[chief of staff] Editor failed or no data - continuing with the desks."
-fi
+GATE_TXT="data/evening_test_gate_${DATE}.txt"
+GATE_JSON="data/evening_test_gate_${DATE}.json"
 
-echo "[chief of staff] desk 1/7: the Accountant (decision ledger)..."
-"$PY" decision_ledger.py --date "$DATE" | sed 's/^/  /'
-hr
-echo "[chief of staff] desk 2/7: the Geometer (edge persistence)..."
-"$PY" tf_study.py --date "$DATE" | sed 's/^/  /'
-hr
-echo "[chief of staff] desk 3/7: the Shadow (the robot's own wall logic)..."
-"$PY" shadow_replay.py --date "$DATE" | sed 's/^/  /'
-hr
+# ==============================================================================
+# STAGE 1/6: Toolkit & Code Self-Tests (fail-closed if broken)
+# ==============================================================================
+if [ "$PAPER_ONLY" = 0 ]; then
+  echo "== [1/6] Toolkit & Code Self-Tests =="
+  : > "$GATE_TXT"
+  GATE_FAILED=0
 
-# ---- fusion v1: the POWER desks (what POWER said, and what it carried) ---------
-echo "[chief of staff] desk 9: the POWER card (what POWER said all day)..."
-if [ -f power_report_card.py ]; then
-  "$PY" power_report_card.py "$DATE" | sed 's/^/  /'
-else
-  echo "  (power_report_card.py not installed - skipping)"
-fi
-hr
-echo "[chief of staff] desk 10: the Council shadow (what fusion would have carried)..."
-if [ -f council_shadow.py ]; then
-  "$PY" council_shadow.py "$DATE" | sed 's/^/  /'
-else
-  echo "  (council_shadow.py not installed - skipping)"
-fi
-hr
+  "$PY" - "$DATE" "$GATE_JSON" <<'PYEOF'
+import json, sys
+json.dump({"date": sys.argv[1], "checks": []}, open(sys.argv[2], "w", encoding="utf-8"), indent=2)
+PYEOF
 
-# ---- v1.2: the measurement desks (skip with --fast) ----------------------------
-if [ "$FAST" = 1 ]; then
-  echo "[chief of staff] desks 4-5 skipped (--fast: the quick paper)"
-else
-  if [ -f tf_lens.py ]; then
-    echo "[chief of staff] desk 4/7: the Lens (timeframe glasses, ~1-3 min)..."
-    "$PY" tf_lens.py --date "$DATE" | sed 's/^/  /'
+  record_gate() {
+    local name="$1" status="$2" secs="$3" detail="$4"
+    printf '[%s] %-28s (%ss) %s\n' "$status" "$name" "$secs" "$detail" | tee -a "$GATE_TXT"
+    "$PY" - "$GATE_JSON" "$name" "$status" "$secs" "$detail" <<'PYEOF'
+import json, sys
+p, name, status, secs, detail = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4]), sys.argv[5]
+d = json.load(open(p, encoding="utf-8"))
+d.setdefault("checks", []).append({"name": name, "status": status, "seconds": secs, "detail": detail})
+json.dump(d, open(p, "w", encoding="utf-8"), indent=2)
+PYEOF
+  }
+
+  if [ "$RUN_CHECK" = 1 ] && [ -f daily_check.sh ]; then
+    T0=$(date +%s)
+    CHK_OUT=$(GBM_NO_BROWSER=1 bash daily_check.sh --check 2>&1)
+    CHK_RC=$?
+    T1=$(date +%s)
+    CHK_LAST=$(printf '%s\n' "$CHK_OUT" | tail -1)
+    if [ "$CHK_RC" -eq 0 ]; then
+      record_gate "daily_check.sh --check" "PASS" "$((T1 - T0))" "$CHK_LAST"
+    else
+      record_gate "daily_check.sh --check" "FAIL" "$((T1 - T0))" "$CHK_LAST"
+      printf '%s\n' "$CHK_OUT" | tee -a "$GATE_TXT"
+      echo "[FAIL] Auditor self-check failed -- stopping so untrustworthy day numbers are never printed."
+      exit 1
+    fi
   else
-    echo "[chief of staff] desk 4/5: the Lens is not installed (tf_lens.py missing) - skipping."
+    record_gate "daily_check.sh --check" "SKIP" "0" "skipped by flag"
+  fi
+
+  if [ "$RUN_TESTS" = 1 ] && [ -z "${GBM_INSIDE_EVENING_PYTEST:-}" ]; then
+    if "$PY" -c "import pytest" >/dev/null 2>&1; then
+      T0=$(date +%s)
+      PT_OUT=$(GBM_INSIDE_EVENING_PYTEST=1 GBM_NO_BROWSER=1 "$PY" -m pytest -q 2>&1)
+      PT_RC=$?
+      T1=$(date +%s)
+      PT_LAST=$(printf '%s\n' "$PT_OUT" | tail -1)
+      if [ "$PT_RC" -eq 0 ]; then
+        record_gate "pytest -q" "PASS" "$((T1 - T0))" "$PT_LAST"
+      else
+        record_gate "pytest -q" "FAIL" "$((T1 - T0))" "$PT_LAST"
+        printf '%s\n' "$PT_OUT" | tee -a "$GATE_TXT"
+        GATE_FAILED=1
+      fi
+    else
+      record_gate "pytest -q" "SKIP" "0" "pytest module not installed"
+    fi
+
+    for rig in rig_g11.py rig_memory.py rig_tf_robot.py; do
+      [ "$FAST" = 1 ] && [ "$rig" = "rig_tf_robot.py" ] && {
+        record_gate "$rig" "SKIP" "0" "skipped in --fast mode"
+        continue
+      }
+      if [ -f "$rig" ]; then
+        T0=$(date +%s)
+        RIG_OUT=$("$PY" "$rig" 2>&1)
+        RIG_RC=$?
+        T1=$(date +%s)
+        RIG_LAST=$(printf '%s\n' "$RIG_OUT" | grep -v '^$' | tail -1)
+        if [ "$RIG_RC" -eq 0 ]; then
+          record_gate "$rig" "PASS" "$((T1 - T0))" "$RIG_LAST"
+        else
+          record_gate "$rig" "FAIL" "$((T1 - T0))" "$RIG_LAST"
+          printf '%s\n' "$RIG_OUT" | tee -a "$GATE_TXT"
+          GATE_FAILED=1
+        fi
+      fi
+    done
+  else
+    record_gate "code & rig tests" "SKIP" "0" "skipped (--no-tests or nested pytest)"
+  fi
+
+  if [ "$GATE_FAILED" -ne 0 ] && [ "$CONTINUE_ON_TEST_FAIL" = 0 ]; then
+    echo "[FAIL] One or more code/rig tests failed (see above and $GATE_TXT)."
+    echo "       Fix the failing test first, or pass --continue-on-test-fail to inspect reports anyway."
+    exit 1
   fi
   hr
-  if [ -f fish_anatomy.py ] && [ -f tf_lens.py ]; then
-    echo "[chief of staff] desk 5/7: the Anatomist (fish dissection, ~1-3 min)..."
-    "$PY" fish_anatomy.py --date "$DATE" | sed 's/^/  /'
+fi
+
+# ==============================================================================
+# STAGE 2/6: Setup Preflight + 17-Test Day Audit + All-Days History
+# ==============================================================================
+if [ "$PAPER_ONLY" = 0 ]; then
+  echo "== [2/6] Setup Preflight + 17-Test Day Audit + Multi-Day History =="
+  if [ -f preflight.sh ]; then
+    PF_OUT=$(bash preflight.sh "$DATE" 2>&1)
+    printf '%s\n' "$PF_OUT" | sed -n '/--- 3/,$p' | tee "data/preflight_${DATE}.txt"
   else
-    echo "[chief of staff] desk 5/7: the Anatomist needs fish_anatomy.py + tf_lens.py - skipping."
+    echo "[warn] preflight.sh not found - continuing"
   fi
   hr
-  if [ -f tf_robot_replay.py ] && [ -f twin_day_runner.py ] && [ -f step2_market_analysis.py ]; then
-    echo "[chief of staff] desk 6/7: the Universes (REAL brain at 1/3/5/8/10 min, SLOW ~5-10 min)..."
-    "$PY" tf_robot_replay.py --date "$DATE" | sed 's/^/  /'
+  if [ -f audit_day.py ]; then
+    GBM_NO_BROWSER=1 "$PY" audit_day.py --date "$DATE" --out "day_report_${DATE}.txt" ${WINDOW:-} --no-browser
   else
-    echo "[chief of staff] desk 6/7: the Universes need tf_robot_replay.py + twin_day_runner.py + the brain - skipping."
+    echo "[warn] audit_day.py not found - skipping 17-test day audit"
   fi
   hr
+  if [ -f tools/check_history.py ]; then
+    GBM_NO_BROWSER=1 "$PY" tools/check_history.py --html | tee "data/history_summary_${DATE}.txt"
+  fi
+  hr
+fi
+
+# ==============================================================================
+# STAGE 3/6: The Truck Camera (tail_probe.py -- STEP1/STEP2/STEP3 latency)
+# ==============================================================================
+if [ "$PAPER_ONLY" = 0 ]; then
+  echo "== [3/6] The Truck Camera (tail_probe.py -- pipeline latency attribution) =="
+  if [ -f tail_probe.py ]; then
+    "$PY" tail_probe.py --date "$DATE" --peek
+  else
+    echo "  (tail_probe.py not installed - skipping)"
+  fi
+  hr
+fi
+
+# ==============================================================================
+# STAGE 4/6: The Flow & Book Spies (flow_probe.py + optional book_probe.py)
+# ==============================================================================
+if [ "$PAPER_ONLY" = 0 ]; then
+  echo "== [4/6] The Flow & Order-Book Spies =="
+  if [ "$FAST" = 1 ]; then
+    echo "  (flow_probe.py / book_probe.py skipped in --fast mode)"
+  else
+    if [ -f flow_probe.py ] && [ -f tf_lens.py ]; then
+      "$PY" flow_probe.py --date "$DATE"
+    else
+      echo "  (flow_probe.py not installed - skipping)"
+    fi
+    if [ "$BOOK_PROBE" = 1 ] && [ -f book_probe.py ] && [ -f flow_probe.py ] && [ -f tf_lens.py ]; then
+      hr
+      "$PY" book_probe.py --date "$DATE"
+    fi
+  fi
+  hr
+fi
+
+# ==============================================================================
+# STAGE 5/6: TODAY'S PAPER (Desks 1-10 + Watchman + AI Cost + Reconciliation)
+# ==============================================================================
+PAPER_FILE="data/evening_paper_${DATE}.txt"
+{
+  title "TODAY'S PAPER - $DATE  (report_evening.sh - the one evening command)"
+
+  echo "[chief of staff] desk 1/7: the Accountant (decision ledger)..."
+  "$PY" decision_ledger.py --date "$DATE" | sed 's/^/  /'
+  hr
+  echo "[chief of staff] desk 2/7: the Geometer (edge persistence)..."
+  "$PY" tf_study.py --date "$DATE" | sed 's/^/  /'
+  hr
+  echo "[chief of staff] desk 3/7: the Shadow (the robot's own wall logic)..."
+  "$PY" shadow_replay.py --date "$DATE" | sed 's/^/  /'
+  hr
+
+  # ---- fusion v1: the POWER desks (what POWER said, and what it carried) -----
+  echo "[chief of staff] desk 9: the POWER card (what POWER said all day)..."
+  if [ -f power_report_card.py ]; then
+    "$PY" power_report_card.py "$DATE" | tee "data/power_report_card_${DATE}.txt" | sed 's/^/  /'
+  else
+    echo "  (power_report_card.py not installed - skipping)"
+  fi
+  hr
+  echo "[chief of staff] desk 10: the Council shadow (what fusion would have carried)..."
+  if [ -f council_shadow.py ]; then
+    "$PY" council_shadow.py "$DATE" | tee "data/council_shadow_${DATE}.txt" | sed 's/^/  /'
+  else
+    echo "  (council_shadow.py not installed - skipping)"
+  fi
+  hr
+
+  # ---- v1.2+: the measurement desks (skip slow replay desks 4-6 with --fast) -
+  if [ "$FAST" = 1 ]; then
+    echo "[chief of staff] desks 4-6 skipped (--fast: the quick paper)"
+  else
+    if [ -f tf_lens.py ]; then
+      echo "[chief of staff] desk 4/7: the Lens (timeframe glasses, ~1-3 min)..."
+      "$PY" tf_lens.py --date "$DATE" | sed 's/^/  /'
+    else
+      echo "[chief of staff] desk 4/7: the Lens is not installed (tf_lens.py missing) - skipping."
+    fi
+    hr
+    if [ -f fish_anatomy.py ] && [ -f tf_lens.py ]; then
+      echo "[chief of staff] desk 5/7: the Anatomist (fish dissection, ~1-3 min)..."
+      "$PY" fish_anatomy.py --date "$DATE" | sed 's/^/  /'
+    else
+      echo "[chief of staff] desk 5/7: the Anatomist needs fish_anatomy.py + tf_lens.py - skipping."
+    fi
+    hr
+    if [ -f tf_robot_replay.py ] && [ -f twin_day_runner.py ] && [ -f step2_market_analysis.py ]; then
+      echo "[chief of staff] desk 6/7: the Universes (REAL brain at 1/3/5/8/10 min, SLOW ~5-10 min)..."
+      "$PY" tf_robot_replay.py --date "$DATE" | sed 's/^/  /'
+    else
+      echo "[chief of staff] desk 6/7: the Universes need tf_robot_replay.py + twin_day_runner.py + the brain - skipping."
+    fi
+  fi
+  hr
+
   if [ -f clocks_verdict.py ]; then
     echo "[chief of staff] desk 7/7: the Clocks (the 5-day rules, C1/C2/C3/C6)..."
     "$PY" clocks_verdict.py | sed 's/^/  /'
   else
     echo "[chief of staff] desk 7/7: the Clocks are not installed (clocks_verdict.py missing) - skipping."
   fi
-fi
-hr
+  hr
 
-# ---- the Editor's own numbers, if the day was audited -------------------------
-# (audit_day saves day_metrics with DASHES in the date: day_metrics_2026-10-08.json)
-METRICS="data/day_metrics_${DATE}.json"
-if [ -f "$METRICS" ]; then
-  echo "[chief of staff] the Editor's recorded verdict ($METRICS):"
-  "$PY" - "$METRICS" <<'PYEOF' | sed 's/^/  /'
+  # ---- the Editor's own numbers, if the day was audited ----------------------
+  METRICS="data/day_metrics_${DATE}.json"
+  if [ -f "$METRICS" ]; then
+    echo "[chief of staff] the Editor's recorded verdict ($METRICS):"
+    "$PY" - "$METRICS" <<'PYEOF' | sed 's/^/  /'
 import json, sys
 def find(obj, needles, path=""):
     out = []
@@ -135,29 +355,29 @@ except Exception as e:
     print(f"  (could not read: {e})"); sys.exit(0)
 rows = find(d, ["verdict", "pass", "warn", "fail", "whatif", "what_if", "win_rate", "wr"])
 if not rows:
-    print("  (no verdict/what-if keys found - re-run: bash daily_check.sh " + sys.argv[1].split("day_metrics_")[-1].split(".")[0].replace("-","-") + ")")
+    print("  (no verdict/what-if keys found - re-run: bash report_evening.sh " + sys.argv[1].split("day_metrics_")[-1].split(".")[0] + ")")
 for p, v in rows[:12]:
     print(f"  {p:<40} {v}")
 PYEOF
-else
-  echo "[chief of staff] the Editor has not graded this day yet (no $METRICS)."
-  echo "  for the Editor's own grade:  bash daily_check.sh $DATE   (or rerun with --full)"
-fi
-hr
+  else
+    echo "[chief of staff] the Editor has not graded this day yet (no $METRICS)."
+    echo "  for the Editor's own grade:  bash report_evening.sh $DATE"
+  fi
+  hr
 
-# ---- the Watchman's day --------------------------------------------------------
-WL="data/tape_watchdog.log"
-if [ -f "$WL" ]; then
-  echo "[chief of staff] the Watchman's day (from $WL):"
-  grep "^$DATE " "$WL" | sed 's/^/  /' || echo "  (no entries for this date - watchdog not running that day?)"
-else
-  echo "[chief of staff] no watchdog log (data/tape_watchdog.log) - the Watchman did not run."
-fi
-hr
+  # ---- the Watchman's day ----------------------------------------------------
+  WL="data/tape_watchdog.log"
+  if [ -f "$WL" ]; then
+    echo "[chief of staff] the Watchman's day (from $WL):"
+    grep "^$DATE " "$WL" | sed 's/^/  /' || echo "  (no entries for this date - watchdog not running that day?)"
+  else
+    echo "[chief of staff] no watchdog log (data/tape_watchdog.log) - the Watchman did not run."
+  fi
+  hr
 
-# ---- v1.4 (report v2): the AI COST line ------------------------------------------
-echo "[chief of staff] desk 8: the AI COST line (report v2)..."
-"$PY" - "$DATE" <<'PYEOF' | sed 's/^/  /'
+  # ---- v1.4 (report v2): the AI COST line ------------------------------------
+  echo "[chief of staff] desk 8: the AI COST line (report v2)..."
+  "$PY" - "$DATE" <<'PYEOF' | sed 's/^/  /'
 import json, sys
 date = sys.argv[1]
 try:
@@ -172,11 +392,11 @@ except Exception as e:
 print("the full cost story (real calls / throttled rests / bells lost to the rest):")
 print("the Editor's TEST 17:  python audit_day.py --date " + date)
 PYEOF
-hr
+  hr
 
-# ---- the reconciliation line ----------------------------------------------------
-echo "[chief of staff] RECONCILIATION (all three must tell the same story):"
-"$PY" - "$DATE" <<'PYEOF' | sed 's/^/  /'
+  # ---- the reconciliation line -----------------------------------------------
+  echo "[chief of staff] RECONCILIATION (all three must tell the same story):"
+  "$PY" - "$DATE" <<'PYEOF' | sed 's/^/  /'
 import os, re, sys
 date = sys.argv[1]
 def rd(path):
@@ -213,8 +433,38 @@ if shd is not None:
     print(f"  Shadow (robot's own walls) vs same-subset benchmark: {fmt(shd)} vs {fmt(bm_same)} "
           f"- the gap is the honest size of 'the walls change the answer'.")
 PYEOF
+  hr
+  echo "[chief of staff] today's desk outputs:"
+  ls -la "data/decision_ledger_${DATE}".* "data/tf_study_${DATE}".* "data/shadow_replay_${DATE}".* \
+         "data/power_report_card_${DATE}.txt" "data/council_shadow_${DATE}.txt" \
+         "data/tf_lens_${DATE}".* "data/fish_anatomy_${DATE}".* "data/tf_robot_${DATE}".* \
+         "data/tail_probe_${DATE}.txt" "data/flow_probe_${DATE}.txt" "data/clocks_verdict.txt" 2>/dev/null \
+         | awk '{print "  " $NF " (" $5 " bytes)"}'
+} 2>&1 | tee "$PAPER_FILE"
+
 hr
-echo "[chief of staff] today's outputs:"
-ls -la "data/decision_ledger_${DATE}".* "data/tf_study_${DATE}".* "data/shadow_replay_${DATE}".* "data/tf_lens_${DATE}".* "data/fish_anatomy_${DATE}".* "data/tf_robot_${DATE}".* "data/clocks_verdict.txt" 2>/dev/null | awk '{print "  " $NF " (" $5 " bytes)"}'
+
+# ==============================================================================
+# STAGE 6/6: Stitch EVERYTHING into ONE HTML page & open it
+# ==============================================================================
+echo "== [6/6] Master One-Page Report (all tests + all Company 2 desks in one place) =="
+MASTER_HTML="data/report_${DATE}.html"
+if [ -f tools/report_office_bundle.py ]; then
+  "$PY" tools/report_office_bundle.py --date "$DATE"
+fi
+
+if [ "$NO_BROWSER" = 0 ] && [ -f "$MASTER_HTML" ]; then
+  if [ -f audit_day.py ]; then
+    "$PY" audit_day.py --open-html "$MASTER_HTML" >/dev/null 2>&1 || true
+  fi
+fi
+
 echo ""
-echo "[chief of staff] done. The paper is above; the files are in data/."
+echo "=============================================================================================================="
+echo " DONE -- CHECK ONLY ONE PLACE FOR EVERYTHING ($DATE):"
+echo "   1. Master HTML Report : data\\report_${DATE}.html   (opened in browser: tests, 17 checks, scoreboard, veto,"
+echo "                           Evening Paper Desks 1-10, Reconciliation, Truck Camera, Flow Spy, decisions & trades)"
+echo "   2. All Audited Days   : data\\index.html"
+echo "   3. Full Text Log      : data\\evening_suite_${DATE}.log"
+echo "=============================================================================================================="
+exit 0

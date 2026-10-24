@@ -50,10 +50,11 @@ fi
 
 # ---------- just reopen the last dashboard (nothing is computed) ----------
 if [ "$MODE" = "open" ]; then
-  L=$(ls data/day_report_*.html 2>/dev/null | sort | tail -1)
+  L=$(ls data/report_*.html 2>/dev/null | sort | tail -1)
+  [ -z "$L" ] && L=$(ls data/day_report_*.html 2>/dev/null | sort | tail -1)
   [ -n "$L" ] && { "$PY" audit_day.py --open-html "$L"; exit 0; }
   "$PY" audit_day.py --open && exit 0
-  echo "[warn] no report found - run:  bash daily_check.sh"; exit 1
+  echo "[warn] no report found - run:  bash report_evening.sh"; exit 1
 fi
 
 # ---------- 0. is the toolbox itself OK? ---------------------------------
@@ -139,16 +140,17 @@ fi
 
 hr
 echo "== 4/4 open the dashboard =="
-ls -la "day_report_$DAY.txt" "data/day_report_$DAY.html" "data/day_metrics_$DAY.json" \
+ls -la "day_report_$DAY.txt" "data/report_$DAY.html" "data/day_report_$DAY.html" "data/day_metrics_$DAY.json" \
        "data/history_report.html" "data/index.html" 2>/dev/null | awk '{printf "   %-44s %8d bytes\n", $9, $5}'
-# the audit call above already opened the dashboard tab (unless --quiet/--no-browser);
-# this only makes sure the all-days page exists next to it
-[ -z "$NOB" ] && [ -f "data/day_report_$DAY.html" ] && {
-  "$PY" audit_day.py --open-html "data/day_report_$DAY.html" >/dev/null 2>&1 || true
+OPEN_HTML="data/report_$DAY.html"
+[ -f "$OPEN_HTML" ] || OPEN_HTML="data/day_report_$DAY.html"
+# open the complete one-page report (which embeds all 17 tests, scoreboard, AI veto, decisions, trades & judges)
+[ -z "$NOB" ] && [ -f "$OPEN_HTML" ] && {
+  "$PY" audit_day.py --open-html "$OPEN_HTML" >/dev/null 2>&1 || true
   echo
-  echo "   dashboard: data\\day_report_$DAY.html   (a new browser tab should have opened)"
-  echo "   all days : data\\index.html              (double-click any time, nothing runs)"
-  echo "   inside the dashboard: button 'Copy everything for chat' = the exact text you paste to me"
+  echo "   one-page report: ${OPEN_HTML//\//\\}   (a new browser tab should have opened)"
+  echo "   all days       : data\\index.html              (double-click any time, nothing runs)"
+  echo "   full evening   : bash report_evening.sh $DAY   (runs ALL Company 2 tests + desks into this one page)"
 }
 echo
 [ "${BLOCK:-0}" -gt 0 ] && echo "[note] $BLOCK setup warning(s) above - the audit is still valid; read the FAIL cards first."

@@ -444,7 +444,8 @@ def write_index(data_dir, out_path=None):
                         + (f" - best judge {jd['best']}" if jd.get("best") else ""))
         if m.get("_legacy"):
             bits.append("text-only day: run  bash daily_check.sh " + _esc(m["date"]) + "  to get the json twin")
-        href = f"day_report_{m['date']}.html"
+        full_href = f"report_{m['date']}.html"
+        href = full_href if (data_dir / full_href).exists() else f"day_report_{m['date']}.html"
         inner = (f'<div class=hd><span class=nm>{_esc(m["date"])}</span>'
                  f'<span class="pill {cls}">{state}</span></div>'
                  + "".join(f'<div style="font-size:11.5px;color:#9aa4bd">{_esc(b)}</div>' for b in bits))
@@ -453,11 +454,17 @@ def write_index(data_dir, out_path=None):
         else:
             cards += f'<div class=daylink style=cursor:default>{inner}</div>'
     if not days:
-        cards = ('<div class=card>No audited day found yet. Run <b>bash daily_check.sh</b> (or '
-                 '<b>python audit_day.py --latest</b>) and come back to this page.</div>')
+        cards = ('<div class=card>No audited day found yet. Run <b>bash report_evening.sh</b> (or '
+                 '<b>bash daily_check.sh</b>) and come back to this page.</div>')
     n_fail = sum(1 for m in days if (m.get("counts") or {}).get("FAIL"))
     n_ok = sum(1 for m in days if (m.get("counts") or {}).get("PASS"))
-    newest = f"day_report_{days[-1]['date']}.html" if days else ""
+    if days:
+        _newest_day = days[-1]["date"]
+        newest = (f"report_{_newest_day}.html"
+                  if (data_dir / f"report_{_newest_day}.html").exists()
+                  else f"day_report_{_newest_day}.html")
+    else:
+        newest = ""
     html = ("<!doctype html><html lang=en><head><meta charset=utf-8>"
             "<meta name=viewport content='width=device-width,initial-scale=1'>"
             f"<title>Gold-BookMap - all audited days</title><style>{_STYLE}</style><script>{_JS}</script></head><body>"
@@ -502,7 +509,10 @@ def history_block(data_dir, limit=14):
                  ("WARN" if ct.get("WARN") else "PASS"))) if ct else "NONE"
         pts = wi.get("total_pts")
         pill = state if state in ("PASS", "WARN", "FAIL", "NA") else "NA"
-        trs += (f'<tr><td><a href="day_report_{_esc(m["date"])}.html">{_esc(m["date"])}</a></td>'
+        _href = (f"report_{m['date']}.html"
+                 if (data_dir / f"report_{m['date']}.html").exists()
+                 else f"day_report_{m['date']}.html")
+        trs += (f'<tr><td><a href="{_esc(_href)}">{_esc(m["date"])}</a></td>'
                 f"<td class=n>{_num(m.get('feed_prints'))}</td>"
                 f"<td class=n>{_num(m.get('decisions'))}</td>"
                 f"<td class=n>{_num(m.get('diary_records'))}</td>"
