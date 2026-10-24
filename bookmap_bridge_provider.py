@@ -408,10 +408,17 @@ class _BridgeTail:
                 except Exception:
                     pass
 
-    def _replay_recorded_history(self) -> None:
-        """memory-fix-2026-10-07: rebuild state from the tape's own recorded
-        history (rotated chunks + data/archive/*.gz). ONE source of truth:
-        the recorded CSV stream. No second cache, no re-recording."""
+    def _replay_recorded_history(self) -> Optional[int]:
+        """Rebuild state from recorded history and return the live-file offset.
+
+        The returned text-file seek cookie is the exact prefix of ``self.path``
+        already replayed. ``_catch_up`` uses it to continue with rows appended
+        during replay instead of rereading the same tail a second time.
+        History remains sourced only from the recorded CSV stream.
+        """
+        replay_started = time.monotonic()
+        live_offset: Optional[int] = None
+        live_key = os.path.normcase(os.path.abspath(self.path))
         try:
             folder = os.path.dirname(self.path) or "."
             names = [n for n in os.listdir(folder) if _CHUNK_RE.match(n)]
@@ -433,7 +440,9 @@ class _BridgeTail:
             except Exception:
                 win = 10800
             cutoff_ts = datetime.now().astimezone().timestamp() - (win + 300.0)
-            replayed = skipped = 0
+            replayed = skipped = scanned = 0
+            timestamp_order_regressions = 0
+            last_timestamp_epoch = None
             budget = 3000000
             # book-hygiene replay v2: the LIVE file is replayed with the same
             # time filter (kills the 64MB catch-up hole) and is always LAST.
@@ -441,17 +450,31 @@ class _BridgeTail:
             if os.path.exists(self.path) and self.path not in ordered:
                 ordered = ordered + [self.path]
             for src in ordered:
+                is_live_file = os.path.normcase(os.path.abspath(src)) == live_key
+                source_started = time.monotonic()
+                source_replayed = replayed
+                source_skipped = skipped
+                source_scanned = 0
+                source_regressions = timestamp_order_regressions
                 try:
                     opener = gzip.open if src.endswith(".gz") else open
                     with opener(src, "rt", encoding="utf-8", errors="replace") as fh:
                         for line in fh:
+                            scanned += 1
+                            source_scanned += 1
                             if not line.endswith("\n"):
                                 continue
                             ts_raw = line.split(",", 1)[0]
                             try:
                                 ts = _parse_ts(ts_raw)
-                                ts_ok = (ts is not None
-                                         and ts.timestamp() >= cutoff_ts)
+                                ts_epoch = ts.timestamp() if ts is not None else None
+                                if ts_epoch is not None:
+                                    if (last_timestamp_epoch is not None
+                                            and ts_epoch < last_timestamp_epoch):
+                                        timestamp_order_regressions += 1
+                                    last_timestamp_epoch = ts_epoch
+                                ts_ok = (ts_epoch is not None
+                                         and ts_epoch >= cutoff_ts)
                             except Exception:
                                 ts_ok = True
                             if not ts_ok:
@@ -461,38 +484,69 @@ class _BridgeTail:
                             replayed += 1
                             if replayed >= budget:
                                 break
+                        if is_live_file:
+                            # TextIOWrapper.tell() is a seek cookie, not a byte
+                            # count. Reuse it on the tailer's identically-opened
+                            # live file so it resumes exactly after the replayed
+                            # prefix, including rows appended while replay ran.
+                            live_offset = fh.tell()
                 except Exception as exc:
+                    if is_live_file:
+                        live_offset = None
                     logger.warning("BookMap history replay failed for %s: %s",
                                    os.path.basename(src), exc)
+                source_ms = (time.monotonic() - source_started) * 1000.0
+                logger.info(
+                    "BookMap replay source %s: scanned=%d fresh=%d stale=%d "
+                    "timestamp_regressions=%d elapsed=%.0fms",
+                    os.path.basename(src), source_scanned,
+                    replayed - source_replayed, skipped - source_skipped,
+                    timestamp_order_regressions - source_regressions, source_ms)
                 if replayed >= budget:
                     break
+            replay_ms = (time.monotonic() - replay_started) * 1000.0
             if replayed:
                 logger.info(
                     "BookMap history replay v2: %d fresh lines kept (%d stale "
-                    "skipped) from %d recorded file(s) (single-source warm-up; "
-                    "window restored)", replayed, skipped, len(ordered))
+                    "skipped; %d lines scanned; %d timestamp-order regressions) "
+                    "from %d recorded file(s) (single-source warm-up; window "
+                    "restored; %.0fms)", replayed, skipped, scanned,
+                    timestamp_order_regressions, len(ordered), replay_ms)
             else:
                 logger.info(
                     "BookMap history replay v2: no fresh lines in the recorded "
-                    "history (day start/overnight gap; %d stale skipped) - "
-                    "candles/ATR stay honestly shallow until the window fills",
-                    skipped)
+                    "history (day start/overnight gap; %d stale skipped; %d "
+                    "lines scanned; %d timestamp-order regressions) - "
+                    "candles/ATR stay honestly shallow until the window fills "
+                    "(%.0fms)", skipped, scanned, timestamp_order_regressions,
+                    replay_ms)
+            return live_offset
         except Exception:
             logger.exception("BookMap history replay failed")
+            return None
 
     def _catch_up(self, f) -> None:
         try:
+            live_offset = None
             if not getattr(self, "_history_replayed", False):
                 self._history_replayed = True
-                self._replay_recorded_history()
-            size = os.path.getsize(self.path)
-            if size > _CATCHUP_BYTES:
-                f.seek(size - _CATCHUP_BYTES)
-                f.readline()
+                live_offset = self._replay_recorded_history()
+            if live_offset is not None:
+                # History replay already consumed this live-file prefix. Starting
+                # at EOF here used to replay the last catch-up window twice,
+                # inflating tick/depth state and wasting startup time. Continue
+                # at the exact replay offset so concurrent appends are retained.
+                f.seek(live_offset)
+            else:
+                # Recovery path if the replay could not expose its live offset.
+                size = os.path.getsize(self.path)
+                if size > _CATCHUP_BYTES:
+                    f.seek(size - _CATCHUP_BYTES)
+                    f.readline()
             for line in f:
                 if line.endswith("\n"):
                     self._handle_line(line)
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
             logger.warning("BookMap bridge catch-up read failed: %s", exc)
 
     def _run(self) -> None:
@@ -914,13 +968,26 @@ def _fresh_depth_levels(levels: Dict[float, float], timestamps: Dict[float, Any]
                         now_epoch: float, max_age_seconds: float):
     """Return only finite, positive levels with a valid recent per-level stamp.
 
-    Missing, future-dated, and expired timestamps are rejected rather than
-    allowed to influence the book. Counts are retained for diagnostics.
+    Missing, future-dated, expired, or age-limit-unverified levels are rejected
+    rather than allowed to influence the book. Counts are retained for diagnostics.
     """
     fresh: Dict[float, float] = {}
     fresh_ts: Dict[float, float] = {}
     counts = {"kept": 0, "missing_timestamp": 0, "future_timestamp": 0,
               "stale": 0, "invalid": 0}
+    try:
+        if isinstance(max_age_seconds, bool):
+            raise ValueError("boolean level age limit")
+        max_age_seconds = float(max_age_seconds)
+        if not math.isfinite(max_age_seconds) or max_age_seconds <= 0:
+            raise ValueError("invalid level age limit")
+    except (TypeError, ValueError, OverflowError):
+        try:
+            counts["invalid_age_limit"] = len(levels or {})
+        except (TypeError, ValueError, OverflowError):
+            counts["invalid_age_limit"] = 0
+        return fresh, fresh_ts, counts
+
     for raw_price, raw_size in (levels or {}).items():
         try:
             if isinstance(raw_price, bool) or isinstance(raw_size, bool):
@@ -963,7 +1030,20 @@ def _fresh_depth_levels(levels: Dict[float, float], timestamps: Dict[float, Any]
 def _top_depth_receipt(levels: Dict[float, float], timestamps: Dict[float, Any],
                        now_epoch: float, max_age_seconds: float,
                        side: str) -> List[Dict[str, Any]]:
-    """Return the raw top-five levels with per-level timestamp/age status."""
+    """Return top-five levels with per-level timestamp/age status.
+
+    A missing or invalid age limit must never cause a raw level to be labeled
+    fresh; valid prices/sizes are retained only as explicitly unverified receipt.
+    """
+    try:
+        if isinstance(max_age_seconds, bool):
+            raise ValueError("boolean level age limit")
+        max_age_seconds = float(max_age_seconds)
+        age_limit_valid = math.isfinite(max_age_seconds) and max_age_seconds > 0
+    except (TypeError, ValueError, OverflowError):
+        max_age_seconds = 0.0
+        age_limit_valid = False
+
     candidates = []
     for raw_price, raw_size in (levels or {}).items():
         try:
@@ -1012,7 +1092,9 @@ def _top_depth_receipt(levels: Dict[float, float], timestamps: Dict[float, Any],
                     item["age_seconds"] = age
                     if age < 0:
                         item["status"] = "future_timestamp"
-                    elif age > max_age_seconds:
+                    elif not age_limit_valid and item["size"] is not None:
+                        item["status"] = "invalid_age_limit"
+                    elif age_limit_valid and age > max_age_seconds:
                         item["status"] = "stale"
                     elif item["size"] is not None:
                         item["status"] = "fresh"

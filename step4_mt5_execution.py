@@ -88,6 +88,23 @@ class MT5Executor:
                 reason="pipeline did not authorize a new entry",
                 symbol=self.symbol, timestamp=now)
 
+        # --- gate 0: unresolved one-shot DEMO test ------------------------------
+        # A persistent marker survives an interrupted operator smoke test.
+        # Strategy orders remain blocked until the operator verifies cleanup.
+        try:
+            pending_test = config.DATA_DIR / "demo_order_test_pending.json"
+            if pending_test.exists():
+                return ExecutionResult(
+                    status="SKIPPED",
+                    reason=("unresolved DEMO order smoke test; verify/close it with "
+                            "tools/demo_order_smoke.py --recover"),
+                    symbol=self.symbol, timestamp=now)
+        except Exception:
+            return ExecutionResult(
+                status="SKIPPED",
+                reason="cannot verify DEMO smoke-test state; operator review required",
+                symbol=self.symbol, timestamp=now)
+
         # --- gate 0a: master kill switch ---------------------------------------
         # Do not rely only on main.py: a direct caller must never be able to
         # bypass TRADING_ENABLED=0 and reach mt5.order_send().

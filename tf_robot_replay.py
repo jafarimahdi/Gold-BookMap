@@ -92,7 +92,20 @@ def find_field(snap, names):
 
 
 def run_child(tf, brain, plan, out):
-    os.environ["A1_BASE_TF_MINUTES"] = str(tf)
+    tf_min = max(1, int(tf))
+    caller_aggr = os.environ.get("AGGRESSIVE_ENTRY_ENABLED")
+    # Import config FIRST so its module-load .env pass (override=True) runs
+    # before we stamp the child process environment; otherwise step2's
+    # `import config` clobbers A1_BASE_TF_MINUTES/TIMEFRAME back to .env.
+    import config
+    os.environ["A1_BASE_TF_MINUTES"] = str(tf_min)
+    os.environ["TIMEFRAME"] = f"M{tf_min}"
+    os.environ["POWER_BAR_SECONDS"] = str(tf_min * 60)
+    os.environ["POWER_V2_MEMORY_ENABLED"] = "0"
+    os.environ["AGGRESSIVE_ENTRY_ENABLED"] = caller_aggr if caller_aggr is not None else "0"
+    os.environ["TRADING_ENABLED"] = "0"
+    os.environ["ALLOW_LIVE_TRADING"] = "0"
+    config._refresh()
     from twin_day_runner import run_child as rc   # env is set before brain load
     import types
     ns = types.SimpleNamespace(child=brain, plan=plan, out=out)

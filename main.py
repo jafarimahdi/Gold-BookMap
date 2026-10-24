@@ -662,6 +662,23 @@ def _persist_market_quality_snapshot(snapshot) -> bool:
         return False
 
 
+def _demo_order_test_pending_reason() -> str:
+    """Block strategy entries while the explicit one-shot DEMO test is unresolved."""
+    marker = DATA_DIR / "demo_order_test_pending.json"
+    if not marker.exists():
+        return ""
+    try:
+        payload = json.loads(marker.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError("marker is not an object")
+        symbol = str(payload.get("symbol", "?") or "?")
+        attempt = str(payload.get("attempt_id", "unknown") or "unknown")
+        return (f"DEMO order smoke test {attempt} is unresolved for {symbol}; "
+                "verify/close it with tools/demo_order_smoke.py --recover")
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        return f"DEMO order smoke-test marker is unreadable; operator recovery required ({exc})"
+
+
 def _safety_gates(data, elapsed_since_acquire_seconds: float = 0.0) -> tuple:
     """Return (allowed: bool, reason: str) for pre-execution safety gates.
 
@@ -675,6 +692,14 @@ def _safety_gates(data, elapsed_since_acquire_seconds: float = 0.0) -> tuple:
     if not config.TRADING_ENABLED:
         _record("SAFETY: SWITCH", "TRADING OFF (TRADING_ENABLED=0) — analyse only")
         return False, "trading disabled (TRADING_ENABLED=0 in .env)"
+
+    # A one-shot DEMO plumbing test is deliberately outside strategy records.
+    # Keep normal entries blocked until its position is verified closed and the
+    # operator's recovery command clears the durable marker.
+    plumbing_reason = _demo_order_test_pending_reason()
+    if plumbing_reason:
+        _record("SAFETY: DEMO TEST", f"BLOCKED — {plumbing_reason}")
+        return False, plumbing_reason
 
     # 1) session
     if not is_market_open():
@@ -1406,6 +1431,16 @@ def run_step4(decision, snapshot, *, execution_authorized: bool = False,
         result = ExecutionResult(
             status="SKIPPED",
             reason=f"new-entry authorization blocked: {reason}",
+            symbol=config.MT5_SYMBOL,
+            timestamp=datetime.now().astimezone())
+        _record("STEP 4  EXECUTION", f"{result.status} — {result.reason}")
+        return result
+
+    plumbing_reason = _demo_order_test_pending_reason()
+    if plumbing_reason:
+        result = ExecutionResult(
+            status="SKIPPED",
+            reason=plumbing_reason,
             symbol=config.MT5_SYMBOL,
             timestamp=datetime.now().astimezone())
         _record("STEP 4  EXECUTION", f"{result.status} — {result.reason}")

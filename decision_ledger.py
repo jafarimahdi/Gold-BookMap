@@ -36,7 +36,7 @@ Usage (git bash, project folder, after the robot's day is done):
 Output: console summary + data/decision_ledger_<date>.csv (one row per signal)
         + the same text saved to data/decision_ledger_<date>.txt
 """
-import argparse, bisect, csv, os, sys
+import argparse, bisect, csv, json, math, os, re, sys
 from datetime import datetime
 
 import tf_study as T  # one engine, two reports: same tape reader, candles, walk
@@ -54,9 +54,52 @@ SPREAD = _envf("AUDIT_SPREAD", "0.50")
 SL_MULT = _envf("STOP_LOSS_ATR_MULT", "2.0")
 TP_MULT = _envf("TAKE_PROFIT_ATR_MULT", "3.5")
 MAX_HOLD_MIN = _envf("AUDIT_MAX_HOLD_MIN", "180")
+_REASON_THR_RE = re.compile(r"threshold\s+(\d+(?:\.\d+)?)%", re.IGNORECASE)
 
 
-def classify(reason, exec_status):
+def _day_conf_gate(date_str, data_dir="data"):
+    """Read the graded day's recorded CONFIDENCE_THRESHOLD from run_config JSON.
+
+    Never reads .env directly so historical days keep their own threshold receipt.
+    """
+    compact = (date_str or "").replace("-", "")
+    if not compact:
+        return None
+    p = os.path.join(data_dir, f"run_config_{compact}.json")
+    if not os.path.exists(p):
+        return None
+    try:
+        with open(p, encoding="utf-8", errors="replace") as f:
+            rc = json.load(f)
+    except (OSError, ValueError, TypeError):
+        return None
+    if not isinstance(rc, dict):
+        return None
+    for k in ("CONFIDENCE_THRESHOLD", "AI_CONFIDENCE_THRESHOLD"):
+        raw = rc.get(k)
+        if raw is None or isinstance(raw, bool):
+            continue
+        try:
+            val = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(val) and val > 0:
+            return val
+    return None
+
+
+def _format_conf_gate(thr):
+    if thr is not None and not isinstance(thr, bool):
+        try:
+            val = float(thr)
+            if math.isfinite(val) and val > 0:
+                return f"CONF GATE (<{val:g}%)"
+        except (TypeError, ValueError):
+            pass
+    return "CONF GATE"
+
+
+def classify(reason, exec_status, conf_gate=None):
     """Best-effort 'who stopped it' from the robot's own reason text."""
     if exec_status not in ("SKIPPED", "", None):
         return "WENT THROUGH"
@@ -70,7 +113,10 @@ def classify(reason, exec_status):
     if "stale" in r or "feed" in r:
         return "GUARD feed"
     if "confidence" in r:
-        return "CONF GATE (<50%)"
+        m = _REASON_THR_RE.search(r)
+        if m:
+            return _format_conf_gate(m.group(1))
+        return _format_conf_gate(conf_gate)
     if "cooldown" in r or "daily" in r or "loss" in r:
         return "GUARD risk"
     if not r:
@@ -129,6 +175,7 @@ def main():
         print("\n".join(lines)); sys.exit(0)
 
     keys, candles = T.build_candles(trades, args.tf)
+    day_conf_gate = _day_conf_gate(args.date)
 
     rows_out = []
     n_total = n_neutral = 0
@@ -155,7 +202,7 @@ def main():
                 conf = 0.0
             exec_status = (row.get("exec_status") or "").strip()
             reason = (row.get("reason") or "").strip()
-            stopped_by = classify(reason, exec_status)
+            stopped_by = classify(reason, exec_status, conf_gate=day_conf_gate)
             status, outcome, pts = replay_one(ts, d, price, keys, candles,
                                               args.tf, sl_m, tp_m, spread, max_min)
             b = buckets.setdefault(stopped_by, {"n": 0, "pts": 0.0, "wins": 0, "unreplayed": 0})

@@ -113,6 +113,21 @@ def _visibility_receipt(reason: str, price: Any, atr: Any, spread: Any,
     return details
 
 
+def _stamp_trigger_receipt(result: Dict[str, Any],
+                           context: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+    """Preserve explicit aggressive_trigger receipts on the top-level shot dict."""
+    if isinstance(context, Mapping) and "aggressive_trigger_confirmed" in context:
+        result["aggressive_trigger_confirmed"] = (
+            context.get("aggressive_trigger_confirmed") is True
+        )
+        result["aggressive_trigger_reason"] = str(
+            context.get("aggressive_trigger_reason") or ""
+        )
+        if "a2_burst" in context:
+            result["a2_burst"] = context.get("a2_burst") is True
+    return result
+
+
 def _wait(reason: str, price: Any = 0.0, extra: Optional[Dict[str, Any]] = None,
           *, power: Any = None, context: Optional[Mapping[str, Any]] = None,
           config: Any = None, atr: Any = None, spread: Any = None,
@@ -129,7 +144,7 @@ def _wait(reason: str, price: Any = 0.0, extra: Optional[Dict[str, Any]] = None,
     result["veto_details"] = receipt
     result["visibility"] = receipt
     result.setdefault("shadow_candidates", {})
-    return result
+    return _stamp_trigger_receipt(result, context)
 
 
 def _epoch(value: Any) -> Optional[float]:
@@ -642,7 +657,8 @@ def plan_shot(signal_map: Dict[str, Any], power: Dict[str, Any],
             f"limit_enabled={receipt['execution']['limit_order_enabled']}",
             f"FULL RECEIPT: {receipt['full_why_string']}"
         ]
-        return {"shot": "WAIT", "side": None, "why": why, "entry": p,
+        return _stamp_trigger_receipt({
+                "shot": "WAIT", "side": None, "why": why, "entry": p,
                 "target": None, "stop": None, "rr": 0.0, "door": dict(target_door),
                 "entry_style": None, "execution_status": "PLAN_ONLY",
                 "queue_estimate": dict(queue) if queue else None,
@@ -665,7 +681,7 @@ def plan_shot(signal_map: Dict[str, Any], power: Dict[str, Any],
                                            "sub_check": aggressive_sub_check}},
                 "shadow_candidates": shadow_candidates,
                 "veto_details": receipt,
-                "visibility": receipt}
+                "visibility": receipt}, ctx)
 
     # Patient limit is preferred whenever the queue is acceptable/unknown. Use market
     # entry only if independently triggered and the limit queue is demonstrably poor
@@ -712,7 +728,8 @@ def plan_shot(signal_map: Dict[str, Any], power: Dict[str, Any],
                          "trigger_reason": trigger_reason or None,
                          "planning_only": True,
                          "sub_check": aggressive_sub_check}
-    return {"shot": "GO", "side": side, "why": why,
+    return _stamp_trigger_receipt({
+            "shot": "GO", "side": side, "why": why,
             "entry": round(chosen["entry"], 6), "target": round(chosen["target"], 6),
             "stop": round(chosen["stop"], 6), "rr": round(chosen["rr"], 4),
             "reward": round(chosen["reward"], 6), "risk": round(chosen["risk"], 6),
@@ -740,7 +757,7 @@ def plan_shot(signal_map: Dict[str, Any], power: Dict[str, Any],
             "reference_price": round(p, 6), "atr": round(a, 6),
             "spread": round(sp, 6), "created_at": created_at,
             "valid_until": created_at + plan_ttl,
-            "execution_status": "PLAN_ONLY"}
+            "execution_status": "PLAN_ONLY"}, ctx)
 
 
 def describe(plan: Dict[str, Any]) -> str:

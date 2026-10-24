@@ -112,9 +112,25 @@ def main():
     if not os.path.exists(twin):
         twin = "/home/user/A1_SPEED_2026-10-10/twin_day_runner.py"
     shutil.copy(twin, tmp)
+    # Plant a realistic live .env (TIMEFRAME=M3, A1_BASE_TF_MINUTES=3, memory+A2
+    # enabled) so the rig catches any .env override regression (2026-10-23 Desk 6
+    # bug: config._load_dotenv(override=True) clobbered child A1_BASE_TF_MINUTES).
+    with open(os.path.join(tmp, ".env"), "w", encoding="utf-8") as ef:
+        ef.write(
+            "TIMEFRAME=M3\n"
+            "A1_BASE_TF_MINUTES=3\n"
+            "POWER_BAR_SECONDS=180\n"
+            "POWER_V2_MEMORY_ENABLED=1\n"
+            "AGGRESSIVE_ENTRY_ENABLED=1\n"
+            "CONFIDENCE_THRESHOLD=35\n"
+        )
+    test_env = dict(os.environ)
+    for k in ("TIMEFRAME", "A1_BASE_TF_MINUTES", "POWER_BAR_SECONDS",
+              "POWER_V2_MEMORY_ENABLED", "AGGRESSIVE_ENTRY_ENABLED"):
+        test_env.pop(k, None)
     r = subprocess.run([sys.executable, "tf_robot_replay.py", "--date", "2026-10-15",
-                        "--tfs", "5,3,10", "--window", "08:00-11:00", "--peek"],
-                       cwd=tmp, capture_output=True, text=True, timeout=1500)
+                        "--tfs", "5,3,8,10", "--window", "08:00-11:00", "--peek"],
+                       cwd=tmp, env=test_env, capture_output=True, text=True, timeout=1500)
     out = r.stdout
     check("U1 exit 0 + report saved", r.returncode == 0 and
           os.path.exists(os.path.join(tmp, "data", "tf_robot_2026-10-15.txt")),
@@ -123,14 +139,14 @@ def main():
     rep = open(os.path.join(tmp, "data", "tf_robot_2026-10-15.txt")).read()
     def row_of(tf):
         return next((l for l in rep.splitlines() if l.strip().startswith(f"M{tf} ")), "")
-    rows_txt = {tf: row_of(tf) for tf in (5, 3, 10)}
+    rows_txt = {tf: row_of(tf) for tf in (5, 3, 8, 10)}
     m5_row = rows_txt[5]
     m5_sigs = int(m5_row.split()[3]) if m5_row else -1
     check("U2 M5 universe: the real panel signals on the ramp lake", m5_sigs >= 1, m5_row)
 
     import json
     stats = {}
-    for tf in (5, 3, 10):
+    for tf in (5, 3, 8, 10):
         sp = os.path.join(tmp, "data", f"tfrobot_M{tf}_2026-10-15.jsonl.stats")
         stats[tf] = json.load(open(sp)) if os.path.exists(sp) else {}
     # NOTE: with the patched brain guaranteed in place (see P step), serves
@@ -138,12 +154,12 @@ def main():
     # BELLS column is still informational; we assert the honest part: the
     # env knob actually CHANGES each universe, comparing row BODIES only
     # (name prefix excluded -- the old test compared whole rows and could
-    # never fail, because every row starts with a different name).
+    # never fail, because every row starts a different name).
     def row_body(tf):
         parts = row_of(tf).split()
         return " ".join(parts[1:]) if parts else ""
-    check("U3 the env knob changes the universe (row BODIES differ across TFs)",
-          len({row_body(t) for t in (5, 3, 10)}) == 3, rows_txt)
+    check("U3 the env knob changes the universe even with .env present (row BODIES differ across M5/M3/M8/M10)",
+          len({row_body(t) for t in (5, 3, 8, 10)}) == 4, rows_txt)
 
     # the panel's tape-judges (order flow, L3, microprice) need no candle
     # warm-up, so M10 signalling in 3h is CORRECT behavior -- the lens's
@@ -155,10 +171,15 @@ def main():
         except (IndexError, ValueError):
             return -1
     check("U4 no brain crashes in any universe (ERR == 0 everywhere)",
-          all(errs_of(rows_txt[tf]) == 0 for tf in (5, 3, 10)), rows_txt)
-    check("U5 all three universe rows parsed",
+          all(errs_of(rows_txt[tf]) == 0 for tf in (5, 3, 8, 10)), rows_txt)
+    check("U5 all four universe rows parsed",
           all(next((l for l in rep.splitlines() if l.strip().startswith(f"M{t}")), "")
-              for t in (5, 3, 10)))
+              for t in (5, 3, 8, 10)))
+    mem_dir = os.path.join(tmp, "data", "power_v2_memory")
+    mem_files = os.listdir(mem_dir) if os.path.isdir(mem_dir) else []
+    check("U6 offline Desk 6 replay never pollutes live memory book or A2 fire counter from .env",
+          not mem_files and not os.path.exists(os.path.join(tmp, "data", "a2_burst_count.json")),
+          {"mem_files": mem_files})
 
     print("=" * 60)
     if FAILURES:

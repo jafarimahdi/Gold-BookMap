@@ -61,7 +61,7 @@ if [ "$MODE" = "check" ]; then
   echo "== verifier: does the testing system itself work? =="
   [ -f audit_day.py ] || { echo "[FAIL] audit_day.py missing"; exit 1; }
   "$PY" -W error::SyntaxWarning -m py_compile audit_day.py && echo "[OK] audit_day.py compiles"
-  grep -q 'BUILD = "audit-2026-09-24j"' audit_day.py && echo "[OK] audit_day.py carries build marker audit-2026-09-24j (sizes no longer matter)" || echo "[warn] no kit build marker in audit_day.py - you are on a file from an older kit, day numbers may be off"
+  grep -q 'BUILD = "audit-2026-10-22a"' audit_day.py && echo "[OK] audit_day.py carries build marker audit-2026-10-22a (sizes no longer matter)" || echo "[warn] no kit build marker in audit_day.py - you are on a file from an older kit, day numbers may be off"
   for f in tools/dashboard.py tools/insight.py dashboard.py; do
     [ -f "$f" ] || { echo "[FAIL] $f missing - re-copy it from the kit"; exit 1; }
   done
@@ -86,7 +86,7 @@ print('[OK] learning layer complete (decision drill-down, trades page, weight A/
     echo "[FAIL] the tester itself is not clean - do NOT trust day numbers yet."
     echo "       Most likely the auditor, tools/dashboard.py or tools/insight.py was half-copied:"
     echo "       ls -la audit_day.py dashboard.py tools/dashboard.py tools/insight.py"
-    echo "       want audit_day.py to contain BUILD = \"audit-2026-09-24j\" any size is fine if the marker matches — do NOT chase byte counts"
+    echo "       want audit_day.py to contain BUILD = \"audit-2026-10-22a\" any size is fine if the marker matches — do NOT chase byte counts"
     echo "       and clear stale bytecode:  find . -name __pycache__ -type d -exec rm -rf {} +"
     exit 1
   fi

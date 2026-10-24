@@ -32,7 +32,11 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
+import os
 import re
+import threading
+import time
 import warnings
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timedelta, timezone
@@ -199,6 +203,31 @@ def _note_key_failure(key: str, key_index: int = 0) -> None:
         path.write_text(json.dumps(state), encoding="utf-8")
     except OSError:
         pass
+
+
+class _Step3BudgetTimeoutError(TimeoutError):
+    """Raised when one decide() cycle exhausts AI_DECIDE_MAX_TOTAL_SECONDS."""
+
+
+def _decide_total_budget_seconds() -> float:
+    """Bounded wall-clock cap for one STEP 3 decide() cycle (fail-closed).
+
+    Reads AI_DECIDE_MAX_TOTAL_SECONDS from os.environ first, then config
+    (default 25.0s, max 120.0s). Invalid / non-positive / NaN / inf values
+    fall back to 25.0s so a bad setting can never disable the cap.
+    """
+    raw = os.environ.get("AI_DECIDE_MAX_TOTAL_SECONDS")
+    if raw is None or str(raw).strip() == "":
+        raw = getattr(config, "AI_DECIDE_MAX_TOTAL_SECONDS", 25.0)
+    if isinstance(raw, bool):
+        return 25.0
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return 25.0
+    if not math.isfinite(val) or val <= 0.0:
+        return 25.0
+    return min(val, 120.0)
 
 
 @dataclass
@@ -631,12 +660,18 @@ class AIDecisionEngine:
                 if genai_types is not None:
                     # v5.3 fix: 8s is rejected by Gemini (min deadline). Enforce 15s minimum.
                     try:
-                        timeout_s = int(getattr(config, "AI_TIMEOUT_SECONDS", 20))
-                        timeout_s = max(15, timeout_s)  # Gemini minimum
-                        timeout_ms = timeout_s * 1000
-                    except:
-                        timeout_ms = max(15000, int(getattr(
-                            config, "GEMINI_REQUEST_TIMEOUT_MS", 20000)))
+                        if hasattr(config, "AI_TIMEOUT_SECONDS"):
+                            timeout_s = float(getattr(config, "AI_TIMEOUT_SECONDS", 20))
+                            timeout_ms = int(max(15.0, timeout_s) * 1000)
+                        else:
+                            timeout_ms = max(15000, int(getattr(
+                                config, "GEMINI_REQUEST_TIMEOUT_MS", 20000)))
+                    except Exception:
+                        timeout_ms = 20000
+                    deadline = getattr(self, "_active_deadline_monotonic", None)
+                    if deadline is not None:
+                        rem_ms = int(max(0.0, deadline - time.monotonic()) * 1000)
+                        timeout_ms = max(15000, min(timeout_ms, rem_ms))
                     http_options = genai_types.HttpOptions(timeout=timeout_ms)
                     request_config = genai_types.GenerateContentConfig(
                         automatic_function_calling=(
@@ -669,6 +704,34 @@ class AIDecisionEngine:
             gm = genai.GenerativeModel(model)
             response = gm.generate_content(prompt)
         return (response.text or "").strip()
+
+    def _invoke_bounded(self, key: str, model: str, prompt: str,
+                        remaining_s: float) -> str:
+        """Run self._call_with_key(key, model, prompt) under a hard monotonic cap."""
+        res_box: List[str] = []
+        exc_box: List[BaseException] = []
+
+        def _runner() -> None:
+            try:
+                res_box.append(self._call_with_key(key, model, prompt))
+            except BaseException as err:
+                exc_box.append(err)
+
+        worker = threading.Thread(
+            target=_runner, name="step3-gemini-call", daemon=True
+        )
+        worker.start()
+        worker.join(timeout=max(0.0, remaining_s))
+        if worker.is_alive():
+            raise _Step3BudgetTimeoutError(
+                f"STEP 3 total wait cap reached ({remaining_s:.1f}s window expired)"
+            )
+        if exc_box:
+            err = exc_box[0]
+            if isinstance(err, Exception):
+                raise err
+            raise RuntimeError(str(err))
+        return res_box[0] if res_box else ""
 
     # ------------------------------------------------------------------ #
     def decide(self, snapshot) -> Decision:
@@ -722,87 +785,132 @@ class AIDecisionEngine:
         exhausted = _exhausted_keys()
         last_error = ""
         tried_model = None
+        budget_s = _decide_total_budget_seconds()
+        started_monotonic = time.monotonic()
+        deadline_monotonic = started_monotonic + budget_s
+        budget_exhausted = False
+        fair_attempt_s = min(15.0, budget_s * 0.8)
+        self._active_deadline_monotonic = deadline_monotonic
 
-        for model in models:
-            tried_model = model
-            for key_index, key in enumerate(self.api_keys, 1):
-                if _key_id(key) in exhausted:
-                    continue
-                try:
-                    text = self._call_with_key(key, model, prompt)
-                    action, confidence, rationale = self._parse_response(text)
-                    # v5.8 L3 Confidence Calibration
-                    try:
-                        if bool(getattr(config, "AI_CONF_CALIBRATION", True)) and action in ("BUY","SELL"):
-                            l3 = getattr(snapshot, "level3", None)
-                            of = getattr(snapshot, "order_flow", None)
-                            if l3 and of:
-                                dir_sign = 1 if action=="BUY" else -1
-                                net_flow = float(getattr(l3, "aggressive_buy_volume",0) - getattr(l3, "aggressive_sell_volume",0))
-                                ofi_l3 = float(getattr(l3, "ofi",0) or 0)
-                                whale_thr = float(getattr(config, "L3_WHALE_THRESHOLD",100.0))
-                                price = float(getattr(snapshot, "price",0) or 0)
-                                whale_confirm = False
-                                # Check whale in direction
-                                bids = getattr(l3, "order_book", {}).get("bids", []) if hasattr(l3, "order_book") else []
-                                asks = getattr(l3, "order_book", {}).get("asks", []) if hasattr(l3, "order_book") else []
-                                if dir_sign>0:
-                                    # BUY needs bid whale + positive flow
-                                    has_whale_bid = any(s>=whale_thr and price>0 and abs(p-price)/price<=0.005 for p,s in bids)
-                                    if has_whale_bid and net_flow>50 and ofi_l3>0:
-                                        whale_confirm = True
-                                else:
-                                    has_whale_ask = any(s>=whale_thr and price>0 and abs(p-price)/price<=0.005 for p,s in asks)
-                                    if has_whale_ask and net_flow<-50 and ofi_l3<0:
-                                        whale_confirm = True
-                                boost = float(getattr(config, "AI_L3_CONF_BOOST",15.0))
-                                penalty = float(getattr(config, "AI_L3_CONF_PENALTY",20.0))
-                                if whale_confirm:
-                                    confidence = min(95.0, confidence + boost)
-                                    rationale += f" [L3 CONFIRMS whale+flow+OFI +{boost:.0f}%]"
-                                else:
-                                    # Check conflict: whale opposite or flow opposite
-                                    conflict = False
-                                    if dir_sign>0 and (net_flow<-50 or ofi_l3<-100):
-                                        conflict = True
-                                    if dir_sign<0 and (net_flow>50 or ofi_l3>100):
-                                        conflict = True
-                                    if conflict:
-                                        confidence = max(0.0, confidence - penalty)
-                                        rationale += f" [L3 CONFLICTS flow/OFI -{penalty:.0f}% -> reduce]"
-                                        if confidence < 55:
-                                            action = "HOLD"
-                                            rationale += " -> HOLD due L3 conflict"
-                    except Exception as ce:
-                        logger.debug("L3 conf calibration error: %s", ce)
-
-                    logger.info("STEP 3: Gemini -> %s @ %.1f%% (key #%d, %s)",
-                                action, confidence, key_index, model)
-                    decision = Decision(action=action, confidence=confidence,
-                                    rationale=rationale, raw_response=text,
-                                    model=model,
-                                    timestamp=datetime.now(timezone.utc))
-                    self._update_cache(snapshot, decision)
-                    return decision
-                except Exception as exc:
-                    last_error = str(exc)[:300]
-                    if self._is_quota_error(exc):
-                        _mark_exhausted(key)
-                        logger.warning("STEP 3: key #%d rate-limited (skipping "
-                                       "for %d min on later cycles); trying the "
-                                       "next key immediately.",
-                                       key_index, _key_cooldown_minutes())
+        try:
+            for model in models:
+                if budget_exhausted:
+                    break
+                tried_model = model
+                for key_index, key in enumerate(self.api_keys, 1):
+                    if _key_id(key) in exhausted:
                         continue
-                    if self._is_model_unavailable(exc):
-                        logger.warning("STEP 3: model %s is no longer "
-                                       "available; trying the next model.",
-                                       model)
-                        break                    # move to the next model
-                    # other error (network etc.) -> try the next key
-                    logger.warning("STEP 3: call failed (key #%d, %s): %s",
-                                   key_index, model, last_error[:120])
-                    _note_key_failure(key, key_index)
-                    continue
+                    remaining_s = deadline_monotonic - time.monotonic()
+                    if remaining_s <= 0.0:
+                        budget_exhausted = True
+                        break
+                    try:
+                        text = self._invoke_bounded(key, model, prompt, remaining_s)
+                        action, confidence, rationale = self._parse_response(text)
+                        # v5.8 L3 Confidence Calibration
+                        try:
+                            if bool(getattr(config, "AI_CONF_CALIBRATION", True)) and action in ("BUY","SELL"):
+                                l3 = getattr(snapshot, "level3", None)
+                                of = getattr(snapshot, "order_flow", None)
+                                if l3 and of:
+                                    dir_sign = 1 if action=="BUY" else -1
+                                    net_flow = float(getattr(l3, "aggressive_buy_volume",0) - getattr(l3, "aggressive_sell_volume",0))
+                                    ofi_l3 = float(getattr(l3, "ofi",0) or 0)
+                                    whale_thr = float(getattr(config, "L3_WHALE_THRESHOLD",100.0))
+                                    price = float(getattr(snapshot, "price",0) or 0)
+                                    whale_confirm = False
+                                    # Check whale in direction
+                                    bids = getattr(l3, "order_book", {}).get("bids", []) if hasattr(l3, "order_book") else []
+                                    asks = getattr(l3, "order_book", {}).get("asks", []) if hasattr(l3, "order_book") else []
+                                    if dir_sign>0:
+                                        # BUY needs bid whale + positive flow
+                                        has_whale_bid = any(s>=whale_thr and price>0 and abs(p-price)/price<=0.005 for p,s in bids)
+                                        if has_whale_bid and net_flow>50 and ofi_l3>0:
+                                            whale_confirm = True
+                                    else:
+                                        has_whale_ask = any(s>=whale_thr and price>0 and abs(p-price)/price<=0.005 for p,s in asks)
+                                        if has_whale_ask and net_flow<-50 and ofi_l3<0:
+                                            whale_confirm = True
+                                    boost = float(getattr(config, "AI_L3_CONF_BOOST",15.0))
+                                    penalty = float(getattr(config, "AI_L3_CONF_PENALTY",20.0))
+                                    if whale_confirm:
+                                        confidence = min(95.0, confidence + boost)
+                                        rationale += f" [L3 CONFIRMS whale+flow+OFI +{boost:.0f}%]"
+                                    else:
+                                        # Check conflict: whale opposite or flow opposite
+                                        conflict = False
+                                        if dir_sign>0 and (net_flow<-50 or ofi_l3<-100):
+                                            conflict = True
+                                        if dir_sign<0 and (net_flow>50 or ofi_l3>100):
+                                            conflict = True
+                                        if conflict:
+                                            confidence = max(0.0, confidence - penalty)
+                                            rationale += f" [L3 CONFLICTS flow/OFI -{penalty:.0f}% -> reduce]"
+                                            if confidence < 55:
+                                                action = "HOLD"
+                                                rationale += " -> HOLD due L3 conflict"
+                        except Exception as ce:
+                            logger.debug("L3 conf calibration error: %s", ce)
+
+                        logger.info("STEP 3: Gemini -> %s @ %.1f%% (key #%d, %s)",
+                                    action, confidence, key_index, model)
+                        decision = Decision(action=action, confidence=confidence,
+                                        rationale=rationale, raw_response=text,
+                                        model=model,
+                                        timestamp=datetime.now(timezone.utc))
+                        self._update_cache(snapshot, decision)
+                        return decision
+                    except _Step3BudgetTimeoutError as texc:
+                        last_error = str(texc)[:300]
+                        budget_exhausted = True
+                        logger.warning(
+                            "STEP 3: total wait cap (%.1fs) reached on key #%d (%s); "
+                            "stopping further retries this cycle.",
+                            budget_s, key_index, model,
+                        )
+                        if remaining_s >= fair_attempt_s:
+                            _note_key_failure(key, key_index)
+                        break
+                    except Exception as exc:
+                        last_error = str(exc)[:300]
+                        if self._is_quota_error(exc):
+                            _mark_exhausted(key)
+                            logger.warning("STEP 3: key #%d rate-limited (skipping "
+                                           "for %d min on later cycles); trying the "
+                                           "next key immediately.",
+                                           key_index, _key_cooldown_minutes())
+                            continue
+                        if self._is_model_unavailable(exc):
+                            logger.warning("STEP 3: model %s is no longer "
+                                           "available; trying the next model.",
+                                           model)
+                            break                    # move to the next model
+                        # other error (network etc.) -> try the next key
+                        logger.warning("STEP 3: call failed (key #%d, %s): %s",
+                                       key_index, model, last_error[:120])
+                        _note_key_failure(key, key_index)
+                        if deadline_monotonic - time.monotonic() <= 0.0:
+                            budget_exhausted = True
+                            break
+                        continue
+        finally:
+            self._active_deadline_monotonic = None
+
+        if budget_exhausted:
+            elapsed_s = time.monotonic() - started_monotonic
+            logger.warning(
+                "STEP 3: Gemini total wait budget exhausted (%.1fs / %.1fs cap) "
+                "-> failing closed to HOLD.",
+                elapsed_s, budget_s,
+            )
+            return Decision(
+                action="HOLD",
+                confidence=0.0,
+                rationale=(f"Gemini wait budget exhausted "
+                           f"({elapsed_s:.1f}s/{budget_s:.1f}s cap) -> fail-closed HOLD"),
+                model="none-timeout-budget",
+                timestamp=datetime.now(timezone.utc),
+            )
 
         # nothing worked — try fallback before HOLD
         fb = self._fallback_decision(snapshot)

@@ -142,9 +142,15 @@ def _refresh() -> None:
     # POWER_BAR_SECONDS env overrides. The classroom follows A1_BASE_TF_MINUTES
     # (set it to match: M3 -> A1_BASE_TF_MINUTES=3).
     _tf_minutes = {"M1": 1, "M2": 2, "M3": 3, "M4": 4, "M5": 5, "M6": 6,
-                   "M10": 10, "M12": 12, "M15": 15, "M20": 20, "M30": 30,
-                   "H1": 60}
-    g["BASE_TF_MINUTES"] = _tf_minutes.get(str(g["TIMEFRAME"]).upper(), 5)
+                   "M8": 8, "M10": 10, "M12": 12, "M15": 15, "M20": 20,
+                   "M30": 30, "H1": 60}
+    _tf_key = str(g["TIMEFRAME"]).strip().upper()
+    _base_tf_min = _tf_minutes.get(_tf_key)
+    if _base_tf_min is None and _tf_key.startswith("M") and _tf_key[1:].isdigit():
+        _parsed_tf = int(_tf_key[1:])
+        if 1 <= _parsed_tf <= 60:
+            _base_tf_min = _parsed_tf
+    g["BASE_TF_MINUTES"] = _base_tf_min if _base_tf_min is not None else 5
     g["POWER_BAR_SECONDS"] = int(_ffloat(
         "POWER_BAR_SECONDS", 60.0 * g["BASE_TF_MINUTES"]))
     # Power-lead floor 30 is shadow-only until the required evidence/design
@@ -203,6 +209,7 @@ def _refresh() -> None:
     g["AI_MAX_CALLS_PER_DAY"] = _fint("AI_MAX_CALLS_PER_DAY", 2000)
     g["AI_KEY_COOLDOWN_MINUTES"] = _fint("AI_KEY_COOLDOWN_MINUTES", 20)
     g["GEMINI_REQUEST_TIMEOUT_MS"] = _fint("GEMINI_REQUEST_TIMEOUT_MS", 20000)
+    g["AI_DECIDE_MAX_TOTAL_SECONDS"] = _ffloat("AI_DECIDE_MAX_TOTAL_SECONDS", 25.0)
     g["EXECUTION_VERIFY_SECONDS"] = _fint("EXECUTION_VERIFY_SECONDS", 5)
     g["RISK_PER_TRADE_PCT"] = _ffloat("RISK_PER_TRADE_PCT", 1.0)
     g["STOP_LOSS_ATR_MULT"] = _ffloat("STOP_LOSS_ATR_MULT", 2.0)

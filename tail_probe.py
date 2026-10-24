@@ -3,19 +3,19 @@
 
 A1 (2026-10-12 receipt) fixed the median (2.45-2.92s -> 1.88s) but the p95
 tail (~10-16s) survived -- and since the twin proved serves cost ~4ms, the
-tail is NOT the verdict layer.  It lives in the live-eyes path: the per-cycle
-ingest of the full snapshot (STEP1) + the scout mirror chain (STEP2's live
-part).  This camera reads the trading log's per-cycle STEP1/STEP2/STEP3
-millisecond lines and answers:
+tail is NOT the verdict layer. The loop's measured stages are STEP1 (ingest),
+STEP2 (live eyes), STEP3 (AI), and LATENCY TOTAL pipeline. This camera prefers
+the full pipeline total when logged, then attributes the tail to its stages:
 
-  WHO     - of the slow cycles, is STEP1 (ingest) or STEP2 (live eyes) the owner?
+  WHO     - of the slow cycles, is STEP1 (ingest), STEP2 (live eyes), or STEP3 (AI) the owner?
   WHEN    - which hours do slow cycles cluster in?  do they hug the M5 bells
             (minute % 5 in {4,0}) or the news windows?
   HOW BIG - the honest distribution: median / p95 / max, top-N slowest cycles
             with their times of day.
 
-Read-only.  Self-diagnosing: --peek prints the first raw lines it matched (and
-a few 'ms' lines it did NOT match) so a format surprise is visible instantly.
+Read-only. Self-diagnosing: --peek prints matched stage/total lines and a few
+unmatched 'ms' lines. A full pipeline total is used when present; older logs
+without it fall back to a component sum and are explicitly marked partial.
 Writes data/tail_probe_<date>.txt.
 
 Usage (git bash, project root):
@@ -33,6 +33,7 @@ TIME_RE = re.compile(r"^(\d{4}[-/]\d{2}[-/]\d{2}[ T])?(\d{1,2}:\d{2}:\d{2})")
 STEP_RE = {"STEP1": re.compile(r"STEP1[^0-9]*(\d+)\s*ms"),
            "STEP2": re.compile(r"STEP2[^0-9]*(\d+)\s*ms"),
            "STEP3": re.compile(r"STEP3[^0-9]*(\d+)\s*ms")}
+TOTAL_RE = re.compile(r"LATENCY\s+TOTAL\s+pipeline\s+(\d+)\s*ms", re.IGNORECASE)
 MS_LINE_RE = re.compile(r"\d+\s*ms")
 
 
@@ -46,28 +47,56 @@ def find_log(date_str):
 
 
 def parse_cycles(path):
-    """One cycle = a STEP1 value closed by the next STEP2 value (same line or
-    a following line).  Returns (cycles, peek_matched, peek_unmatched)."""
-    cycles, pend_s1, pend_t = [], None, None
+    """Parse stage lines and the authoritative full-pipeline total when present.
+
+    Stage events may be on one line or separate lines. A new STEP1 closes any
+    prior incomplete cycle; LATENCY TOTAL pipeline closes a complete cycle.
+    Older logs without a total fall back to STEP1+STEP2+STEP3 and are marked
+    ``step-sum`` so callers can distinguish partial timing from full L4 time.
+    Returns (cycles, peek_matched, peek_unmatched).
+    """
+    cycles, current = [], None
     matched, unmatched = [], []
+
+    def finish(total=None):
+        nonlocal current
+        if current is None:
+            return
+        if total is None:
+            current["total"] = current["s1"] + current["s2"] + current["s3"]
+            current["total_source"] = "step-sum"
+        else:
+            current["total"] = int(total)
+            current["total_source"] = "pipeline"
+        cycles.append(current)
+        current = None
+
     with open(path, encoding="utf-8", errors="replace") as f:
         for line in f:
             m = TIME_RE.match(line)
             tod = m.group(2) if m else None
             hits = {k: int(rx.search(line).group(1))
                     for k, rx in STEP_RE.items() if rx.search(line)}
-            if hits:
+            total_match = TOTAL_RE.search(line)
+            if hits or total_match:
                 matched.append(line.rstrip()[:160])
                 if "STEP1" in hits:
-                    pend_s1, pend_t = hits["STEP1"], tod
-                if "STEP2" in hits and pend_s1 is not None:
-                    total = pend_s1 + hits["STEP2"] + hits.get("STEP3", 0)
-                    cycles.append({"tod": pend_t or tod, "s1": pend_s1,
-                                   "s2": hits["STEP2"], "s3": hits.get("STEP3", 0),
-                                   "total": total})
-                    pend_s1, pend_t = None, None
+                    # A fresh STEP1 is the only reliable boundary for a legacy
+                    # cycle that did not emit a full-pipeline total.
+                    finish()
+                    current = {"tod": tod, "s1": 0, "s2": 0, "s3": 0}
+                elif current is None:
+                    current = {"tod": tod, "s1": 0, "s2": 0, "s3": 0}
+                elif current.get("tod") is None and tod:
+                    current["tod"] = tod
+
+                for stage, value in hits.items():
+                    current[{"STEP1": "s1", "STEP2": "s2", "STEP3": "s3"}[stage]] = value
+                if total_match:
+                    finish(int(total_match.group(1)))
             elif MS_LINE_RE.search(line):
                 unmatched.append(line.rstrip()[:160])
+    finish()
     return cycles, matched, unmatched
 
 
@@ -97,7 +126,7 @@ def run(args, lines):
     say = lines.append
     say("=" * 100)
     say(f" TAIL PROBE (the truck camera, G11) - {args.date}")
-    say(" reads the trading log's per-cycle STEP1/STEP2/STEP3 ms lines - read-only")
+    say(" reads full LATENCY TOTAL pipeline lines plus STEP1/STEP2/STEP3 attribution - read-only")
     say("=" * 100)
 
     path = args.log or find_log(args.date)
@@ -122,18 +151,34 @@ def run(args, lines):
         return 0
 
     tots = [c["total"] for c in cycles]
-    say(f" cycles parsed: {len(cycles)} | median {statistics.median(tots):.0f}ms"
+    full_n = sum(c["total_source"] == "pipeline" for c in cycles)
+    fallback_n = len(cycles) - full_n
+    say(f" cycles parsed: {len(cycles)} | full-pipeline totals: {full_n}"
+        f" | step-sum fallback: {fallback_n} | median {statistics.median(tots):.0f}ms"
         f" | p95 {pct(tots, 0.95):.0f}ms | max {max(tots):.0f}ms")
+    if fallback_n:
+        say(" [partial] fallback cycles use STEP sums, not the full L4 duration; "
+            "distribution is incomplete for those rows.")
     slow = [c for c in cycles if c["total"] >= args.slow_ms]
     say(f" slow cycles (>= {args.slow_ms}ms): {len(slow)} ({100 * len(slow) / len(cycles):.1f}%)")
     say("")
 
     say(f" WHO owns the tail (of the {len(slow)} slow cycles):")
     if slow:
-        s1_med = statistics.median([c["s1"] for c in slow])
-        s2_med = statistics.median([c["s2"] for c in slow])
-        say(f"   STEP1 (ingest) median {s1_med:.0f}ms | STEP2 (live eyes) median {s2_med:.0f}ms"
-            f" -> {'STEP1' if s1_med > s2_med else 'STEP2'} is the main owner")
+        components = (("s1", "STEP1 (ingest)"),
+                      ("s2", "STEP2 (live eyes)"),
+                      ("s3", "STEP3 (AI)"))
+        medians = {}
+        for key, label in components:
+            values = [c[key] for c in slow if c[key] > 0]
+            if values:
+                medians[label] = statistics.median(values)
+                say(f"   {label} median {medians[label]:.0f}ms")
+        if medians:
+            owner = max(medians, key=medians.get)
+            say(f"   -> {owner} is the main owner")
+        else:
+            say("   no stage timings were available for the slow cycles")
     say("")
     say(" WHEN (hours of the slow cycles):")
     hours = {}
@@ -149,17 +194,16 @@ def run(args, lines):
     say("")
     say(f" TOP {args.top} slowest cycles:")
     for c in sorted(slow, key=lambda x: -x["total"])[:args.top]:
-        say(f"   {c['tod'] or '--:--:--'}  total {c['total']:>7}ms"
-            f"  (STEP1 {c['s1']}ms + STEP2 {c['s2']}ms"
-            + (f" + STEP3 {c['s3']}ms)" if c["s3"] else ")"))
+        source = "full" if c["total_source"] == "pipeline" else "step-sum"
+        say(f"   {c['tod'] or '--:--:--'}  total {c['total']:>7}ms [{source}]"
+            f"  (STEP1 {c['s1']}ms + STEP2 {c['s2']}ms + STEP3 {c['s3']}ms)")
     say("")
     say(" how to read it:")
-    say("   STEP1 = the truck loading the full snapshot; STEP2 = the live-eyes")
-    say("   chain (scout mirror) on it.  The cached verdict layer is NOT here -")
-    say("   A1's serves are ~4ms (twin-proven).  Clusters at bells = bar-close")
-    say("   work; clusters at news hours = event bursts; spread flat = ingest/GC.")
-    say(" informs, never switches - feeds G11 and the A2 design (burst lane")
-    say("   must ride its own light path, not this truck).")
+    say("   STEP1 = ingest; STEP2 = live eyes; STEP3 = synchronous AI/model calls.")
+    say("   [full] totals come from LATENCY TOTAL pipeline; [step-sum] rows are")
+    say("   a legacy partial fallback and must not be treated as end-to-end time.")
+    say("   Slow cycles may hug bar-close or news windows; use stage values to")
+    say("   identify where time was spent. This is read-only and never switches.")
 
     out = os.path.join("data", f"tail_probe_{args.date}.txt")
     try:

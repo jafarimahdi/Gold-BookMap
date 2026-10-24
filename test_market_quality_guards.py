@@ -148,6 +148,23 @@ def test_bookmap_fresh_depth_filters_stale_future_missing_and_invalid_levels():
         {2000.0: 1.0}, {2000.0: now.replace(tzinfo=None)}, now_epoch, 1.0)
     assert naive_fresh == {2000.0: 1.0}
 
+    # Invalid age limits fail closed even when the fixture timestamp is exactly
+    # equal to the clock (age == 0), which can occur with Windows clock resolution.
+    exact_zero_age_levels = {2000.0: 1.0}
+    exact_zero_age_stamps = {2000.0: now}
+    for invalid_limit in (0.0, -1.0, float("nan"), float("inf")):
+        rejected, rejected_ts, rejected_counts = bookmap._fresh_depth_levels(
+            exact_zero_age_levels, exact_zero_age_stamps, now_epoch,
+            invalid_limit)
+        assert rejected == {}
+        assert rejected_ts == {}
+        assert rejected_counts["kept"] == 0
+        assert rejected_counts["invalid_age_limit"] == 1
+        invalid_receipt = bookmap._top_depth_receipt(
+            exact_zero_age_levels, exact_zero_age_stamps, now_epoch,
+            invalid_limit, "bid")
+        assert invalid_receipt[0]["status"] == "invalid_age_limit"
+
     receipt = bookmap._top_depth_receipt(
         levels, stamps, now_epoch, 900.0, "bid")
     assert [row["price"] for row in receipt] == [2000.0, 1999.5, 1999.0,
@@ -249,7 +266,18 @@ def test_bookmap_acquire_rejects_stale_crossed_misaligned_and_wrong_instrument(m
     assert invalid_limit["data_quality"]["level2"] == "unverified_quote_age_limit"
     assert invalid_limit["data_quality"]["quote"] == "invalid_age_limit"
     assert invalid_limit["l2_diagnostics"]["fresh_level_max_age_seconds"] is None
+    assert invalid_limit["l2_diagnostics"]["fresh_bid_levels"] == 0
+    assert invalid_limit["l2_diagnostics"]["fresh_ask_levels"] == 0
+    assert invalid_limit["l2_diagnostics"]["bid_level_counts"]["invalid_age_limit"] == 1
+    assert invalid_limit["l2_diagnostics"]["ask_level_counts"]["invalid_age_limit"] == 1
     assert invalid_limit["bid_depth"] == invalid_limit["ask_depth"] == {}
+    assert invalid_limit["order_book"] == {"bids": [], "asks": []}
+    assert invalid_limit_provider.bid_depth == {}
+    assert invalid_limit_provider.ask_depth == {}
+    assert invalid_limit_provider.order_book == {"bids": [], "asks": []}
+    assert invalid_limit["bid"] == invalid_limit["ask"] == 0.0
+    assert invalid_limit["l2_diagnostics"]["top5_bid_levels"][0]["status"] == "invalid_age_limit"
+    assert invalid_limit["l2_diagnostics"]["top5_ask_levels"][0]["status"] == "invalid_age_limit"
     assert "live quote not validated" in main._preflight_data_reason(invalid_limit)
 
 

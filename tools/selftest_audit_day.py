@@ -541,6 +541,49 @@ def case_pages(dst: Path, fails: list) -> None:
         print("[case] insight pages: decisions_<date>.html + trades_<date>.html written and complete")
 
 
+def case_demo_env_isolation(fails: list) -> None:
+    """Running audit_day.py as __main__ must not let insight's metadata import replace demo .env.
+
+    insight reads audit_day.JUDGE_HORIZON at import. A duplicate `import audit_day` from
+    the script's folder used to reload that folder's .env after run_demo had isolated the
+    synthetic fixture, redirecting the later minute-price pass to unrelated live ticks.
+    """
+    project = Path(tempfile.mkdtemp(prefix="bm_demo_env_isolation_"))
+    try:
+        shutil.copy(ROOT / "audit_day.py", project / "audit_day.py")
+        (project / "tools").mkdir(parents=True, exist_ok=True)
+        for rel in ("tools/insight.py", "tools/dashboard.py", "dashboard.py"):
+            src = ROOT / rel
+            if src.exists():
+                shutil.copy(src, project / rel)
+        wrong_ticks = project / "wrong_ticks.csv"
+        wrong_ticks.write_text("time,event,price,size,level,operation,instrument\n", encoding="utf-8")
+        # This is the copied project's .env, not the fixture's .env. It is intentionally
+        # valid/existing so a duplicate audit_day import would select it over demo ticks.
+        (project / ".env").write_text(f"BOOKMAP_BRIDGE_FILE={wrong_ticks}\n", encoding="utf-8")
+        env = os.environ.copy()
+        # Make the project's .env the only source of this path, even if the invoking shell
+        # happens to export BOOKMAP_BRIDGE_FILE.
+        env.pop("BOOKMAP_BRIDGE_FILE", None)
+        env["GBM_NO_BROWSER"] = "1"
+        proc = subprocess.run(
+            [sys.executable, str(project / "audit_day.py"), "--demo"],
+            cwd=project, env=env, capture_output=True, text=True,
+            encoding="utf-8", errors="ignore", timeout=180)
+        out = proc.stdout + "\n" + proc.stderr
+        marker = "[demo] learning layer: decisions page + trades page written"
+        if proc.returncode != 0 or marker not in out:
+            tail = "\n".join(out.splitlines()[-14:])
+            fails.append("demo env isolation: conflicting project .env suppressed synthetic "
+                         "learning pages\n" + tail)
+        else:
+            print("[case] demo env isolation: the active synthetic .env survives insight import")
+    except Exception as exc:
+        fails.append(f"demo env isolation: {type(exc).__name__}: {exc}")
+    finally:
+        shutil.rmtree(project, ignore_errors=True)
+
+
 def case_explain(dst: Path, fails: list) -> None:
     """--explain HH:MM prints one decision with the panel that stood behind it."""
     out = _run_audit(dst, "--date", DAY, "--explain", "12:30")
@@ -768,7 +811,7 @@ def main() -> int:
             if not m:
                 fails.append(f"test {num} ({name}) never printed")
         for tag, pat in (("feed counted real prints", r"\d+,\.?\d* ?trade prints|\d+ trade prints"),
-                         ("what-if simulated", r"if ALL (\d+) had been taken: total ([+-][\d.]+) pts"),
+                         ("what-if simulated", r"if ALL (\d+) had been taken(?: in this scenario)?: total ([+-][\d.]+) pts"),
                          ("teams ranked", r"teams \(votes that pointed up vs down\): "),
                          ("hourly table", r"London AM \(08-12\)\s+decisions"),
                          ("judge table rows", r"JUDGE\s+VOTES\s+PART%"),
@@ -781,7 +824,7 @@ def main() -> int:
                          ("manual checklist", r"BY HAND, IN THIS ORDER")):
             if not re.search(pat, out):
                 fails.append(f"missing: {tag}")
-        mm = re.search(r"if ALL (\d+) had been taken: total ([+-][\d.]+) pts", out)
+        mm = re.search(r"if ALL (\d+) had been taken(?: in this scenario)?: total ([+-][\d.]+) pts", out)
         if mm:
             print(f"\n[check] what-if replayed {mm.group(1)} decisions, net {mm.group(2)} pts "
                   f"(candles were built from the fake tape -> the replay engine runs)")
@@ -801,6 +844,7 @@ def main() -> int:
                 case_filtered_files(reg, fails)
                 case_session_story(reg, fails)
                 case_pages(reg, fails)
+                case_demo_env_isolation(fails)
                 case_explain(reg, fails)
                 case_weight_ab(reg, fails)
                 case_walk_forward(reg, fails)

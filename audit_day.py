@@ -5018,12 +5018,18 @@ def test_17_new_organs(day, diary, text, decisions):
                + (", ".join(f"{k} x{v}" for k, v in reasons.most_common(3)) or "none seen"))
     if fc_total:
         why.append(f"force-check stamps: {fc_pass}/{fc_total} passing")
+    a2_log_hits = re.findall(
+        r"A2 LANE \(opsfix3\)\s*->\s*enabled=(True|False)\s+fires\s+(\d+)/(\d+)",
+        txt,
+    )
+    a2_log_runs = len(a2_log_hits)
+    a2_log_fires = max((int(m[1]) for m in a2_log_hits), default=0)
     missing = []
     if day >= BORN["voice"] and not vg:
         missing.append("voice_gain (born 10-15, expected from that day)")
     if day >= BORN["memory"] and not ms:
         missing.append("memory_status (born 10-14, expected from that day)")
-    if day >= BORN["a2"] and a2_runs == 0:
+    if day >= BORN["a2"] and a2_runs == 0 and a2_log_runs == 0:
         missing.append("aggressive_trigger stamps (born 10-13, expected from that day)")
     for m in missing:
         why.append(f"MISSING: {m} -> installed but the diary never shows it: "
@@ -5038,11 +5044,19 @@ def test_17_new_organs(day, diary, text, decisions):
         top_ref = Counter(str(x).split("(")[0][:60] for x in a2_reasons).most_common(2)
         why.append(f"A2 fast lane: gate ran {a2_runs}x, FIRES {a2_fires}; top refusals: "
                    + (", ".join(f"{k} x{v}" for k, v in top_ref) or "none recorded"))
+    elif a2_log_runs:
+        why.append(f"A2 fast lane (log receipt; pre-stamp diary): status logged "
+                   f"{a2_log_runs}x, FIRES {a2_log_fires}")
     if regimes:
         why.append("regime field: " + ", ".join(f"{k} x{v}" for k, v in regimes.most_common(3)))
 
     # ---- 2) the AI cost truth ---------------------------------------------------
-    real_calls = len(re.findall(r"AI DECISION\s+(?:HOLD|BUY|SELL)\s*@\s*[\d.]+%", txt))
+    decision_calls = len(re.findall(
+        r"AI DECISION(?:\s*->)?\s+(?:HOLD|BUY|SELL)\s*@\s*[\d.]+%", txt))
+    gemini_calls = len(re.findall(
+        r"STEP 3:\s+Gemini\s*->\s+(?:HOLD|BUY|SELL)\s*@\s*[\d.]+%", txt))
+    cached_calls = txt.count("STEP 3: Using cached AI decision")
+    real_calls = gemini_calls if gemini_calls else max(0, decision_calls - cached_calls)
     throttled = skipped_weak = missed_bells = 0
     last_strength = 0.0
     try:
@@ -5072,7 +5086,12 @@ def test_17_new_organs(day, diary, text, decisions):
                        "it resets daily; the log count above is the day's own")
     except Exception:
         ai_json = "data/ai_calls.json not readable for this day (fine on old days)"
-    why.append(f"AI COST: real paid decisions {real_calls} | doorman refusals: "
+    extra_cost_note = ""
+    if gemini_calls and decision_calls and decision_calls != gemini_calls:
+        extra_cost_note = f" ({decision_calls} Step-3 gate passes, {cached_calls} cached)"
+    elif cached_calls and not gemini_calls:
+        extra_cost_note = f" ({cached_calls} cached excluded)"
+    why.append(f"AI COST: real paid decisions {real_calls}{extra_cost_note} | doorman refusals: "
                f"{throttled} resting, {skipped_weak} below-bell | BELLS LOST TO THE REST "
                f"(strength>=6 while throttled): {missed_bells}")
     if missed_bells:
@@ -5092,8 +5111,9 @@ def test_17_new_organs(day, diary, text, decisions):
     r.add(grade, "NEW ORGANS AND AI COST",
           "do the reports see the NEW machinery, and what did the AI cost?",
           why)
-    return r, {"voice_gain_records": len(vg), "a2_gate_runs": a2_runs,
-               "a2_fires": a2_fires, "missed_bells": missed_bells,
+    return r, {"voice_gain_records": len(vg), "a2_gate_runs": a2_runs or a2_log_runs,
+               "a2_fires": a2_fires if a2_runs else a2_log_fires,
+               "missed_bells": missed_bells,
                "real_ai_calls": real_calls, "throttled": throttled}
 
 

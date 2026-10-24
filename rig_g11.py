@@ -2,8 +2,8 @@
 """rig_g11.py -- the test lake for BOTH new tools: the truck camera (tail_probe)
 and the clocks machine (clocks_verdict).
 
-  A. tail_probe: parse (one-line + separate-line STEP formats), stats, slow
-     filter, bell proximity, too-few honesty, --peek, end-to-end save
+  A. tail_probe: parse one-line/split STEP formats + full pipeline totals,
+     legacy fallback, stats, slow filter, stage attribution, --peek, end-to-end save
   B. clocks_verdict: judge rows from audit format, WAIT at 4 days, DECIDE at 5
      (cut + keep), shadow/benchmark parse (tonight's real format), t-test
      known answer (t = 6.0), C6 buckets, end-to-end save
@@ -31,17 +31,27 @@ def check(name, cond, extra=""):
 
 
 def synth_log(path, n=30):
+    """Mix real split-line totals, compact legacy lines, and step-sum fallback rows."""
     lines = []
     for i in range(n):
         s1 = 100 + (i % 7)
-        s2 = 400 + (9000 if i in (5, 11, 17) else 0)     # 3 slow cycles
-        tod = f"09:{(i // 2):02d}:{(i % 2) * 30:02d}"    # minutes 0-14
+        s2 = 400 + (9000 if i == 17 else 0)              # one STEP2-owned slow cycle
+        s3 = 9000 if i in (5, 11) else 7                # two STEP3-owned slow cycles
+        tod = f"09:{(i // 2):02d}:{(i % 2) * 30:02d}"   # minutes 0-14
         if i % 2 == 0:
-            lines.append(f"{tod} cycle: STEP1 acquire {s1}ms STEP2 analyze {s2}ms STEP3 7ms")
+            lines.append(f"{tod} cycle: STEP1 acquire {s1}ms STEP2 analyze {s2}ms "
+                         f"STEP3 AI {s3}ms")
         else:
-            lines.append(f"{tod} cycle: STEP1 acquire {s1}ms")
-            lines.append(f"{tod} cycle: STEP2 analyze {s2}ms STEP3 7ms")
-    open(path, "w").write("\n".join(lines) + "\n")
+            lines.append(f"{tod} INFO [main] LATENCY STEP1 acquire {s1}ms")
+            lines.append(f"{tod} INFO [main] LATENCY STEP2 analyze {s2}ms")
+            lines.append(f"{tod} WARNING [main] LATENCY STEP3 AI {s3}ms > target 500ms")
+        # First 20 rows have authoritative full-L4 totals. The final ten mimic
+        # old logs and must be explicitly labeled as component-sum fallback.
+        if i < 20:
+            total = s1 + s2 + s3 + 50                  # extra work beyond the 3 steps
+            lines.append(f"{tod} INFO [main] LATENCY TOTAL pipeline {total}ms target 500ms")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
 
 
 def synth_day(root, date, whale_pc, shadow_pts, bench_pts, conf_rows):
@@ -87,22 +97,33 @@ def main():
     lp = os.path.join(tmp, "trading_test.log")
     synth_log(lp)
     cycles, matched, unmatched = parse_cycles(lp)
-    check("A1 parses one-line AND split-line cycles (30)", len(cycles) == 30, len(cycles))
-    check("A2 totals add the three steps", cycles[0]["total"] == cycles[0]["s1"] + cycles[0]["s2"] + 7)
+    check("A1 parses one-line, split-line, and fallback cycles (30)", len(cycles) == 30, len(cycles))
+    check("A2 prefers full pipeline total (includes work outside the steps)",
+          cycles[0]["total"] == cycles[0]["s1"] + cycles[0]["s2"] + cycles[0]["s3"] + 50
+          and cycles[0]["total_source"] == "pipeline", cycles[0])
+    check("A3 split-line STEP3 is retained", cycles[1]["s3"] == 7
+          and cycles[5]["s3"] == 9000 and cycles[5]["total"] == 9555, cycles[5])
+    check("A4 legacy component totals are explicitly marked partial",
+          cycles[20]["total_source"] == "step-sum"
+          and cycles[20]["total"] == cycles[20]["s1"] + cycles[20]["s2"] + cycles[20]["s3"],
+          cycles[20])
     tots = [c["total"] for c in cycles]
-    check("A3 median correct", abs(statistics.median(tots) - (100 + 3 + 400 + 7)) < 40,
+    check("A5 median correct", 500 < statistics.median(tots) < 600,
           statistics.median(tots))
-    check("A4 p95 catches the slow spikes", pct(tots, 0.95) > 5000, pct(tots, 0.95))
+    check("A6 p95 catches the slow spikes", pct(tots, 0.95) > 5000, pct(tots, 0.95))
     slow = [c for c in cycles if c["total"] >= 5000]
-    check("A5 exactly 3 slow cycles found", len(slow) == 3, len(slow))
-    check("A6 peek collected matched lines", len(matched) >= 30, len(matched))
+    check("A7 exactly 3 slow cycles found", len(slow) == 3, len(slow))
+    check("A8 peek collected matched step and total lines", len(matched) >= 60, len(matched))
     r = subprocess.run([sys.executable, os.path.join(old, "tail_probe.py"),
                         "--date", "2026-10-12", "--log", lp],
                        capture_output=True, text=True, cwd=tmp, timeout=120)
-    check("A7 end-to-end exit 0 + saved", r.returncode == 0
+    check("A9 end-to-end exit 0 + saved", r.returncode == 0
           and os.path.exists(os.path.join(tmp, "data", "tail_probe_2026-10-12.txt")),
           r.stdout[-200:])
-    check("A8 output names the tail owner (STEP2)", "STEP2" in r.stdout)
+    check("A10 output identifies STEP3 AI and full-vs-fallback counts",
+          "STEP3 (AI) is the main owner" in r.stdout
+          and "full-pipeline totals: 20" in r.stdout
+          and "step-sum fallback: 10" in r.stdout, r.stdout[-500:])
 
     # ---- B: the clocks machine ---------------------------------------------------
     print("B. clocks_verdict (the clocks machine)")

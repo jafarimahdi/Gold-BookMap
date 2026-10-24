@@ -260,7 +260,24 @@ def trades_page(day, decisions, outcomes, tracked, mt5=None):
 # = quick_candles x 5, because the judges are scored on M5 bars.
 def _load_judge_clock():
     try:
-        import audit_day as _A                      # same folder, read-only import
+        import sys
+        from pathlib import Path
+
+        # If audit_day.py is running as a script, its live module is __main__, not
+        # sys.modules['audit_day']. Importing it by name here would execute a second
+        # copy; its top-level .env load can overwrite the isolated demo environment
+        # before the price-page builder runs. Reuse __main__ only when it is this
+        # insight.py sibling's audit_day.py; otherwise use the normally imported module.
+        _A = sys.modules.get("audit_day")
+        if _A is None:
+            _main = sys.modules.get("__main__")
+            _main_file = getattr(_main, "__file__", None)
+            if _main_file:
+                expected = Path(__file__).resolve().parent.parent / "audit_day.py"
+                if Path(_main_file).resolve() == expected:
+                    _A = _main
+        if _A is None:
+            import audit_day as _A
         h = getattr(_A, "JUDGE_HORIZON", None)
         if isinstance(h, dict) and h:
             return {k: int(v[0]) * 5 for k, v in h.items()}, "audit_day.JUDGE_HORIZON"
