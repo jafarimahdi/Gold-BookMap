@@ -986,33 +986,104 @@ class OrderFlowAnalyzer:
             except:
                 return v
 
+        def _tick_epoch(raw_ts: Any) -> Optional[float]:
+            if raw_ts is None:
+                return None
+            if isinstance(raw_ts, (int, float)):
+                return float(raw_ts) if raw_ts > 0 else None
+            if isinstance(raw_ts, datetime):
+                dt_obj = raw_ts if raw_ts.tzinfo else raw_ts.replace(tzinfo=timezone.utc)
+                return dt_obj.timestamp()
+            if isinstance(raw_ts, str):
+                s = raw_ts.strip()
+                if not s:
+                    return None
+                try:
+                    dt_obj = datetime.fromisoformat(s.replace("Z", "+00:00"))
+                    if dt_obj.tzinfo is None:
+                        dt_obj = dt_obj.replace(tzinfo=timezone.utc)
+                    return dt_obj.timestamp()
+                except ValueError:
+                    return None
+            return None
+
+        try:
+            window_s = float(
+                getattr(config, "ORDER_FLOW_WINDOW_SECONDS", 0)
+                or getattr(config, "POWER_BAR_SECONDS", 180)
+                or 180.0
+            )
+        except Exception:
+            window_s = 180.0
+
+        win_indices: Optional[set] = None
+        win_start_idx = 0
+        if window_s > 0 and len(tick_data) > 1:
+            last_ep = _tick_epoch(tick_data[-1].get("timestamp"))
+            first_ep = _tick_epoch(tick_data[0].get("timestamp"))
+            if last_ep is not None and first_ep is not None:
+                if last_ep >= first_ep:
+                    cutoff_ep = last_ep - window_s
+                    if first_ep < cutoff_ep:
+                        idx = len(tick_data) - 1
+                        while idx > 0:
+                            ep = _tick_epoch(tick_data[idx - 1].get("timestamp"))
+                            if ep is not None and ep < cutoff_ep:
+                                break
+                            idx -= 1
+                        win_start_idx = idx
+                else:
+                    epochs = [_tick_epoch(t.get("timestamp")) for t in tick_data]
+                    valid_eps = [ep for ep in epochs if ep is not None]
+                    if valid_eps:
+                        cutoff_ep = max(valid_eps) - window_s
+                        win_indices = {
+                            i for i, ep in enumerate(epochs)
+                            if ep is None or ep >= cutoff_ep
+                        }
+
+        session_buy_vol = 0.0
+        session_sell_vol = 0.0
         buy_volume = 0.0
         sell_volume = 0.0
         buy_volume_raw = 0.0
         sell_volume_raw = 0.0
         tick_rule_classified = 0
+        large_orders = 0
         prev_price: Optional[float] = None
-        for t in tick_data:
+        for i, t in enumerate(tick_data):
             vol = float(t.get("volume", 0) or 0)
             raw_side = t.get("side")
+            used_tick_rule = False
             if raw_side is None or str(raw_side).strip() == "":
                 side = self.classify_by_tick_rule(
                     float(t.get("price", 0) or 0), prev_price)
-                tick_rule_classified += 1
+                used_tick_rule = True
             else:
                 side = self._normalize_side(raw_side)
             w_vol = _weighted_vol(vol)
             if side == "BUY":
-                buy_volume += w_vol
-                buy_volume_raw += vol
+                session_buy_vol += w_vol
             else:
-                sell_volume += w_vol
-                sell_volume_raw += vol
+                session_sell_vol += w_vol
+            in_win = (i in win_indices) if win_indices is not None else (i >= win_start_idx)
+            if in_win:
+                if used_tick_rule:
+                    tick_rule_classified += 1
+                if vol > self.large_order_threshold:
+                    large_orders += 1
+                if side == "BUY":
+                    buy_volume += w_vol
+                    buy_volume_raw += vol
+                else:
+                    sell_volume += w_vol
+                    sell_volume_raw += vol
             prev_price = float(t.get("price", 0) or prev_price or 0)
 
         total_volume = buy_volume + sell_volume or 1.0
         delta = buy_volume - sell_volume
-        self.cumulative_volume_delta += delta
+        session_delta = session_buy_vol - session_sell_vol
+        self.cumulative_volume_delta += session_delta
 
         bid_depth = bid_depth or {}
         ask_depth = ask_depth or {}
@@ -1020,9 +1091,6 @@ class OrderFlowAnalyzer:
         ask_top5 = sorted(ask_depth.items(), key=lambda kv: float(kv[0]))[:5]
         bid_sum = sum(float(v) for _, v in bid_top5)
         ask_sum = sum(float(v) for _, v in ask_top5)
-
-        large_orders = sum(1 for t in tick_data
-                           if float(t.get("volume", 0) or 0) > self.large_order_threshold)
 
         l2 = l2_metrics or {}
         return OrderFlowMetrics(
@@ -3275,15 +3343,8 @@ class SignalEngine:
             if _may_vote('macro_yield'): votes.append(v)
             notes.append("10Y %s %.2f%%/5d (w %.1f)" %
                          ("rising" if y_chg > 0 else "falling", abs(y_chg) * 100.0, w_yield))
-        # Rising dollar pressures USD-priced gold -> bearish
-        d_chg = macro.usd_change_5d
-        if abs(d_chg) > 1e-6:
-            w_dxy = macro_high_w if _high_now else 0.6
-            v = (-np.clip(d_chg / 0.01, -1.0, 1.0), w_dxy)
-            macro_pairs.append(v)          # brake: always
-            if _may_vote('macro_dxy'): votes.append(v)
-            notes.append("DXY %s %.2f%%/5d (w %.1f)" %
-                         ("rising" if d_chg > 0 else "falling", abs(d_chg) * 100.0, w_dxy))
+        # macro_dxy removed completely (2026-10-26): 5-day DXY drift does not
+        # belong in an M3 order-flow scalper and was already retired in C1/v8.
         # VIX stress spike vs its own 20-session median -> safe-haven bid.
         v_spk = macro.vix_spike
         if v_spk > 0.05:
@@ -3302,31 +3363,15 @@ class SignalEngine:
             votes.append(v); macro_pairs.append(v)
 
         # ---- 9) News sentiment ----------------------------------------------
-        # M4: weight 0.4 normally, 1.0 during HIGH impact
+        # M4: weight 0.4 normally, 1.0 during HIGH impact (_high_now <= 120m).
+        # Only emit a directional judge note when an actual HIGH window is active
+        # and sentiment_score is non-zero (prevents week-long HIGH calendar items
+        # or 0.00 neutral payloads from flooding the judge panel all day).
         sentiment_w = news_high_w if _high_now else news_low_w
-        votes.append((news.sentiment_score, sentiment_w))
-        if news.impact_level == "HIGH":
-            notes.append(f"HIGH impact sentiment {news.sentiment_score:+.2f} weight {sentiment_w} (boosted)")
-
-        # ---- 9b) M4 DXY_RISING_VETO ------------------------------------------
-        # Gold is DXY inverse: if DXY rising + correlation negative -> veto longs
-        try:
-            if bool(getattr(config, "DXY_VETO_ENABLED", True)):
-                dxy_thr = float(getattr(config, "DXY_RISING_THRESHOLD_PCT", 0.3)) / 100.0
-                corr_thr = float(getattr(config, "DXY_CORR_THRESHOLD", -0.15))
-                # DXY rising = positive 5d change
-                if d_chg > dxy_thr and macro.dxy_correlation < corr_thr:
-                    # DXY rising + negative corr = bearish for gold
-                    votes.append((-1.0, 0.9))
-                    notes.append(f"DXY_RISING_VETO: DXY +{d_chg*100:.2f}% 5d, corr {macro.dxy_correlation:.2f} -> SELL bias")
-                    # If signal would be BUY, cap it
-                    # (handled later via opposition, but note it)
-                # Also veto longs explicitly if strong DXY rise
-                if d_chg > dxy_thr * 1.5 and macro.dxy_correlation < -0.20:
-                    # Store for later capping
-                    notes.append(f"DXY strong rise +{d_chg*100:.2f}% corr {macro.dxy_correlation:.2f} -> BUY veto risk")
-        except Exception as e:
-            notes.append(f"DXY veto error: {e}")
+        if abs(news.sentiment_score) > 1e-6:
+            votes.append((news.sentiment_score, sentiment_w))
+            if _high_now:
+                notes.append(f"HIGH impact sentiment {news.sentiment_score:+.2f} weight {sentiment_w} (boosted)")
 
         # ---- v6.0 4 Teams + Filter hierarchical ensemble (bank-grade) ----
         # If enabled, group votes into 4 teams then ensemble, else flat
@@ -3659,12 +3704,17 @@ def parse_judge_panel(notes: List[str]) -> List[Dict[str, Any]]:
     """
     import re as _re
     out: List[Dict[str, Any]] = []
+    seen_idx: Dict[str, int] = {}
     for note in notes or []:
         if not isinstance(note, str) or len(note) > 400:
             continue
         for judge, pat in _JUDGE_PATTERNS:
             m = _re.search(pat, note)
             if not m:
+                continue
+            if judge in ("whale_walls", "macro_dxy"):
+                # Retired judges: whale_walls (C1 clock) and macro_dxy (deleted
+                # 5d DXY drift for M3 scalper) no longer emit panel votes.
                 continue
             d, w = 0.0, 0.0
             g = m.groups()
@@ -3682,8 +3732,17 @@ def parse_judge_panel(notes: List[str]) -> List[Dict[str, Any]]:
                     w = 0.0
             if not w:
                 w = _JUDGE_DEFAULT_W.get(judge, 0.5)
-            if judge in ("footprint_delta", "l3_imbalance", "l3_net_flow",
-                         "l3_large_ofi", "spoof_invert_loose", "vwap_zscore"):
+            if judge == "l3_large_ofi":
+                if g and g[-1] in ("BUY", "SELL"):
+                    d = 1.0 if g[-1] == "BUY" else -1.0
+                elif len(g) > 1:
+                    try:
+                        ofi_val = float(g[1])
+                        d = 1.0 if ofi_val > 0 else (-1.0 if ofi_val < 0 else 0.0)
+                    except (TypeError, ValueError):
+                        d = 0.0
+            elif judge in ("footprint_delta", "l3_imbalance", "l3_net_flow",
+                           "spoof_invert_loose", "vwap_zscore"):
                 try:
                     lead = float(g[0]) if g else 0.0
                     if judge == "footprint_delta" and g and g[0].lstrip("+-").replace(".", "").isdigit():
@@ -3730,18 +3789,41 @@ def parse_judge_panel(notes: List[str]) -> List[Dict[str, Any]]:
             elif judge == "delta_pressure":
                 d = 1.0 if (g and g[0] == "Buy") else -1.0
             elif judge == "volume_roc":
-                d = 1.0 if (g and g[-1] == "bullish" and g[1] == "up") else \
-                    (1.0 if (g and g[-1] == "bearish" and g[1] == "down") else -1.0)
+                if g and g[-1] == "bullish":
+                    d = 1.0
+                elif g and g[-1] == "bearish":
+                    d = -1.0
+                else:
+                    d = 0.0
             elif judge in ("macro_yield", "macro_dxy"):
                 d = -1.0 if (g and g[0] == "rising") else 1.0
             elif judge == "macro_risk":
                 d = 1.0 if (g and g[0] == "off") else -1.0
+            elif judge == "news_sentiment":
+                try:
+                    ns_val = float(g[0]) if g else 0.0
+                    d = 1.0 if ns_val > 0 else (-1.0 if ns_val < 0 else 0.0)
+                except (TypeError, ValueError):
+                    d = 0.0
+            elif judge == "mtf":
+                mtf_txt = str(g[0]) if g else ""
+                ups = sum(1 for tok in mtf_txt.split() if tok.endswith(":UP"))
+                downs = sum(1 for tok in mtf_txt.split() if tok.endswith(":DOWN"))
+                d = 1.0 if ups > downs else (-1.0 if downs > ups else 0.0)
             elif judge == "queue_pos":
                 d = 1.0 if (g and g[0] == "bid") else -1.0
             elif judge == "microprice":
                 d = 1.0 if (g and g[-1] == "BUY") else -1.0
-            out.append({"judge": judge, "dir": float(d), "weight": float(w or 0.5),
-                        "raw": note[:160]})
+            weight_val = float(w or 0.5)
+            if judge == "supply_demand" and judge in seen_idx:
+                prev = out[seen_idx[judge]]
+                net = prev["dir"] * prev["weight"] + float(d) * weight_val
+                prev["dir"] = 1.0 if net > 1e-9 else (-1.0 if net < -1e-9 else 0.0)
+                prev["weight"] = max(prev["weight"], weight_val)
+            else:
+                seen_idx[judge] = len(out)
+                out.append({"judge": judge, "dir": float(d), "weight": weight_val,
+                            "raw": note[:160]})
             break
     return out
 

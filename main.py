@@ -1125,8 +1125,9 @@ def run_step3(snapshot):
         return decision
 
     now = _time.time()
-    if now - _LAST_AI_CALL < min_interval:
-        wait = (min_interval - (now - _LAST_AI_CALL)) / 60.0
+    effective_interval = (min_interval - 5.0) if min_interval >= 60.0 else min_interval
+    if now - _LAST_AI_CALL < effective_interval:
+        wait = max(0.0, (min_interval - (now - _LAST_AI_CALL)) / 60.0)
         decision = Decision(
             action="HOLD", confidence=0.0,
             rationale=f"AI throttled ({wait:.0f} min until next call)",
@@ -1144,9 +1145,20 @@ def run_step3(snapshot):
                 f"HOLD (daily AI cap {max_per_day} reached)")
         return decision
 
-    _LAST_AI_CALL = now
-    _record_ai_call()
     decision = AIDecisionEngine().decide(snapshot)
+    m_tag = str(getattr(decision, "model", "") or "")
+    if (m_tag and not m_tag.startswith("none-")
+            and not m_tag.endswith("-cached")
+            and m_tag != "fallback-rule"):
+        _LAST_AI_CALL = now
+        _record_ai_call()
+    elif m_tag in ("none-timeout-budget", "none-call-failed"):
+        # Do not count failed attempts as paid calls and do not lock out a full
+        # bar; pause at most ~60s so the loop stays responsive without hammering.
+        if min_interval > 60.0:
+            _LAST_AI_CALL = now - (min_interval - 60.0)
+        else:
+            _LAST_AI_CALL = now
     _rat_txt = str(getattr(decision, "rationale", "") or "")[-110:]
     if " " in _rat_txt:
         _rat_txt = _rat_txt[_rat_txt.find(" ") + 1:]      # opsfix:v3.2: no mid-word cuts
@@ -1573,8 +1585,13 @@ def run_signal_bridge(snapshot, decision, *, allow_new_entries: bool = True) -> 
         # from the DISPLAY so the line stops advertising a retired judge.
         # (POWER's agreement gate reads its own timeframe family, not the
         # judges -- verified 2026-10-16, whale cannot reach it.)
+        try:
+            from judge_families import RETIRED as _RETIRED_JUDGES
+        except Exception:
+            _RETIRED_JUDGES = frozenset({"whale_walls", "macro_dxy"})
         _jv = [v for v in _jv
-               if str(v.get("judge") or "") != "whale_walls"]
+               if str(v.get("judge") or "") not in _RETIRED_JUDGES
+               and str(v.get("judge") or "") not in ("whale_walls", "macro_dxy")]
         _jb = [v for v in _jv if isinstance(v, dict) and float(v.get("dir") or 0) > 0]
         _js = [v for v in _jv if isinstance(v, dict) and float(v.get("dir") or 0) < 0]
         _jf = len(_jv) - len(_jb) - len(_js)
@@ -2389,11 +2406,14 @@ def _env_snapshot() -> dict:
     return {
         "CONFIDENCE_THRESHOLD": g("AI_CONFIDENCE_THRESHOLD"),
         "AI_MIN_SIGNAL_STRENGTH": g("AI_MIN_SIGNAL_STRENGTH"),
+        "AI_MIN_INTERVAL_MINUTES": g("AI_MIN_INTERVAL_MINUTES"),
         "V6_CFD_SPREAD_MAX": g("V6_CFD_SPREAD_MAX"),
         "BOOKMAP_WINDOW_SECONDS": g("BOOKMAP_WINDOW_SECONDS"),
+        "ORDER_FLOW_WINDOW_SECONDS": g("ORDER_FLOW_WINDOW_SECONDS"),
         "BOOKMAP_MAX_DEPTH_LEVELS": g("BOOKMAP_MAX_DEPTH_LEVELS"),
         "GEMINI_MODEL": g("GEMINI_MODEL"),
         "GEMINI_MODELS": ",".join(gm) if isinstance(gm, (list, tuple)) else gm,
+        "GEMINI_THINKING_LEVEL": g("GEMINI_THINKING_LEVEL"),
         "EXECUTION_MODE": g("EXECUTION_MODE"),
         "TRADING_ENABLED": g("TRADING_ENABLED"),
         "ALLOW_LIVE_TRADING": g("ALLOW_LIVE_TRADING"),
@@ -2412,6 +2432,7 @@ def _env_snapshot() -> dict:
         "POWER_LEAD_SHADOW_ENABLED": g("POWER_LEAD_SHADOW_ENABLED"),
         "LIMIT_ORDER_ENABLED": g("LIMIT_ORDER_ENABLED"),
         "AGGRESSIVE_ENTRY_ENABLED": g("AGGRESSIVE_ENTRY_ENABLED"),
+        "AGGRESSIVE_SPREAD_MAX_PCT": g("AGGRESSIVE_SPREAD_MAX_PCT"),
         "A2_LEAN_MIN": g("A2_LEAN_MIN"),
         "A2_LEAN_HOLD_SECONDS": g("A2_LEAN_HOLD_SECONDS"),
         "A2_PANEL_WINDOW_SECONDS": g("A2_PANEL_WINDOW_SECONDS"),

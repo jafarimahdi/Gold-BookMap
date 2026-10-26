@@ -153,6 +153,8 @@ def _refresh() -> None:
     g["BASE_TF_MINUTES"] = _base_tf_min if _base_tf_min is not None else 5
     g["POWER_BAR_SECONDS"] = int(_ffloat(
         "POWER_BAR_SECONDS", 60.0 * g["BASE_TF_MINUTES"]))
+    g["ORDER_FLOW_WINDOW_SECONDS"] = int(_ffloat(
+        "ORDER_FLOW_WINDOW_SECONDS", float(g["POWER_BAR_SECONDS"])))
     # Power-lead floor 30 is shadow-only until the required evidence/design
     # review and owner-approved one-switch. The legacy POWER_LEAD_ENABLED key is
     # retained for .env compatibility but no longer authorizes sub-threshold
@@ -164,6 +166,7 @@ def _refresh() -> None:
     # still gives explicit environment values first priority. Defaults match its
     # own reviewed fallback and do not enable the A2 lane.
     g["AGGRESSIVE_ENTRY_ENABLED"] = _fget("AGGRESSIVE_ENTRY_ENABLED", "0") == "1"
+    g["AGGRESSIVE_SPREAD_MAX_PCT"] = _ffloat("AGGRESSIVE_SPREAD_MAX_PCT", 0.035)
     g["A2_LEAN_MIN"] = _ffloat("A2_LEAN_MIN", 0.25)
     g["A2_LEAN_HOLD_SECONDS"] = _ffloat("A2_LEAN_HOLD_SECONDS", 60.0)
     g["A2_PANEL_WINDOW_SECONDS"] = _ffloat("A2_PANEL_WINDOW_SECONDS", 300.0)
@@ -205,7 +208,17 @@ def _refresh() -> None:
     # ---- STEP 3 / STEP 4 thresholds -----------------------------------------
     g["AI_CONFIDENCE_THRESHOLD"] = _ffloat("CONFIDENCE_THRESHOLD", 70.0)
     g["AI_MIN_SIGNAL_STRENGTH"] = _ffloat("AI_MIN_SIGNAL_STRENGTH", 10.0)
-    g["AI_MIN_INTERVAL_MINUTES"] = _fint("AI_MIN_INTERVAL_MINUTES", 5)
+    _ai_min_raw = _fget("AI_MIN_INTERVAL_MINUTES", "").strip().lower()
+    if _ai_min_raw in ("", "auto", "timeframe", "tf"):
+        g["AI_MIN_INTERVAL_MINUTES"] = int(g["BASE_TF_MINUTES"])
+    else:
+        try:
+            _ai_min_val = int(float(_ai_min_raw))
+            g["AI_MIN_INTERVAL_MINUTES"] = (
+                int(g["BASE_TF_MINUTES"]) if _ai_min_val <= 0 else _ai_min_val
+            )
+        except ValueError:
+            g["AI_MIN_INTERVAL_MINUTES"] = int(g["BASE_TF_MINUTES"])
     g["AI_MAX_CALLS_PER_DAY"] = _fint("AI_MAX_CALLS_PER_DAY", 2000)
     g["AI_KEY_COOLDOWN_MINUTES"] = _fint("AI_KEY_COOLDOWN_MINUTES", 20)
     g["GEMINI_REQUEST_TIMEOUT_MS"] = _fint("GEMINI_REQUEST_TIMEOUT_MS", 20000)
@@ -419,11 +432,21 @@ def _refresh() -> None:
     g["RITHMIC_USERNAME"] = _fget("RITHMIC_USERNAME", "")
     g["RITHMIC_PASSWORD"] = _fget("RITHMIC_PASSWORD", "")
     g["GEMINI_API_KEY"] = _fget("GEMINI_API_KEY", "")
-    g["GEMINI_MODEL"] = _fget("GEMINI_MODEL", "gemini-3.7-flash")
-    g["GEMINI_MODELS"] = [m.strip() for m in _fget(
-        "GEMINI_MODELS",
-        "gemini-3.7-flash,gemini-3.5-flash,gemini-3.6-flash,gemini-2.5-flash"
-    ).split(",") if m.strip()]
+    g["GEMINI_MODEL"] = _fget("GEMINI_MODEL", "gemini-3.8-flash").strip() or "gemini-3.8-flash"
+    _default_gemini_models = [
+        "gemini-3.8-flash",
+        "gemini-3.6-flash",
+        "gemini-3.5-flash-lite",
+        "gemini-2.5-flash",
+    ]
+    _raw_gemini_models = _fget("GEMINI_MODELS", "").strip()
+    if _raw_gemini_models:
+        g["GEMINI_MODELS"] = [m.strip() for m in _raw_gemini_models.split(",") if m.strip()]
+    else:
+        g["GEMINI_MODELS"] = [g["GEMINI_MODEL"]] + [
+            m for m in _default_gemini_models if m != g["GEMINI_MODEL"]
+        ]
+    g["GEMINI_THINKING_LEVEL"] = _fget("GEMINI_THINKING_LEVEL", "LOW").strip().upper() or "LOW"
     _gemini_keys = [_fget("GEMINI_API_KEY", "")]
     for _n in range(2, 21):
         _gemini_keys.append(_fget("GEMINI_API_KEY_%d" % _n, ""))

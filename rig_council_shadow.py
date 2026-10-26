@@ -106,7 +106,7 @@ print(result.stderr)
 
 checks = [
     "bar interval: 300s (M5) - horizons are true minutes",
-    "carried: 1 (ai_model=power-lead-v1) | ai: 1 | fallback: 1 | none/quiet: 9 | other: 0",
+    "POWER carries: 1 (decision_source=POWER_V2_CONFIGURED_THRESHOLD_CARRY or legacy ai_model=power-lead-v1) | AI: 1 | fallback: 1 | none/quiet: 9 | other: 0",
     "graded symbol: RIG",
     "aligned minutes: 12",
     "twins filtered (not graded): XAUUSD x30",
@@ -202,7 +202,7 @@ checks2 = [
     "OPT B  (POWER-led, class floor 20, agree): passed 5  right@30m 3/5 (60%)",
     "OPT A  (Council v0: conf>=30, dom>=55, 0.5c+0.5d>=45): passed 3  right@30m 2/3 (67%)",
     "OPT D  (POWER-only, no class floor): passed 6  right@30m 3/6 (50%)",
-    "carried: 1 (ai_model=power-lead-v1) | ai: 1 | fallback: 0 | none/quiet: 4 | other: 0",
+    "POWER carries: 1 (decision_source=POWER_V2_CONFIGURED_THRESHOLD_CARRY or legacy ai_model=power-lead-v1) | AI: 1 | fallback: 0 | none/quiet: 4 | other: 0",
 ]
 ok2 = all(c in result2.stdout for c in checks2)
 print("RIG day2 (M3):", "PASS" if ok2 else "FAIL")

@@ -84,6 +84,7 @@ def parse_judge_panel(notes: List[str]) -> List[Dict[str, Any]]:
     """
     import re as _re
     out: List[Dict[str, Any]] = []
+    seen_idx: Dict[str, int] = {}
     for note in notes or []:
         if not isinstance(note, str) or len(note) > 400:
             continue
@@ -91,10 +92,9 @@ def parse_judge_panel(notes: List[str]) -> List[Dict[str, Any]]:
             m = _re.search(pat, note)
             if not m:
                 continue
-            if judge == "whale_walls":
-                # gates:v1 -- C1 clock matured (6 days, 4183 calls, -1.012
-                # pts/call); owner-ordered cut 2026-10-15. The L3-whale note
-                # still prints in the signal map; it just no longer votes.
+            if judge in ("whale_walls", "macro_dxy"):
+                # gates:v1 + 2026-10-26 -- whale_walls (C1 clock) and macro_dxy
+                # (5d DXY drift deleted from M3 scalper) no longer emit panel votes.
                 continue
             d, w = 0.0, 0.0
             g = m.groups()
@@ -112,8 +112,17 @@ def parse_judge_panel(notes: List[str]) -> List[Dict[str, Any]]:
                     w = 0.0
             if not w:
                 w = _JUDGE_DEFAULT_W.get(judge, 0.5)
-            if judge in ("footprint_delta", "l3_imbalance", "l3_net_flow",
-                         "l3_large_ofi", "spoof_invert_loose", "vwap_zscore"):
+            if judge == "l3_large_ofi":
+                if g and g[-1] in ("BUY", "SELL"):
+                    d = 1.0 if g[-1] == "BUY" else -1.0
+                elif len(g) > 1:
+                    try:
+                        ofi_val = float(g[1])
+                        d = 1.0 if ofi_val > 0 else (-1.0 if ofi_val < 0 else 0.0)
+                    except (TypeError, ValueError):
+                        d = 0.0
+            elif judge in ("footprint_delta", "l3_imbalance", "l3_net_flow",
+                           "spoof_invert_loose", "vwap_zscore"):
                 try:
                     lead = float(g[0]) if g else 0.0
                     if judge == "footprint_delta" and g and g[0].lstrip("+-").replace(".", "").isdigit():
@@ -160,18 +169,41 @@ def parse_judge_panel(notes: List[str]) -> List[Dict[str, Any]]:
             elif judge == "delta_pressure":
                 d = 1.0 if (g and g[0] == "Buy") else -1.0
             elif judge == "volume_roc":
-                d = 1.0 if (g and g[-1] == "bullish" and g[1] == "up") else \
-                    (1.0 if (g and g[-1] == "bearish" and g[1] == "down") else -1.0)
+                if g and g[-1] == "bullish":
+                    d = 1.0
+                elif g and g[-1] == "bearish":
+                    d = -1.0
+                else:
+                    d = 0.0
             elif judge in ("macro_yield", "macro_dxy"):
                 d = -1.0 if (g and g[0] == "rising") else 1.0
             elif judge == "macro_risk":
                 d = 1.0 if (g and g[0] == "off") else -1.0
+            elif judge == "news_sentiment":
+                try:
+                    ns_val = float(g[0]) if g else 0.0
+                    d = 1.0 if ns_val > 0 else (-1.0 if ns_val < 0 else 0.0)
+                except (TypeError, ValueError):
+                    d = 0.0
+            elif judge == "mtf":
+                mtf_txt = str(g[0]) if g else ""
+                ups = sum(1 for tok in mtf_txt.split() if tok.endswith(":UP"))
+                downs = sum(1 for tok in mtf_txt.split() if tok.endswith(":DOWN"))
+                d = 1.0 if ups > downs else (-1.0 if downs > ups else 0.0)
             elif judge == "queue_pos":
                 d = 1.0 if (g and g[0] == "bid") else -1.0
             elif judge == "microprice":
                 d = 1.0 if (g and g[-1] == "BUY") else -1.0
-            out.append({"judge": judge, "dir": float(d), "weight": float(w or 0.5),
-                        "raw": note[:160]})
+            weight_val = float(w or 0.5)
+            if judge == "supply_demand" and judge in seen_idx:
+                prev = out[seen_idx[judge]]
+                net = prev["dir"] * prev["weight"] + float(d) * weight_val
+                prev["dir"] = 1.0 if net > 1e-9 else (-1.0 if net < -1e-9 else 0.0)
+                prev["weight"] = max(prev["weight"], weight_val)
+            else:
+                seen_idx[judge] = len(out)
+                out.append({"judge": judge, "dir": float(d), "weight": weight_val,
+                            "raw": note[:160]})
             break
     return out
 

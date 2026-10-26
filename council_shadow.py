@@ -106,6 +106,7 @@ def load_diary(path: Path):
                 "reason": str(result.get("reason_code", "UNKNOWN")),
                 "up": result.get("up_power_pct"),
                 "down": result.get("down_power_pct"),
+                "activity": result.get("activity"),
                 "votes": votes,
             })
     parsed.sort(key=lambda r: (r["ts"], r["symbol"]))
@@ -197,15 +198,16 @@ def main() -> int:
         return 2
     n = len(bars)
 
-    # frozen-feed detection (for caveats)
+    # frozen-feed detection (for caveats): match power_report_card.py — a bar is
+    # only dead-feed when reference price repeats AND bar activity is zero (never
+    # latch forever across the rest of the session via a sticky prefix-OR).
     frozen = [False] * n
     for i in range(1, n):
         a, b = num(bars[i - 1]["ref"]), num(bars[i]["ref"])
-        if (a is not None and b is not None and a > 0 and a == b):
+        act = bars[i].get("activity")
+        zero_act = True if act is None else ((num(act) or 0.0) == 0.0)
+        if a is not None and b is not None and a > 0 and a == b and zero_act:
             frozen[i] = True
-    # propagate: a stretch is frozen while prices repeat
-    for i in range(1, n):
-        frozen[i] = frozen[i] or frozen[i - 1]
 
     log_path = root.parent / "decisions_log.csv"
     if not log_path.is_file():

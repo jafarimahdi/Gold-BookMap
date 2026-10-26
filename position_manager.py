@@ -919,8 +919,19 @@ class PositionManager:
                          "manage (demo mode).")
             return
         if not config.mt5_initialize(self._mt5):
-            logger.error("PM: mt5.initialize() failed")
+            if getattr(self, "_state", None):
+                logger.error(
+                    "PM: mt5.initialize() failed while managing %d active position(s)",
+                    len(self._state),
+                )
+            else:
+                import time as _t
+                _now_w = _t.monotonic()
+                if _now_w - float(getattr(self, "_mt5_init_warn_ts", 0.0) or 0.0) >= 300.0:
+                    self._mt5_init_warn_ts = _now_w
+                    logger.warning("PM: mt5.initialize() failed — MT5 terminal not reachable yet")
             return
+        self._mt5_init_warn_ts = 0.0
         try:
             try:
                 positions = self._bot_positions()

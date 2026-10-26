@@ -25,6 +25,7 @@ except ImportError:  # pragma: no cover
 import config
 
 logger = logging.getLogger(__name__)
+_LAST_MT5_INIT_WARN_TS = 0.0
 
 
 class TradeMonitor:
@@ -37,13 +38,19 @@ class TradeMonitor:
     # ------------------------------------------------------------------ #
     def check_open_trades(self) -> List[dict]:
         """Return open positions (empty list when MT5 unavailable)."""
+        global _LAST_MT5_INIT_WARN_TS
         if mt5 is None:
             logger.info("STEP 5: MetaTrader5 SDK not installed -> no live "
                         "positions to monitor (demo mode).")
             return []
         if not config.mt5_initialize(mt5):
-            logger.error("STEP 5: mt5.initialize() failed")
+            import time as _t
+            _now_w = _t.monotonic()
+            if _now_w - _LAST_MT5_INIT_WARN_TS >= 300.0:
+                _LAST_MT5_INIT_WARN_TS = _now_w
+                logger.warning("STEP 5: mt5.initialize() failed — MT5 terminal not reachable yet")
             return []
+        _LAST_MT5_INIT_WARN_TS = 0.0
         try:
             positions = mt5.positions_get()
             mt5.shutdown()

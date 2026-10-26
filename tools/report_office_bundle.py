@@ -524,6 +524,29 @@ def inject_into_report_html(root: Path, day_str: str) -> Path:
         )
 
     report_path.write_text(html, encoding="utf-8")
+
+    day_report_path = data_dir / f"day_report_{day_str}.html"
+    if day_report_path.exists():
+        try:
+            dr_html = day_report_path.read_text(encoding="utf-8", errors="replace")
+            marker = "<!-- report-office-master-link -->"
+            banner_link = (
+                f"{marker}<div style='background:#0f172a;color:#f8fafc;padding:10px 18px;"
+                "border-bottom:2px solid #22c55e;font-family:system-ui,sans-serif;font-size:14px;"
+                "display:flex;align-items:center;justify-content:space-between;gap:12px'>"
+                "<span><b>Note:</b> This is the raw audit sub-page. The complete Company 2 Master Evening Report "
+                "(Test Gate + Preflight + 17 Tests + Desks 1&ndash;10 + Probes) is in "
+                f"<code>report_{_esc(day_str)}.html</code>.</span>"
+                f"<a href='report_{_esc(day_str)}.html' style='background:#22c55e;color:#052e16;"
+                "font-weight:700;padding:6px 14px;border-radius:6px;text-decoration:none;white-space:nowrap'>"
+                f"Open Full Report (report_{_esc(day_str)}.html) &rarr;</a></div>"
+            )
+            if marker not in dr_html and "<body>" in dr_html:
+                dr_html = dr_html.replace("<body>", f"<body>{banner_link}", 1)
+                day_report_path.write_text(dr_html, encoding="utf-8")
+        except Exception:
+            pass
+
     return report_path
 
 

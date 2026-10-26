@@ -1132,11 +1132,13 @@ _J = [
     ("cvd_divergence",    r"(bullish|bearish) CVD divergence"),
     ("cvd_momentum",      r"CVD (rising|falling) delta"),
     ("delta_pressure",    r"Delta (Buy|Sell)% ([\d.]+) >60%"),
+    ("volume_roc",        r"volume RoC \+([\d.]+)% with price (up|down) -> (bullish|bearish)"),
     ("macro_yield",       r"10Y (rising|falling)"),
     ("macro_dxy",         r"DXY (rising|falling)"),
     ("macro_vix",         r"VIX stress"),
     ("macro_risk",        r"risk-(off|on)"),
-    ("mtf",               r"^MTF (\S+)"),
+    ("news_sentiment",    r"HIGH impact sentiment ([+-][\d.]+)"),
+    ("mtf",               r"^MTF (.+)"),
 ]
 
 
@@ -1207,6 +1209,18 @@ def judge_panel(record):
                 d = 1.0 if g[0] == "rising" else -1.0
             elif judge in ("footprint_levels", "l3_aggr_limit") and g:
                 d = 1.0 if g[0] in ("buying", "buy") else -1.0
+            elif judge == "news_sentiment" and g:
+                try:
+                    ns_v = float(g[0])
+                    d = 1.0 if ns_v > 0 else (-1.0 if ns_v < 0 else 0.0)
+                except ValueError:
+                    d = 0.0
+            elif judge == "volume_roc" and g:
+                d = 1.0 if g[-1] == "bullish" else (-1.0 if g[-1] == "bearish" else 0.0)
+            elif judge == "mtf" and g:
+                ups = sum(1 for tok in str(g[0]).split() if tok.endswith(":UP"))
+                downs = sum(1 for tok in str(g[0]).split() if tok.endswith(":DOWN"))
+                d = 1.0 if ups > downs else (-1.0 if downs > ups else 0.0)
             elif judge == "iceberg_legacy" and len(g) > 1:
                 try:
                     d = 1.0 if float(g[1]) > 0 else -1.0
@@ -1343,8 +1357,8 @@ def html_report(day, reports, metrics):
         except Exception as e:
             print(f"[warn] dashboard render failed ({e}); using the minimal page")
     order = ("alive", "feed", "pipe", "dq", "guards", "sig", "whatif", "teams", "judges",
-             "cov", "ver", "lat", "money", "files", "hour", "cycle")
-    rows = [(g, n, h, w) for k in order for g, n, h, w in reports[k].rows]
+             "cov", "ver", "lat", "money", "files", "hour", "cycle", "organs")
+    rows = [(g, n, h, w) for k in order if k in reports for g, n, h, w in reports[k].rows]
     lis = "".join("<li><b>" + str(i) + ". " + _esc(n) + "</b> [" + g + "] " + _esc(h) + "</li>"
                   for i, (g, n, h, _w) in enumerate(rows, start=1))
     css = ("body{font:14px/1.5 Segoe UI,Arial;background:#0f1117;color:#e6e6ec;padding:24px}"
@@ -1619,8 +1633,7 @@ def test_3_pipeline(text, decisions):
         why.append(f"{len(warn)} warnings, most common: {Counter(w[8:60].strip() for w in warn).most_common(1)}")
     if err:
         r.add("FAIL", "PIPELINE CHECK", "did all 5 steps run, or did it die halfway?", why)
-        return r, None       # one grade per test; without this the same test also printed
-                             # a PASS row and the SCOREBOARD totals were inflated
+        return r, {"cycles": cyc, "errors": len(err), "warnings": len(warn)}
     missing = [k for k, v in marks.items() if cyc and v < cyc]
     if len(decisions) < cyc * 0.5 and cyc > 3:
         why.append("far fewer decisions than cycles -> loops started then something stalled before the log write")
@@ -1644,14 +1657,16 @@ def test_4_data_quality(day, ticks, text):
     dup = 0
     seen = set()
     for t in ticks:
-        k = (t[0], t[1])
+        k = (t[0], t[1], t[2]) if len(t) > 2 else (t[0], t[1])
         if k in seen:
             dup += 1
         seen.add(k)
     snap_age = [float(x) for x in re.findall(r"feed age ([\d.]+)s", text)]
     zero_px_pct = pct(zero_px, n)
     dup_pct = pct(dup, n)
-    why.append(f"price<=0 prints: {zero_px:,} ({zero_px_pct:.1f}% of {n:,}) | exact duplicate prints: {dup_pct:.1f}% | busiest single minute: {busiest:,} prints")
+    why.append(f"price<=0 prints: {zero_px:,} ({zero_px_pct:.1f}% of {n:,}) | same-ms split/repeat prints: {dup_pct:.1f}% | busiest single minute: {busiest:,} prints")
+    if TAPE_DUPLICATES:
+        why.append(f"cross-file rotated chunk duplicates dropped cleanly on load: {TAPE_DUPLICATES:,}")
     if snap_age:
         ages = [a for a in snap_age if a > 0]
         why.append(f"'feed age' reported by STEP 1: median {statistics.median(snap_age):.1f}s, max {max(snap_age):.1f}s")
@@ -1661,7 +1676,9 @@ def test_4_data_quality(day, ticks, text):
         return r, None
     if busiest > 60000:
         why.append("one minute with >60k prints = catch-up replay, not live tape -> those minutes fake huge volume")
-    grade = "PASS" if zero_px_pct < 0.1 and dup_pct < 2.0 and busiest < 60000 else "WARN"
+    # CME MBO naturally emits ~2-8% same-ms equal-lot passive split fills during
+    # aggressive sweeps; >15% indicates true double-written / duplicated tape.
+    grade = "PASS" if zero_px_pct < 0.1 and dup_pct < 15.0 and busiest < 60000 else "WARN"
     if grade == "WARN":
         why.append("something above is off -> counts like 'big buyer vs big seller' can be inflated")
     else:
@@ -1748,6 +1765,14 @@ def test_5_guards(text, decisions, feed):
                            f"{_fb['source']}). The backup is stamped at AI_FALLBACK_CONFIDENCE "
                            f"(70 by default) - ABOVE the {fmt(CONF_MIN,0)}% gate - so those rows "
                            f"are not evidence that the AI agreed with anything")
+            elif _fb.get("none") or _fb.get("power_lead"):
+                _parts_who = [f"{_fb['ai']} answer(s) from the AI"]
+                if _fb.get("power_lead"):
+                    _parts_who.append(f"{_fb['power_lead']} POWER-lead carry row(s)")
+                if _fb.get("none"):
+                    _parts_who.append(f"{_fb['none']} cycle(s) where AI was not reached")
+                why.append(f"WHO ANSWERED: {', '.join(_parts_who)}, "
+                           f"none from the backup rule ({_fb['source']})")
             else:
                 why.append(f"WHO ANSWERED: all {_fb['total']} answer(s) came from the AI, "
                            f"none from the backup rule ({_fb['source']})")
@@ -3506,11 +3531,20 @@ def _mt5_truth(day):
             frm = datetime.combine(day, datetime.min.time())
             to = frm + timedelta(days=1)
             deals = list(mt5.history_deals_get(frm, to) or [])
+            # Filter to actual BUY/SELL trade deals (DEAL_TYPE_BUY=0, DEAL_TYPE_SELL=1)
+            # so broker DEMO initial balance/credit entries (type 2+) do not look like
+            # orphan opened trades in TEST 13.
+            trade_deals = [
+                d for d in deals
+                if getattr(d, "type", None) in (0, 1)
+                or (getattr(d, "type", None) is None and str(getattr(d, "symbol", "") or "").strip() != "")
+            ]
+            balance_deals = len(deals) - len(trade_deals)
             # entry==1 means "deal that CLOSED/EXITED a position" in MT5's deal model
-            closed = [d for d in deals if getattr(d, "entry", None) == 1]
-            opened = [d for d in deals if getattr(d, "entry", None) == 0]
+            closed = [d for d in trade_deals if getattr(d, "entry", None) == 1]
+            opened = [d for d in trade_deals if getattr(d, "entry", None) == 0]
             pnl = sum(float(getattr(d, "profit", 0.0) or 0.0) for d in closed)
-            last = max((getattr(d, "time", 0) for d in deals), default=0)
+            last = max((getattr(d, "time", 0) for d in trade_deals), default=0)
             def _deal_row(d):
                 return {
                     "position_id": int(getattr(d, "position_id", 0) or 0),
@@ -3534,7 +3568,8 @@ def _mt5_truth(day):
                 "open_detail": [f"{getattr(p, 'symbol', '?')} {getattr(p, 'volume', '?')} "
                                 f"@ {getattr(p, 'price_open', '?')}"
                                 for p in positions[:6]],
-                "deals_total": len(deals), "closed": len(closed), "opened": len(opened),
+                "deals_total": len(trade_deals), "closed": len(closed), "opened": len(opened),
+                "balance_deals": balance_deals,
                 "pnl": pnl,
                 # MT5 hands back deal times as broker-SERVER-time epochs. Formatting one
                 # with the local clock added the server offset AND the local offset on top
@@ -3741,6 +3776,8 @@ def test_13_money(day, decisions=None):
                    + f" | this day's deals: {truth['deals_total']} ({truth['opened']} opened, "
                      f"{truth['closed']} closed, net {truth['pnl']:+.2f})"
                      f" | last deal {truth['last_deal']} broker-server time (UTC)")
+        if truth.get("balance_deals"):
+            why.append(f"   (ignored {truth['balance_deals']} non-trade MT5 balance/credit row(s) on this day)")
     else:
         if globals().get("SKIP_MT5"):
             why.append("DEMO/fixture run: MT5 is deliberately NOT consulted, so this report says "

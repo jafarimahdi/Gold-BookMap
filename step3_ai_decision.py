@@ -306,10 +306,17 @@ def _judge_report_card_block(snapshot=None):
                 age = (date.fromisoformat(today) - date.fromisoformat(max(days))).days
             except Exception:
                 age = 10 ** 6
+            try:
+                from judge_families import RETIRED as _RETIRED_JUDGES
+            except Exception:
+                _RETIRED_JUDGES = frozenset({"whale_walls", "macro_dxy"})
             judges = []
             for j in (card.get("judges") or []):
                 try:
-                    judges.append((str(j["judge"]), int(j["scored"]),
+                    j_name = str(j["judge"])
+                    if j_name in _RETIRED_JUDGES or j_name == "macro_dxy":
+                        continue
+                    judges.append((j_name, int(j["scored"]),
                                    float(j["hit_pct"]), float(j["pts_per_call"])))
                 except Exception:
                     continue
@@ -369,6 +376,7 @@ class AIDecisionEngine:
 
     # v5.2: Prompt cache for similar market conditions
     _PROMPT_CACHE = {"hash": None, "decision": None, "timestamp": None, "price": 0.0}
+    _UNAVAILABLE_MODELS: set = set()
 
     def __init__(self, api_key: Optional[str] = None,
                  model: Optional[str] = None,
@@ -383,6 +391,7 @@ class AIDecisionEngine:
         else:
             self.api_keys = [config.GEMINI_API_KEY] if config.GEMINI_API_KEY else []
         self.api_key = self.api_keys[0] if self.api_keys else ""
+        self._explicit_model = bool(model)
         self.model = model or config.GEMINI_MODEL
 
     # ------------------------------------------------------------------ #
@@ -672,19 +681,48 @@ class AIDecisionEngine:
                     if deadline is not None:
                         rem_ms = int(max(0.0, deadline - time.monotonic()) * 1000)
                         timeout_ms = max(15000, min(timeout_ms, rem_ms))
-                    http_options = genai_types.HttpOptions(timeout=timeout_ms)
-                    request_config = genai_types.GenerateContentConfig(
-                        automatic_function_calling=(
+                    http_kwargs: Dict[str, Any] = {"timeout": timeout_ms}
+                    if hasattr(genai_types, "HttpRetryOptions"):
+                        try:
+                            http_kwargs["retry_options"] = genai_types.HttpRetryOptions(attempts=1)
+                        except Exception:
+                            pass
+                    http_options = genai_types.HttpOptions(**http_kwargs)
+                    cfg_kwargs: Dict[str, Any] = {
+                        "automatic_function_calling": (
                             genai_types.AutomaticFunctionCallingConfig(disable=True)
                         )
-                    )
+                    }
+                    think_lvl = str(getattr(config, "GEMINI_THINKING_LEVEL", "LOW") or "").strip().upper()
+                    m_low = str(model or "").lower()
+                    if (think_lvl and think_lvl != "NONE"
+                            and "gemini-3" in m_low
+                            and hasattr(genai_types, "ThinkingConfig")):
+                        try:
+                            cfg_kwargs["thinking_config"] = genai_types.ThinkingConfig(
+                                thinking_level=think_lvl
+                            )
+                        except Exception:
+                            pass
+                    request_config = genai_types.GenerateContentConfig(**cfg_kwargs)
                     client = genai.Client(api_key=key,
                                           http_options=http_options)
-                    response = client.models.generate_content(
-                        model=model,
-                        contents=prompt,
-                        config=request_config,
-                    )
+                    try:
+                        response = client.models.generate_content(
+                            model=model,
+                            contents=prompt,
+                            config=request_config,
+                        )
+                    except Exception as first_exc:
+                        if "thinking" in str(first_exc).lower() and "thinking_config" in cfg_kwargs:
+                            cfg_kwargs.pop("thinking_config", None)
+                            response = client.models.generate_content(
+                                model=model,
+                                contents=prompt,
+                                config=genai_types.GenerateContentConfig(**cfg_kwargs),
+                            )
+                        else:
+                            raise
                 else:
                     client = genai.Client(api_key=key)
                     response = client.models.generate_content(
@@ -781,8 +819,14 @@ class AIDecisionEngine:
                             model="none-no-sdk",
                             timestamp=datetime.now(timezone.utc))
 
-        models = getattr(config, "GEMINI_MODELS", None) or [self.model]
+        if getattr(self, "_explicit_model", False):
+            raw_models = [self.model]
+        else:
+            raw_models = list(getattr(config, "GEMINI_MODELS", None) or [self.model])
+        models = [m for m in raw_models if m not in self._UNAVAILABLE_MODELS] or list(raw_models)
         exhausted = _exhausted_keys()
+        active_keys = [k for k in self.api_keys if _key_id(k) not in exhausted]
+        total_candidates = len(models) * max(1, len(active_keys))
         last_error = ""
         tried_model = None
         budget_s = _decide_total_budget_seconds()
@@ -790,6 +834,11 @@ class AIDecisionEngine:
         deadline_monotonic = started_monotonic + budget_s
         budget_exhausted = False
         fair_attempt_s = min(15.0, budget_s * 0.8)
+        per_attempt_cap_s = (
+            max(8.0, min(14.0, budget_s * 0.55))
+            if (budget_s >= 10.0 and total_candidates > 1)
+            else budget_s
+        )
         self._active_deadline_monotonic = deadline_monotonic
 
         try:
@@ -804,8 +853,9 @@ class AIDecisionEngine:
                     if remaining_s <= 0.0:
                         budget_exhausted = True
                         break
+                    attempt_budget_s = min(remaining_s, per_attempt_cap_s)
                     try:
-                        text = self._invoke_bounded(key, model, prompt, remaining_s)
+                        text = self._invoke_bounded(key, model, prompt, attempt_budget_s)
                         action, confidence, rationale = self._parse_response(text)
                         # v5.8 L3 Confidence Calibration
                         try:
@@ -862,6 +912,14 @@ class AIDecisionEngine:
                         return decision
                     except _Step3BudgetTimeoutError as texc:
                         last_error = str(texc)[:300]
+                        left_s = deadline_monotonic - time.monotonic()
+                        if left_s > 2.0 and budget_s >= 10.0 and total_candidates > 1:
+                            logger.warning(
+                                "STEP 3: attempt slice (%.1fs) reached on key #%d (%s); "
+                                "failing over with %.1fs budget left.",
+                                attempt_budget_s, key_index, model, left_s,
+                            )
+                            break
                         budget_exhausted = True
                         logger.warning(
                             "STEP 3: total wait cap (%.1fs) reached on key #%d (%s); "
@@ -881,6 +939,8 @@ class AIDecisionEngine:
                                            key_index, _key_cooldown_minutes())
                             continue
                         if self._is_model_unavailable(exc):
+                            if len(raw_models) > 1:
+                                self._UNAVAILABLE_MODELS.add(model)
                             logger.warning("STEP 3: model %s is no longer "
                                            "available; trying the next model.",
                                            model)

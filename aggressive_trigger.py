@@ -223,7 +223,7 @@ def evaluate_aggressive_trigger(
         spread_pct = 100.0 * (ask - bid) / bid
     checks["spread_pct"] = spread_pct
     max_spread = _num(_cfg(config, "AGGRESSIVE_SPREAD_MAX_PCT",
-                           _cfg(config, "MAX_SPREAD_PCT", 0.05)), 0.05)
+                           _cfg(config, "MAX_SPREAD_PCT", 0.035)), 0.035)
     if spread_pct is None:
         return no("no valid bid/ask; aggressive refused")
     if spread_pct > (max_spread or 0.05):
@@ -333,8 +333,8 @@ class BurstEyes:
             return None
         held_from = pts[0][0]              # first time the run could have started
         for t, e in series:
-            if abs(e) < min_abs:
-                held_from = t              # last crossing resets the clock
+            if abs(e) < min_abs or (e * ema <= 0.0):
+                held_from = t              # last weak/opposite crossing resets the clock
         held_s = (now - held_from).total_seconds()
         if held_s < hold_s:
             return None
