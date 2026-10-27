@@ -512,7 +512,10 @@ def _refresh() -> None:
     g["RANGE_VWAP_WEIGHT"] = _ffloat("RANGE_VWAP_WEIGHT", 2.0)
 
     g["AI_TIMEOUT_SECONDS"] = _fint("AI_TIMEOUT_SECONDS", 10)
-    g["AI_FALLBACK_ENABLED"] = _fget("AI_FALLBACK_ENABLED", "1") == "1"
+    # 2026-10-27: synthetic 70% rule/L3/spoof fallback retired by default so AI
+    # outages fail closed to HOLD @ 0.0% instead of emitting fake 70% verdicts.
+    g["AI_FALLBACK_ENABLED"] = _fget("AI_FALLBACK_ENABLED", "0") == "1"
+    g["AI_ALLOW_SYNTHETIC_FALLBACK"] = _fget("AI_ALLOW_SYNTHETIC_FALLBACK", "0") == "1"
     g["AI_FALLBACK_STRENGTH"] = _ffloat("AI_FALLBACK_STRENGTH", 35.0)
     g["AI_FALLBACK_CONFIDENCE"] = _ffloat("AI_FALLBACK_CONFIDENCE", 70.0)
     g["AI_CACHE_MINUTES"] = _fint("AI_CACHE_MINUTES", 10)

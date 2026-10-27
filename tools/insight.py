@@ -171,7 +171,7 @@ def decisions_page(day, decisions, diary, series, title_extra=""):
         rows.append(f"""
 <div class="card">
   <div class="head" onclick="this.parentNode.classList.toggle('open')">
-    <span class="t">{dt:%H:%M:%S if dt else '--:--'}</span>
+    <span class="t">{dt.strftime('%H:%M:%S') if dt else '--:--'}</span>
     <span class="pill {cls}">{esc(st)}</span>
     <span class="dir {(d.get('signal_direction') or '').lower()}">{esc(d.get('signal_direction'))}</span>
     <span class="num">price {_fmt(price, 2)}</span>

@@ -1012,21 +1012,20 @@ def run_step2(data):
             "notes": _notes_for_diary(getattr(snapshot, "notes", []) or []),
         }
         _append_diary(record, hist_path)
-        # opsfix:v1-start (2026-10-15) -- byte-capped rotation.
+        # opsfix:v1-start (2026-10-15 / 2026-10-27) -- byte-capped rotation.
         # The old rule kept the last 20k lines assuming ~1KB lines (~20MB, per
-        # its own comment). Diary lines are now ~9KB (voice/A2/memory stamps +
-        # notes), so 20k lines = ~187MB -- STILL over the 50MB trigger, so the
-        # file rotated EVERY minute (a ~187MB read+write inside STEP 2 every
-        # cycle; receipt 2026-10-15: 187,056,257 bytes on disk). New law: after
-        # the line cap, cap BY BYTES -- while the result is over 40MB, halve
-        # the kept lines (floor 2000). One bounded rotation; the per-day
-        # mirrors (diary_YYYYMMDD.jsonl) keep the full history for grading.
+        # its own comment). Rich diary lines are now ~28KB (voice/A2/memory +
+        # structured judge_votes + signal_map + power), so even a 2000-line floor
+        # was ~56.2MB (>50MB trigger) and caused a 56MB rewrite every minute on
+        # 2026-10-27. New floor: 500 lines (~14MB, ~8h), UTF-8 byte-measured so
+        # rotation always lands well below 40MB; per-day mirrors (diary_YYYYMMDD)
+        # keep the complete daily history intact.
         try:
             if hist_path.stat().st_size > 50*1024*1024:
                 lines = hist_path.read_text(encoding="utf-8", errors="ignore").splitlines()[-20000:]
-                while len(lines) > 2000:
-                    _nbytes = sum(len(_l) + 1 for _l in lines)
-                    if _nbytes <= 40*1024*1024:
+                while len(lines) > 500:
+                    _nbytes = sum(len(_l.encode("utf-8", "ignore")) + 1 for _l in lines)
+                    if _nbytes <= 38*1024*1024:
                         break
                     lines = lines[len(lines) // 2:]
                 hist_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -1149,10 +1148,11 @@ def run_step3(snapshot):
     m_tag = str(getattr(decision, "model", "") or "")
     if (m_tag and not m_tag.startswith("none-")
             and not m_tag.endswith("-cached")
-            and m_tag != "fallback-rule"):
+            and not m_tag.startswith("fallback-")
+            and not m_tag.startswith("power-lead")):
         _LAST_AI_CALL = now
         _record_ai_call()
-    elif m_tag in ("none-timeout-budget", "none-call-failed"):
+    elif m_tag in ("none-timeout-budget", "none-call-failed", "none-model-overloaded"):
         # Do not count failed attempts as paid calls and do not lock out a full
         # bar; pause at most ~60s so the loop stays responsive without hammering.
         if min_interval > 60.0:
@@ -1416,7 +1416,22 @@ def _shooting_execution_gate(decision, snapshot):
     if str(power.get("direction", "NEITHER")).upper() != expected_power:
         return False, "AI side does not agree with canonical POWER v2"
     if plan.get("shot") != "GO" or str(plan.get("side", "")).upper() != action:
-        return False, "Shooting did not approve this side"
+        _why_list = plan.get("why") if isinstance(plan.get("why"), list) else []
+        _joined_why = "; ".join(str(x).strip() for x in _why_list if str(x).strip())
+        _sub_why = str(
+            _joined_why
+            if _joined_why
+            else (plan.get("reason")
+                  or ((plan.get("veto_details") or {}).get("reason")
+                      if isinstance(plan.get("veto_details"), dict) else "")
+                  or "")
+        ).strip()
+        if plan.get("shot") == "GO" and str(plan.get("side", "")).upper() != action:
+            _sub_why = f"Shooting planned {plan.get('side')} while AI requested {action}"
+        return False, (
+            f"Shooting did not approve this side ({_sub_why})"
+            if _sub_why else "Shooting did not approve this side"
+        )
     if plan.get("entry_style") not in {"PASSIVE_LIMIT", "AGGRESSIVE_MARKET"}:
         return False, "Shooting entry style is missing or unsupported"
     # gates:v1: THE CORRIDOR (was: two unconditional refusals -- the deepest

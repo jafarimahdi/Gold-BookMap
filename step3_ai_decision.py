@@ -536,9 +536,12 @@ class AIDecisionEngine:
             pass
 
     def _fallback_decision(self, snapshot) -> Optional[Decision]:
-        """v5.8 L3 Enhanced: Rule-based fallback when AI fails — fast 10s, uses L3 whale+iceberg+netflow"""
+        """Rule-based synthetic fallback (disabled by default; fail-closed HOLD is canonical)."""
         try:
-            if not bool(getattr(config, "AI_FALLBACK_ENABLED", True)):
+            if not (
+                bool(getattr(config, "AI_FALLBACK_ENABLED", False))
+                and bool(getattr(config, "AI_ALLOW_SYNTHETIC_FALLBACK", False))
+            ):
                 return None
             fallback_strength = float(getattr(config, "AI_FALLBACK_STRENGTH", 35.0))
             fallback_conf = float(getattr(config, "AI_FALLBACK_CONFIDENCE", 70.0))
@@ -646,6 +649,20 @@ class AIDecisionEngine:
         return ("404" in msg or "not found" in msg.lower()
                 or "no longer available" in msg.lower()
                 or "not available" in msg.lower() or "deprecated" in msg.lower())
+
+    def _is_model_overloaded(self, exc: Exception) -> bool:
+        """True when Google's model endpoint is temporarily busy (503 / UNAVAILABLE).
+
+        Unlike a 404 (permanent retirement) or 429 (key quota), a 503 high-demand
+        spike means THIS model endpoint is momentarily congested while the API key
+        itself is healthy. Fail over immediately to the next model in GEMINI_MODELS
+        without penalizing/parking the key or banning the model for later cycles.
+        """
+        msg = str(exc)
+        low = msg.lower()
+        return ("503" in msg or "UNAVAILABLE" in msg
+                or "high demand" in low or "overloaded" in low
+                or "temporarily unavailable" in low or "server busy" in low)
 
     def _call_with_key(self, key: str, model: str, prompt: str):
         """Make exactly one Gemini call with `key` and `model`.
@@ -834,11 +851,14 @@ class AIDecisionEngine:
         deadline_monotonic = started_monotonic + budget_s
         budget_exhausted = False
         fair_attempt_s = min(15.0, budget_s * 0.8)
-        per_attempt_cap_s = (
-            max(8.0, min(14.0, budget_s * 0.55))
-            if (budget_s >= 10.0 and total_candidates > 1)
-            else budget_s
-        )
+        if len(models) >= 3 and budget_s >= 18.0:
+            # Ensure 3-model cascade (3.8-flash -> 3.6-flash -> 3.5-flash-lite)
+            # leaves ~5s for the ultra-fast lite model instead of starving it at 0s.
+            per_attempt_cap_s = max(8.0, min(10.0, budget_s * 0.40))
+        elif budget_s >= 10.0 and total_candidates > 1:
+            per_attempt_cap_s = max(8.0, min(14.0, budget_s * 0.55))
+        else:
+            per_attempt_cap_s = budget_s
         self._active_deadline_monotonic = deadline_monotonic
 
         try:
@@ -938,6 +958,13 @@ class AIDecisionEngine:
                                            "next key immediately.",
                                            key_index, _key_cooldown_minutes())
                             continue
+                        if self._is_model_overloaded(exc):
+                            logger.warning(
+                                "STEP 3: model %s overloaded (503/UNAVAILABLE on key #%d); "
+                                "failing over immediately to next model without penalizing key.",
+                                model, key_index,
+                            )
+                            break                    # try next model immediately; keep key healthy
                         if self._is_model_unavailable(exc):
                             if len(raw_models) > 1:
                                 self._UNAVAILABLE_MODELS.add(model)
@@ -972,10 +999,18 @@ class AIDecisionEngine:
                 timestamp=datetime.now(timezone.utc),
             )
 
-        # nothing worked — try fallback before HOLD
-        fb = self._fallback_decision(snapshot)
-        if fb:
-            return fb
+        # Fail closed to HOLD @ 0.0% unless synthetic fallback is explicitly opted in.
+        if bool(getattr(config, "AI_ALLOW_SYNTHETIC_FALLBACK", False)):
+            fb = self._fallback_decision(snapshot)
+            if fb:
+                return fb
+
+        if self._is_model_overloaded(Exception(last_error)):
+            logger.warning("STEP 3: all Gemini models temporarily overloaded (503) -> fail-closed HOLD.")
+            return Decision(action="HOLD", confidence=0.0,
+                            rationale=f"Gemini models temporarily overloaded (503): {last_error[:140]}",
+                            model="none-model-overloaded",
+                            timestamp=datetime.now(timezone.utc))
 
         if self._is_quota_error(Exception(last_error)) or not last_error:
             logger.warning("STEP 3: all Gemini keys rate-limited — will retry "

@@ -1192,7 +1192,12 @@ def judge_panel(record):
             elif judge == "supply_demand" and g:
                 d = -1.0 if g[0] == "supply" else 1.0
             elif judge == "value_area":
-                d = 1.0 if "VAL" in m.group(0) else -1.0
+                if "near VAL" in note or "above VAH" in note:
+                    d = 1.0
+                elif "near VAH" in note or "below VAL" in note:
+                    d = -1.0
+                else:
+                    d = 0.0
             elif judge == "macro_yield" or judge == "macro_dxy":
                 d = -1.0 if (g and g[0] == "rising") else 1.0
             elif judge == "macro_risk":
@@ -2267,7 +2272,7 @@ JUDGE_ROSTER = {
     "iceberg":            ("Hidden size", "A resting order that keeps refilling - someone hiding a big position."),
     "iceberg_legacy":     ("Hidden size", "The older iceberg rule, kept for comparison."),
     "iceberg_noise":      ("Hidden size", "OFF (weight 0.0) - was too noisy and is deliberately silenced."),
-    "whale_walls":        ("Hidden size", "A very large resting order acting as a wall. Weight 1.4."),
+    "whale_walls":        ("Hidden size", "RETIRED from panel voting (C1; walls now guide Scout/Shooting stop & target geometry)."),
     "spoof_invert":       ("Hidden size", "A big order that vanishes before being hit - fake pressure, so fade it."),
     "spoof_invert_loose": ("Hidden size", "The same idea with a looser threshold."),
     "sweep":              ("Hidden size", "Someone cleared several price levels in one go - urgency."),
@@ -2280,7 +2285,7 @@ JUDGE_ROSTER = {
     "supply_demand":      ("Structure", "Known supply and demand zones from earlier trading."),
     "mtf":                ("Structure", "Multi-timeframe agreement: H1, M15 and M5 pointing the same way."),
     "macro_yield":        ("Macro", "Bond yields. Rising yields usually press gold down."),
-    "macro_dxy":          ("Macro", "The dollar index. A stronger dollar usually presses gold down."),
+    "macro_dxy":          ("Macro", "RETIRED (2026-10-26) - 5-day DXY drift removed from M3 order-flow scalper."),
     "macro_vix":          ("Macro", "Volatility/fear gauge."),
     "macro_risk":         ("Macro", "Overall risk-on vs risk-off mood."),
     "news_sentiment":     ("Macro", "Tone of the incoming news feed."),
@@ -3340,22 +3345,27 @@ def test_10_judge_coverage(day, diary):
         r.add("NA", "DIARY COVERAGE", "is the diary good enough to grade the panel tomorrow?",
               ["no diary file for this day yet"])
         return r, None
-    struct = notes50 = novotes = 0
+    struct = silent_struct = notes50 = novotes = 0
     lines_max = 0
     for rec in diary:
         panel, src = judge_panel(rec)
         if src == "structured":
             struct += 1
+        elif isinstance(rec.get("judge_votes"), list) and not panel:
+            # v7.1+ snapshot with legitimate 0 judge votes (e.g. CPI news BLACKOUT
+            # or silent pre-market bar where even retro-parsing notes finds 0 votes).
+            silent_struct += 1
         n = rec.get("notes") or []
         lines_max = max(lines_max, len(n))
         if len(n) >= 50:
             notes50 += 1
         if not n:
             novotes += 1
-    why = [f"{len(diary)} records | structured judge_votes: {struct} | notes parsed ok: {len(diary)-struct-novotes}",
+    silent_note = f" (+{silent_struct} blackout/silent w/ 0 votes)" if silent_struct else ""
+    why = [f"{len(diary)} records | structured judge_votes: {struct}{silent_note} | notes parsed ok: {len(diary)-struct-silent_struct-novotes}",
            f"longest notes list in a record: {lines_max} lines (old builds cut at 50 -> judges after the cut were invisible)",
            f"records with an empty notes list: {novotes}"]
-    if struct == len(diary):
+    if struct > 0 and (struct + silent_struct) == len(diary):
         why.append("every snapshot carries its full panel -> judge stats from test 9 are complete")
         r.add("PASS", "DIARY COVERAGE", "is the diary good enough to grade the panel tomorrow?", why)
     elif notes50:
@@ -5040,6 +5050,10 @@ def test_17_new_organs(day, diary, text, decisions):
                         fc_total += 1
                         fc_pass += (v is True)
                 if isinstance(v, (dict, list)):
+                    if kl == "power_v2" and isinstance(o.get("power"), dict):
+                        # power_v2 is a backward-compat alias of power on the same record;
+                        # count pv2 above, but do not double-count nested stamps (2x 564=1128).
+                        continue
                     _walk(v)
         elif isinstance(o, list):
             for v in o:
@@ -5132,8 +5146,14 @@ def test_17_new_organs(day, diary, text, decisions):
                f"{throttled} resting, {skipped_weak} below-bell | BELLS LOST TO THE REST "
                f"(strength>=6 while throttled): {missed_bells}")
     if missed_bells:
+        _raw_rest = str(ENV.get("AI_MIN_INTERVAL_MINUTES", "auto") or "auto").strip().lower()
+        try:
+            _bar_min = max(1, int(round(float(ENV.get("POWER_BAR_SECONDS", 180) or 180) / 60.0)))
+            _rest_min = _bar_min if _raw_rest == "auto" else max(1, int(round(float(_raw_rest))))
+        except Exception:
+            _rest_min = 3
         why.append(f"-> {missed_bells} moment(s) were interesting enough to ring while the "
-                   "doorman rested (ledger O11 evidence: the 5-min rest vs the 3-min eyes)")
+                   f"doorman rested (ledger O11 evidence: the {_rest_min}-min rest vs the 3-min eyes)")
     why.append(ai_json)
 
     if not diary:

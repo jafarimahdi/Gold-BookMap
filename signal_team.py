@@ -583,7 +583,7 @@ class LevelBook:
             "large_orders": int(_f(getattr(level3, "large_order_events", 0))),
         }
         for r in (above + below):
-            r.update(self.road_to(price, r["price"]))
+            r.update(self.road_to(price, r["price"], whale_thr=whale_thr))
 
         return {
             "ladder": list(self.last_ladder),
@@ -652,25 +652,58 @@ class LevelBook:
                              "refreshed": refreshed, "rejected": log}
         return {"history_added": added, "detail": self.last_history}
 
-    def road_to(self, price: float, target: float) -> Dict[str, Any]:
+    def road_to(self, price: float, target: float,
+                whale_thr: Optional[float] = None) -> Dict[str, Any]:
         """How crowded is the corridor between price and that door?
 
         Counts every resting level in between - including the small market-maker
-        groups, because they still have to be pushed through. Also finds the biggest
-        one, which is where price is most likely to pause: a natural first stop and
-        partial take-profit, not only an obstacle.
+        groups, because they still have to be pushed through (`lots_between` and
+        `doors_between` feed Crowd v2 Q2). Meanwhile `road_clear` answers whether
+        any REAL non-spoofed blocking wall (whale outlier >= whale_thr & 2.5x
+        neighbours, or live iceberg) stands strictly between price and target.
         """
+        price, target = _f(price), _f(target)
         lo, hi = (target, price) if target < price else (price, target)
-        road = [(p, s) for p, s in (self.last_ladder or []) if lo < p < hi]
+        thr = _f(whale_thr) if whale_thr is not None else (
+            _f(getattr(self.cfg, "L3_WHALE_THRESHOLD", 10.0), 10.0)
+            if self.cfg is not None else 10.0
+        )
+        if thr <= 0:
+            thr = 10.0
+
+        ladder = self.last_ladder or []
+        iceberg_blocking = any(
+            (not lv.spoofed) and lv.missing == 0 and ("iceberg" in lv.sources)
+            and lo < lv.price < hi
+            for lv in self.levels.values()
+        )
+        road = [(p, s) for p, s in ladder if lo < p < hi and s > 0]
         if not road:
             return {"doors_between": 0, "lots_between": 0.0,
-                    "biggest_in_path": None, "road_clear": True}
+                    "biggest_in_path": None, "road_clear": not iceberg_blocking}
+
+        wall_blocking = iceberg_blocking
+        if not wall_blocking:
+            for p, s in road:
+                if s < thr:
+                    continue
+                lv = self.levels.get(round(p, 2))
+                if lv is not None and lv.spoofed:
+                    continue
+                nb = [r_s for r_p, r_s in ladder
+                      if abs(r_p - p) <= 1.0 and abs(r_p - p) > 1e-9 and r_s > 0]
+                local = statistics.median(nb) if nb else 0.0
+                stands_out = (s >= OUTLIER_X * local) if local > 0 else (s >= thr)
+                if stands_out:
+                    wall_blocking = True
+                    break
+
         big = max(road, key=lambda x: x[1])
         return {
             "doors_between": len(road),
             "lots_between": round(sum(s for _, s in road), 1),
             "biggest_in_path": {"price": big[0], "size": round(big[1], 1)},
-            "road_clear": False,
+            "road_clear": not wall_blocking,
         }
 
     def shelter_behind(self, price: float, going_up: bool) -> Optional[Dict[str, Any]]:

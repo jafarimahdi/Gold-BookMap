@@ -59,7 +59,7 @@ _JUDGE_PATTERNS = [
     ("vwap_zscore",       r"VWAP z-score ([+-]?[\d.]+)"),
     ("poc_day",           r"POC day ([\d.]+) price ([\d.]+) -> (above|below)"),
     ("supply_demand",     r"near (supply|demand) zone ([\d.]+)"),
-    ("value_area",        r"near (VAH|VAL) ([\d.]+)|price ([\d.]+) (?:above VAH|below VAL) ([\d.]+)"),
+    ("value_area",        r"near (VAH|VAL) ([\d.]+)|price ([\d.]+) (above VAH|below VAL) ([\d.]+)"),
     ("htf_poc",           r"HTF H[14] POC ([\d.]+) (?:far )?(above|below) price[^\n]*?-> (?:mean reversion |strong )?(BUY|SELL)"),  # htf_weights: all three note shapes recorded
     ("cvd_divergence",    r"(bullish|bearish) CVD divergence"),
     ("cvd_momentum",      r"CVD (rising|falling) delta ([+-]?[\d.]+) CVD ([+-]?[\d.]+)"),
@@ -92,9 +92,9 @@ def parse_judge_panel(notes: List[str]) -> List[Dict[str, Any]]:
             m = _re.search(pat, note)
             if not m:
                 continue
-            if judge in ("whale_walls", "macro_dxy"):
-                # gates:v1 + 2026-10-26 -- whale_walls (C1 clock) and macro_dxy
-                # (5d DXY drift deleted from M3 scalper) no longer emit panel votes.
+            if judge in ("whale_walls", "whale_balanced", "macro_dxy"):
+                # gates:v1 + 2026-10-26 -- whale_walls/whale_balanced (C1 clock) and
+                # macro_dxy (5d DXY drift deleted from M3 scalper) no longer emit votes.
                 continue
             d, w = 0.0, 0.0
             g = m.groups()
@@ -158,10 +158,14 @@ def parse_judge_panel(notes: List[str]) -> List[Dict[str, Any]]:
             elif judge == "supply_demand":
                 d = -1.0 if (g and g[0] == "supply") else 1.0
             elif judge == "value_area":
-                g0 = next((x for x in g if x), "")
-                d = 1.0 if g0 == "VAL" else (-1.0 if g0 == "VAH" else 0.0)
-                if g0 == "":
-                    d = 1.0 if "above VAH" in note else -1.0
+                if "near VAL" in note or "above VAH" in note:
+                    d = 1.0
+                elif "near VAH" in note or "below VAL" in note:
+                    d = -1.0
+                else:
+                    d = 0.0
+                if not mw:
+                    w = 0.7 if ("near VAH" in note or "near VAL" in note) else 0.5
             elif judge == "cvd_divergence":
                 d = 1.0 if (g and g[0] == "bullish") else -1.0
             elif judge == "cvd_momentum":
@@ -195,11 +199,13 @@ def parse_judge_panel(notes: List[str]) -> List[Dict[str, Any]]:
             elif judge == "microprice":
                 d = 1.0 if (g and g[-1] == "BUY") else -1.0
             weight_val = float(w or 0.5)
-            if judge == "supply_demand" and judge in seen_idx:
+            if judge in ("supply_demand", "value_area") and judge in seen_idx:
                 prev = out[seen_idx[judge]]
                 net = prev["dir"] * prev["weight"] + float(d) * weight_val
                 prev["dir"] = 1.0 if net > 1e-9 else (-1.0 if net < -1e-9 else 0.0)
-                prev["weight"] = max(prev["weight"], weight_val)
+                prev["weight"] = round(abs(net), 4) if abs(net) > 1e-9 else max(prev["weight"], weight_val)
+                tag = "balanced (0)" if prev["dir"] == 0.0 else ("net BUY" if prev["dir"] > 0 else "net SELL")
+                prev["raw"] = f"{prev['raw'][:70]} | {note[:70]} [{tag}]"[:160]
             else:
                 seen_idx[judge] = len(out)
                 out.append({"judge": judge, "dir": float(d), "weight": weight_val,

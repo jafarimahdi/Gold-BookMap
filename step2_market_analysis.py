@@ -1617,7 +1617,26 @@ class Level3OrderBookAnalyzer:
         order_id = str(event.get("order_id") or event.get("id") or event.get("orderId") or "").strip()
         event_ts = self._parse_event_time(event)
 
-        # v5.2: Handle BookMap MBO types
+        INVALID_IDS = {"-1", "0", "", "None", "null"}
+        valid_oid = bool(order_id and order_id not in INVALID_IDS)
+        existing_live = (
+            self._order_map.get(order_id)
+            if valid_oid else None
+        )
+        if existing_live is not None and existing_live.get("canceled_ts") is not None:
+            existing_live = None
+
+        has_explicit_old_size = ("old_size" in event and event.get("old_size") is not None)
+        known_old_size: Optional[float] = (
+            float(event.get("old_size", 0.0) or 0.0) if has_explicit_old_size else None
+        )
+        known_old_price: Optional[float] = (
+            float(event.get("old_price", 0.0) or 0.0)
+            if ("old_price" in event and event.get("old_price") is not None)
+            else None
+        )
+
+        # v5.2 + mbo-lifecycle-2026-10-27: Handle BookMap MBO types with true order_id side/size
         if "BID_NEW" in raw_type:
             event_type = "NEW"
             is_buy = True
@@ -1630,14 +1649,39 @@ class Level3OrderBookAnalyzer:
             event_type = "CANCEL"
             is_buy = True
             book_side = "bids"
+            if existing_live is not None:
+                if price <= 0:
+                    price = float(existing_live.get("price", 0.0) or 0.0)
+                if size <= 0:
+                    size = float(existing_live.get("size", 0.0) or 0.0)
         elif "ASK" in raw_type and "CANCEL" in raw_type:
             event_type = "CANCEL"
             is_buy = False
             book_side = "asks"
+            if existing_live is not None:
+                if price <= 0:
+                    price = float(existing_live.get("price", 0.0) or 0.0)
+                if size <= 0:
+                    size = float(existing_live.get("size", 0.0) or 0.0)
         elif raw_type in ("CANCEL", "CANCELED", "DELETE"):
             event_type = raw_type
-            is_buy = side in ("BUY", "BID", "B")
-            book_side = "bids" if is_buy else "asks"
+            if existing_live is not None and existing_live.get("side") in ("bids", "asks"):
+                book_side = existing_live["side"]
+                is_buy = (book_side == "bids")
+                if price <= 0:
+                    price = float(existing_live.get("price", 0.0) or 0.0)
+                if size <= 0:
+                    size = float(existing_live.get("size", 0.0) or 0.0)
+            elif side in ("BUY", "BID", "B"):
+                is_buy = True
+                book_side = "bids"
+            elif side in ("SELL", "ASK", "S"):
+                is_buy = False
+                book_side = "asks"
+            else:
+                # Orphan cancel with unknown side & size -> do not fabricate ask OFI
+                self.order_events.append(event)
+                return
             if price == 0 and size == 0 and not order_id:
                 self.order_events.append(event)
                 return
@@ -1645,24 +1689,48 @@ class Level3OrderBookAnalyzer:
             event_type = "MODIFY"
             if "BID" in raw_type:
                 is_buy = True
+                book_side = "bids"
             elif "ASK" in raw_type:
                 is_buy = False
+                book_side = "asks"
+            elif existing_live is not None and existing_live.get("side") in ("bids", "asks"):
+                book_side = existing_live["side"]
+                is_buy = (book_side == "bids")
+            elif side in ("BUY", "BID", "B"):
+                is_buy = True
+                book_side = "bids"
+            elif side in ("SELL", "ASK", "S"):
+                is_buy = False
+                book_side = "asks"
             else:
-                is_buy = side in ("BUY", "BID", "B")
-            book_side = "bids" if is_buy else "asks"
+                # Orphan REPLACE with unknown side -> record raw event without fake OFI
+                self.order_events.append(event)
+                return
+            if known_old_size is None and existing_live is not None:
+                known_old_size = float(existing_live.get("size", 0.0) or 0.0)
+            if known_old_price is None and existing_live is not None:
+                known_old_price = float(existing_live.get("price", price) or price)
+            if price <= 0 and known_old_price:
+                price = known_old_price
         else:
             event_type = raw_type
-            is_buy = side in ("BUY", "BID", "B")
-            book_side = "bids" if is_buy else "asks"
+            if side in ("BUY", "BID", "B"):
+                is_buy = True
+                book_side = "bids"
+            elif side in ("SELL", "ASK", "S"):
+                is_buy = False
+                book_side = "asks"
+            else:
+                self.order_events.append(event)
+                return
 
-        if size >= self.large_size and size > 0:
+        if size >= self.large_size and size > 0 and event_type not in ("CANCEL", "CANCELED", "DELETE"):
             self.large_order_events += 1
 
         # ---- M3: order_id tracking for iceberg & spoof ----------------------
         # v5.3 fix: skip invalid order_ids (-1, 0, empty) that come from ticks.csv Mbo fallback
         # These cause 929 fake icebergs when all events share id -1
-        INVALID_IDS = {"-1", "0", "", "None", "null"}
-        if order_id and order_id not in INVALID_IDS:
+        if valid_oid:
             if event_type in ("NEW", "ADD", "OPEN"):
                 # Check if this order_id existed before at same price -> refill (iceberg)
                 existing = self._order_map.get(order_id)
@@ -1729,6 +1797,7 @@ class Level3OrderBookAnalyzer:
                             pass
                     # Keep for iceberg history but mark canceled
                     existing["canceled_ts"] = event_ts
+                    existing["size"] = 0.0
                 # Also check recent adds without full map (fallback)
                 elif order_id in self._recent_adds:
                     add_t = self._recent_adds.get(order_id, event_ts)
@@ -1736,6 +1805,19 @@ class Level3OrderBookAnalyzer:
                         self.spoof_events += 1
                         if price > 0:
                             self._spoof_levels[price] += 1
+            elif event_type in ("MODIFY", "MODIFIED", "REPLACE", "UPDATE"):
+                existing = self._order_map.get(order_id)
+                if existing and existing.get("canceled_ts") is None:
+                    existing["price"] = price
+                    existing["size"] = size
+                    existing["side"] = book_side
+                    existing["last_seen"] = event_ts
+                else:
+                    self._order_map[order_id] = {
+                        "price": price, "size": size, "side": book_side,
+                        "add_ts": event_ts, "first_seen": event_ts,
+                        "last_seen": event_ts, "refills": 0, "total_vol": size,
+                    }
 
         # ---- Original book logic --------------------------------------------
         if event_type in ("NEW", "ADD", "OPEN", "BID_NEW", "ASK_NEW"):
@@ -1774,14 +1856,18 @@ class Level3OrderBookAnalyzer:
             self._remove_from_book(book_side, price, size)
 
         elif event_type in ("MODIFY", "MODIFIED", "REPLACE", "UPDATE"):
-            old_size = float(event.get("old_size", 0.0) or 0.0)
-            if old_size > 0:
-                self._ofi_remove(book_side, old_size)
-            if size > 0:
-                self._ofi_add(book_side, size)
-            self._remove_from_book(book_side, price, old_size)
-            if size > 0:
-                self.order_book[book_side].append((price, size))
+            # Only apply OFI delta when prior resting size is known (from _MboTail,
+            # _order_map, or explicit old_size). Orphan REPLACE events from orders
+            # born before catch-up have unknown prior size and must not fabricate OFI.
+            if known_old_size is not None:
+                if known_old_size > 0:
+                    self._ofi_remove(book_side, known_old_size)
+                if size > 0:
+                    self._ofi_add(book_side, size)
+                rm_price = known_old_price if (known_old_price and known_old_price > 0) else price
+                self._remove_from_book(book_side, rm_price, known_old_size)
+                if size > 0 and price > 0:
+                    self.order_book[book_side].append((price, size))
 
         elif event_type in ("FILL", "TRADE", "EXECUTED", "MATCH"):
             if bool(event.get("is_market_order", False)):
@@ -3105,12 +3191,23 @@ class SignalEngine:
         if volume_profile.value_area_high and volume_profile.value_area_low:
             vah = volume_profile.value_area_high
             val = volume_profile.value_area_low
-            # Price near VAH = resistance, near VAL = support
+            # Price near VAH = resistance, near VAL = support. When early-session
+            # VA is narrower than 2*ATR so both edges sit within 1 ATR, vote only
+            # the closer boundary instead of emitting two opposite votes at once.
             atr_v = volatility.atr or (price*0.002)
-            if 0 < (vah - price) <= atr_v:
+            near_vah = (0 < (vah - price) <= atr_v)
+            near_val = (0 < (price - val) <= atr_v)
+            if near_vah and near_val:
+                if (vah - price) < (price - val) - 1e-6:
+                    near_val = False
+                elif (price - val) < (vah - price) - 1e-6:
+                    near_vah = False
+                else:
+                    near_vah = near_val = False
+            if near_vah:
                 votes.append((-1.0, 0.7 * vwap_mult))
                 notes.append(f"near VAH {vah:.1f} (VHL) resistance -> SELL")
-            if 0 < (price - val) <= atr_v:
+            if near_val:
                 votes.append((+1.0, 0.7 * vwap_mult))
                 notes.append(f"near VAL {val:.1f} (VLL) support -> BUY")
             # Price outside value area = breakout
@@ -3223,8 +3320,9 @@ class SignalEngine:
                             break
             except:
                 recency_boost = 1.0
-            votes.append((+1.0, 0.8 * recency_boost))
-            notes.append("near demand zone %.1f (bounce) recency %.2fx -> BUY" % (nearest_support, recency_boost))
+            w_sd = 0.8 * recency_boost
+            votes.append((+1.0, w_sd))
+            notes.append("near demand zone %.1f (bounce) recency %.2fx w %.2f -> BUY" % (nearest_support, recency_boost, w_sd))
         if nearest_resistance and 0 < (nearest_resistance - price) <= atr_zone*1.5:
             recency_boost = 1.0
             try:
@@ -3238,8 +3336,9 @@ class SignalEngine:
                             break
             except:
                 recency_boost = 1.0
-            votes.append((-1.0, 0.8 * recency_boost))
-            notes.append("near supply zone %.1f (rejection) recency %.2fx -> SELL" % (nearest_resistance, recency_boost))
+            w_sd = 0.8 * recency_boost
+            votes.append((-1.0, w_sd))
+            notes.append("near supply zone %.1f (rejection) recency %.2fx w %.2f -> SELL" % (nearest_resistance, recency_boost, w_sd))
         # HTF POC H1/H4 votes - big timeframe volume magnets (user requested more logic/data)
         # htf_weights: the three weights are .env-tunable (HTF_POC_H1_WEIGHT /
         # HTF_POC_H1_FAR_WEIGHT / HTF_POC_H4_WEIGHT); defaults = the old hardcoded
@@ -3679,7 +3778,7 @@ _JUDGE_PATTERNS = [
     ("vwap_zscore",       r"VWAP z-score ([+-]?[\d.]+)"),
     ("poc_day",           r"POC day ([\d.]+) price ([\d.]+) -> (above|below)"),
     ("supply_demand",     r"near (supply|demand) zone ([\d.]+)"),
-    ("value_area",        r"near (VAH|VAL) ([\d.]+)|price ([\d.]+) (?:above VAH|below VAL) ([\d.]+)"),
+    ("value_area",        r"near (VAH|VAL) ([\d.]+)|price ([\d.]+) (above VAH|below VAL) ([\d.]+)"),
     ("htf_poc",           r"HTF H[14] POC ([\d.]+) (?:far )?(above|below) price[^\n]*?-> (?:mean reversion |strong )?(BUY|SELL)"),  # htf_weights: all three note shapes recorded
     ("cvd_divergence",    r"(bullish|bearish) CVD divergence"),
     ("cvd_momentum",      r"CVD (rising|falling) delta ([+-]?[\d.]+) CVD ([+-]?[\d.]+)"),
@@ -3712,9 +3811,9 @@ def parse_judge_panel(notes: List[str]) -> List[Dict[str, Any]]:
             m = _re.search(pat, note)
             if not m:
                 continue
-            if judge in ("whale_walls", "macro_dxy"):
-                # Retired judges: whale_walls (C1 clock) and macro_dxy (deleted
-                # 5d DXY drift for M3 scalper) no longer emit panel votes.
+            if judge in ("whale_walls", "whale_balanced", "macro_dxy"):
+                # Retired judges: whale_walls/whale_balanced (C1 clock) and macro_dxy
+                # (deleted 5d DXY drift for M3 scalper) no longer emit panel votes.
                 continue
             d, w = 0.0, 0.0
             g = m.groups()
@@ -3778,10 +3877,14 @@ def parse_judge_panel(notes: List[str]) -> List[Dict[str, Any]]:
             elif judge == "supply_demand":
                 d = -1.0 if (g and g[0] == "supply") else 1.0
             elif judge == "value_area":
-                g0 = next((x for x in g if x), "")
-                d = 1.0 if g0 == "VAL" else (-1.0 if g0 == "VAH" else 0.0)
-                if g0 == "":
-                    d = 1.0 if "above VAH" in note else -1.0
+                if "near VAL" in note or "above VAH" in note:
+                    d = 1.0
+                elif "near VAH" in note or "below VAL" in note:
+                    d = -1.0
+                else:
+                    d = 0.0
+                if not mw:
+                    w = 0.7 if ("near VAH" in note or "near VAL" in note) else 0.5
             elif judge == "cvd_divergence":
                 d = 1.0 if (g and g[0] == "bullish") else -1.0
             elif judge == "cvd_momentum":
@@ -3815,11 +3918,13 @@ def parse_judge_panel(notes: List[str]) -> List[Dict[str, Any]]:
             elif judge == "microprice":
                 d = 1.0 if (g and g[-1] == "BUY") else -1.0
             weight_val = float(w or 0.5)
-            if judge == "supply_demand" and judge in seen_idx:
+            if judge in ("supply_demand", "value_area") and judge in seen_idx:
                 prev = out[seen_idx[judge]]
                 net = prev["dir"] * prev["weight"] + float(d) * weight_val
                 prev["dir"] = 1.0 if net > 1e-9 else (-1.0 if net < -1e-9 else 0.0)
-                prev["weight"] = max(prev["weight"], weight_val)
+                prev["weight"] = round(abs(net), 4) if abs(net) > 1e-9 else max(prev["weight"], weight_val)
+                tag = "balanced (0)" if prev["dir"] == 0.0 else ("net BUY" if prev["dir"] > 0 else "net SELL")
+                prev["raw"] = f"{prev['raw'][:70]} | {note[:70]} [{tag}]"[:160]
             else:
                 seen_idx[judge] = len(out)
                 out.append({"judge": judge, "dir": float(d), "weight": weight_val,

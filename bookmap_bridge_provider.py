@@ -149,7 +149,8 @@ def _file_identity(path: str):
 
 class _InstrumentState:
     __slots__ = ("bids", "asks", "ticks", "best_bid", "best_ask", "last_dt",
-                 "mbo_events", "depth_touch", "level_ts_b", "level_ts_a")
+                 "mbo_events", "depth_touch", "level_ts_b", "level_ts_a",
+                 "active_orders")
 
     def __init__(self):
         self.bids: Dict[float, float] = {}
@@ -166,6 +167,9 @@ class _InstrumentState:
         # ghost levels expire (root cure of the frozen-quote disease).
         self.level_ts_b: Dict[float, Any] = {}
         self.level_ts_a: Dict[float, Any] = {}
+        # mbo-lifecycle-2026-10-27: order_id -> (side, price, size) so REPLACE
+        # and size-0 CANCEL events preserve true resting side, price, and old_size.
+        self.active_orders: Dict[str, Any] = {}
 
     def reset(self) -> None:
         self.bids, self.asks = {}, {}
@@ -175,6 +179,7 @@ class _InstrumentState:
         self.mbo_events = []
         self.depth_touch = []
         self.level_ts_b, self.level_ts_a = {}, {}
+        self.active_orders = {}
 
 
 class _BridgeTail:
@@ -674,25 +679,103 @@ class _MboTail:
         st = self._state_for(instrument.strip() or "?")
         self.line_count += 1
 
-        # Determine side
-        ev_up = ev_type.upper()
-        if "BID" in ev_up:
-            side = "BID"
-        elif "ASK" in ev_up:
-            side = "ASK"
-        else:
-            # Infer from price vs best
-            side = "BID" if price and st.best_bid and price <= st.best_bid + 0.5 else "ASK"
+        oid = order_id.strip()
+        valid_oid = bool(oid and oid not in ("-1", "0", "None", "null"))
+        active = getattr(st, "active_orders", None)
+        if active is None:
+            active = {}
+            st.active_orders = active
 
-        # For CANCEL with 0 price, keep order_id but price 0 is ok for tracking
-        st.mbo_events.append({
+        ev_up = ev_type.upper()
+        is_new = ("NEW" in ev_up or ev_up in ("ADD", "OPEN"))
+        is_cancel = any(k in ev_up for k in ("CANCEL", "DELETE", "REMOVE"))
+        is_replace = any(k in ev_up for k in ("REPLACE", "MODIFY", "UPDATE"))
+
+        old_size: Optional[float] = None
+        old_price: Optional[float] = None
+        eff_price = price
+        eff_size = size
+
+        if is_new:
+            if "BID" in ev_up:
+                side = "BID"
+                if price > 0 and (st.best_ask <= 0 or price < st.best_ask):
+                    st.best_bid = price
+            elif "ASK" in ev_up:
+                side = "ASK"
+                if price > 0 and (st.best_bid <= 0 or price > st.best_bid):
+                    st.best_ask = price
+            elif price > 0 and st.best_bid > 0 and st.best_ask > 0:
+                side = "BID" if price <= 0.5 * (st.best_bid + st.best_ask) else "ASK"
+            else:
+                side = ""
+            if valid_oid and side in ("BID", "ASK") and price > 0:
+                active[oid] = (side, price, size)
+                if len(active) > 50_000:
+                    # Drop oldest 10k tracked IDs so 24h sessions stay memory-bounded
+                    for stale_oid in list(active.keys())[:10_000]:
+                        active.pop(stale_oid, None)
+        elif is_replace:
+            prev = active.get(oid) if valid_oid else None
+            if "BID" in ev_up:
+                side = "BID"
+            elif "ASK" in ev_up:
+                side = "ASK"
+            elif prev is not None:
+                side = prev[0]
+            elif price > 0 and st.best_bid > 0 and st.best_ask > 0:
+                side = "BID" if price <= 0.5 * (st.best_bid + st.best_ask) else "ASK"
+            else:
+                side = ""
+            if prev is not None:
+                old_price = float(prev[1])
+                old_size = float(prev[2])
+                if eff_price <= 0:
+                    eff_price = old_price
+                if valid_oid and side in ("BID", "ASK"):
+                    active[oid] = (side, eff_price, eff_size)
+            elif valid_oid and side in ("BID", "ASK") and eff_price > 0:
+                # Orphan REPLACE (born before catch-up): start tracking for subsequent
+                # modifications/cancels without fabricating a synthetic old_size=0.
+                active[oid] = (side, eff_price, eff_size)
+        elif is_cancel:
+            prev = active.pop(oid, None) if valid_oid else None
+            if "BID" in ev_up:
+                side = "BID"
+            elif "ASK" in ev_up:
+                side = "ASK"
+            elif prev is not None:
+                side = prev[0]
+            else:
+                side = ""
+            if prev is not None:
+                if eff_price <= 0:
+                    eff_price = float(prev[1])
+                if eff_size <= 0:
+                    eff_size = float(prev[2])
+        else:
+            if "BID" in ev_up:
+                side = "BID"
+            elif "ASK" in ev_up:
+                side = "ASK"
+            elif price > 0 and st.best_bid > 0 and st.best_ask > 0:
+                side = "BID" if price <= 0.5 * (st.best_bid + st.best_ask) else "ASK"
+            else:
+                side = ""
+
+        ev_rec: Dict[str, Any] = {
             "type": ev_type,
             "side": side,
-            "price": price,
-            "size": size,
+            "price": eff_price,
+            "size": eff_size,
             "timestamp": dt.isoformat(),
-            "order_id": order_id.strip(),
-        })
+            "order_id": oid,
+        }
+        if old_size is not None:
+            ev_rec["old_size"] = old_size
+        if old_price is not None:
+            ev_rec["old_price"] = old_price
+        st.mbo_events.append(ev_rec)
         st.last_dt = dt
 
     def _maybe_rotate(self, f) -> Any:
@@ -1162,16 +1245,22 @@ class BookmapBridgeProvider(BaseProvider):
             except Exception:
                 logger.exception("BookMap MBO snapshot failed for %s", name)
 
-        combined_raw = mbo_from_ticks + mbo_from_file
+        # Prefer canonical mbo.csv lifecycle stream when active; fall back to
+        # ticks.csv MBO events only when mbo.csv has none. Key dedup by
+        # timestamp+order_id+type+price+size so sequential REPLACE updates on
+        # the same order_id are preserved in exact chronological order.
+        combined_raw = mbo_from_file if mbo_from_file else mbo_from_ticks
         filtered = [e for e in combined_raw
                     if str(e.get("order_id", "")).strip()
                     not in ("-1", "0", "", "None", "null")]
         dedup: Dict[tuple, Dict] = {}
         for event in filtered:
             try:
-                key = (str(event.get("order_id", "")),
+                key = (str(event.get("timestamp", "")),
+                       str(event.get("order_id", "")),
                        str(event.get("type", "")).upper(),
-                       round(float(event.get("price", 0)), 2))
+                       round(float(event.get("price", 0)), 2),
+                       round(float(event.get("size", 0)), 4))
                 dedup[key] = event
             except (TypeError, ValueError, OverflowError):
                 continue
