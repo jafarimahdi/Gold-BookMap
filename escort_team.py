@@ -66,7 +66,7 @@ class PaperTrade:
     __slots__ = ("side", "entry", "target", "stop", "opened", "opened_price",
                  "orig_target", "orig_stop", "door_price", "actions", "peak", "trough",
                  "closed", "close_reason", "close_price", "cycles",
-                 "entry_style", "paper_fill_model")
+                 "entry_style", "paper_fill_model", "is_a2_burst")
 
     def __init__(self, plan: Dict[str, Any], price: float):
         self.side = plan.get("side")
@@ -80,6 +80,10 @@ class PaperTrade:
         self.opened_price = self.entry
         self.entry_style = str(plan.get("entry_style") or "UNKNOWN")
         self.paper_fill_model = str(plan.get("paper_fill_model") or "UNKNOWN")
+        self.is_a2_burst = bool(
+            plan.get("a2_burst") is True
+            or str(plan.get("stop_source") or "").upper() == "A2_BURST_FIXED"
+        )
         self.actions: List[Dict[str, Any]] = []
         self.peak = price          # best price seen in our favour
         self.trough = price        # worst price seen against us
@@ -328,7 +332,12 @@ def escort_cycle(shot_plan: Dict[str, Any], signal_map: Dict[str, Any],
         if hit_tp or hit_sl:
             _close(esc, t, mark, "TARGET" if hit_tp else "STOP")
             continue
-        if (time.time() - t.opened) / 60.0 > TIME_STOP_MIN:
+        trade_time_stop_min = (
+            max(1.0, _f(getattr(config, "A2_BURST_TIME_STOP_MINUTES", 12.0), 12.0))
+            if getattr(t, "is_a2_burst", False)
+            else TIME_STOP_MIN
+        )
+        if (time.time() - t.opened) / 60.0 > trade_time_stop_min:
             _close(esc, t, mark, "TIME")
             continue
 

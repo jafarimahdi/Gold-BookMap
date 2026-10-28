@@ -67,6 +67,44 @@ import config
 
 logger = logging.getLogger(__name__)
 
+
+def compute_ofi_conflict_threshold(snapshot: Any, cfg: Any = None) -> float:
+    """Cont-Kukanov-Stoikov depth-normalized OFI conflict threshold (lots).
+
+    Price impact scales as dP ~ OFI / Depth. When top-5 two-sided book depth
+    is known, scale the base 100-lot conflict threshold linearly by
+    ``live_top_depth / AI_L3_OFI_REF_DEPTH_LOTS`` clamped to [40.0, 250.0].
+    Falls back to 100.0 when depth is absent or normalization is disabled.
+    """
+    cfg_obj = cfg if cfg is not None else config
+    if not bool(getattr(cfg_obj, "AI_L3_OFI_DEPTH_NORM_ENABLED", True)):
+        return 100.0
+    top_depth = 0.0
+    try:
+        of = getattr(snapshot, "order_flow", None)
+        if of is not None:
+            b5 = float(getattr(of, "level2_bid_depth", 0.0) or 0.0)
+            a5 = float(getattr(of, "level2_ask_depth", 0.0) or 0.0)
+            if b5 > 0.0 and a5 > 0.0:
+                top_depth = b5 + a5
+        if top_depth <= 0.0:
+            l3 = getattr(snapshot, "level3", None)
+            ob = getattr(l3, "order_book", None) if l3 is not None else None
+            if isinstance(ob, dict):
+                bids = ob.get("bids") or []
+                asks = ob.get("asks") or []
+                b_sum = sum(float(s) for _, s in bids[:5] if float(s) > 0)
+                a_sum = sum(float(s) for _, s in asks[:5] if float(s) > 0)
+                if b_sum > 0.0 and a_sum > 0.0:
+                    top_depth = b_sum + a_sum
+    except Exception:
+        top_depth = 0.0
+    if top_depth <= 0.0:
+        return 100.0
+    ref_depth = max(10.0, float(getattr(cfg_obj, "AI_L3_OFI_REF_DEPTH_LOTS", 100.0) or 100.0))
+    scaled = 100.0 * (top_depth / ref_depth)
+    return max(40.0, min(250.0, scaled))
+
 # --------------------------------------------------------------------------- #
 # Key state: which keys are exhausted TODAY (persisted so a restart keeps it)
 # --------------------------------------------------------------------------- #
@@ -907,15 +945,16 @@ class AIDecisionEngine:
                                         confidence = min(95.0, confidence + boost)
                                         rationale += f" [L3 CONFIRMS whale+flow+OFI +{boost:.0f}%]"
                                     else:
-                                        # Check conflict: whale opposite or flow opposite
+                                        # Check conflict: whale opposite or depth-normalized flow/OFI opposite
+                                        ofi_thr = compute_ofi_conflict_threshold(snapshot, config)
                                         conflict = False
-                                        if dir_sign>0 and (net_flow<-50 or ofi_l3<-100):
+                                        if dir_sign>0 and (net_flow<-50 or ofi_l3<-ofi_thr):
                                             conflict = True
-                                        if dir_sign<0 and (net_flow>50 or ofi_l3>100):
+                                        if dir_sign<0 and (net_flow>50 or ofi_l3>ofi_thr):
                                             conflict = True
                                         if conflict:
                                             confidence = max(0.0, confidence - penalty)
-                                            rationale += f" [L3 CONFLICTS flow/OFI -{penalty:.0f}% -> reduce]"
+                                            rationale += f" [L3 CONFLICTS flow/OFI(thr={ofi_thr:.0f}) -{penalty:.0f}% -> reduce]"
                                             if confidence < 55:
                                                 action = "HOLD"
                                                 rationale += " -> HOLD due L3 conflict"

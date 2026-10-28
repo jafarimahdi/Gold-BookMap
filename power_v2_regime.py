@@ -231,9 +231,24 @@ def classify_m5_regime(
                                     raw.get("low"), raw.get("close"))]
     scale_check = check_price_scale_compatibility(history_price_pool, live_prices)
     use_history = scale_check["status"] == "OK"
-    # The probe's compact OHLC format is fixed M5/300s. Without explicit source
-    # metadata, never reinterpret those candles as a different active interval.
-    history_timeframe_compatible = not bool(history_bars) or BAR_SECONDS == 300
+    # The probe's compact OHLC format is fixed M5/300s unless each row carries
+    # explicit verified ``bar_seconds`` metadata matching ``BAR_SECONDS`` (e.g.
+    # from the local verified active-timeframe bar cache). Never reinterpret
+    # untagged M5 candles as a different active interval.
+    def _bar_interval_matches(raw: Any) -> bool:
+        if not isinstance(raw, Mapping):
+            return False
+        if "bar_seconds" in raw and raw.get("bar_seconds") is not None:
+            try:
+                return int(raw.get("bar_seconds")) == BAR_SECONDS
+            except (TypeError, ValueError, OverflowError):
+                return False
+        return BAR_SECONDS == 300
+
+    history_timeframe_compatible = (
+        not bool(history_bars)
+        or all(_bar_interval_matches(raw) for raw in history_bars)
+    )
     history_bars_refused = bool(history_bars) and (
         not history_timeframe_compatible or (bool(history_price_pool) and not use_history))
     # The bounded probe supplies verified historical OHLC bars directly. Merge
@@ -325,6 +340,10 @@ def classify_m5_regime(
         "history_timeframe_compatible": history_timeframe_compatible,
         "history_timeframe_mismatch": bool(history_bars) and not history_timeframe_compatible,
         "history_bars_refused": history_bars_refused,
+        "completed_bars": (
+            [dict(b, bar_seconds=BAR_SECONDS) for b in bars[-60:]]
+            if scale_check["status"] != "MISMATCH" else []
+        ),
     }
     if scale_check["status"] == "MISMATCH":
         # Data-integrity incident: probe history and live ticks disagree about

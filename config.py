@@ -175,7 +175,9 @@ def _refresh() -> None:
     g["A2_BURST_SL_PTS"] = _ffloat("A2_BURST_SL_PTS", 1.8)
     g["A2_BURST_TP_PTS"] = _ffloat("A2_BURST_TP_PTS", 1.8)
     g["A2_MIN_RR"] = _ffloat("A2_MIN_RR", 1.0)
+    g["A2_BURST_TIME_STOP_MINUTES"] = max(1.0, _ffloat("A2_BURST_TIME_STOP_MINUTES", 12.0))
     g["POWER_V2_MEMORY_ENABLED"] = _fget("POWER_V2_MEMORY_ENABLED", "0") == "1"
+    g["POWER_REGIME_BAR_CACHE_ENABLED"] = _fget("POWER_REGIME_BAR_CACHE_ENABLED", "1") == "1"
     g["DATA_SOURCE"] = _fget("DATA_SOURCE", "demo").lower()
     # Normalize legacy name: ninjabridge -> bookmapbridge (still supported)
     if g["DATA_SOURCE"] == "ninjabridge":
@@ -223,6 +225,11 @@ def _refresh() -> None:
     g["AI_KEY_COOLDOWN_MINUTES"] = _fint("AI_KEY_COOLDOWN_MINUTES", 20)
     g["GEMINI_REQUEST_TIMEOUT_MS"] = _fint("GEMINI_REQUEST_TIMEOUT_MS", 20000)
     g["AI_DECIDE_MAX_TOTAL_SECONDS"] = _ffloat("AI_DECIDE_MAX_TOTAL_SECONDS", 25.0)
+    g["AI_STANDING_PERMISSION_ENABLED"] = _fget("AI_STANDING_PERMISSION_ENABLED", "1") == "1"
+    g["AI_ASYNC_REFRESH_ENABLED"] = _fget("AI_ASYNC_REFRESH_ENABLED", "1") == "1"
+    g["AI_L3_OFI_DEPTH_NORM_ENABLED"] = _fget("AI_L3_OFI_DEPTH_NORM_ENABLED", "1") == "1"
+    g["AI_L3_OFI_REF_DEPTH_LOTS"] = max(10.0, _ffloat("AI_L3_OFI_REF_DEPTH_LOTS", 100.0))
+    g["EXECUTION_FRESH_REACQUIRE_SECONDS"] = max(0.0, _ffloat("EXECUTION_FRESH_REACQUIRE_SECONDS", 2.0))
     g["EXECUTION_VERIFY_SECONDS"] = _fint("EXECUTION_VERIFY_SECONDS", 5)
     g["RISK_PER_TRADE_PCT"] = _ffloat("RISK_PER_TRADE_PCT", 1.0)
     g["STOP_LOSS_ATR_MULT"] = _ffloat("STOP_LOSS_ATR_MULT", 2.0)
@@ -250,6 +257,7 @@ def _refresh() -> None:
     g["PM_DIVERGENCE_EXIT"] = _fget("PM_DIVERGENCE_EXIT", "1") == "1"
     g["PM_DIVERGENCE_MIN_R"] = _ffloat("PM_DIVERGENCE_MIN_R", 0.3)
     g["PM_TIME_STOP_MINUTES"] = _fint("PM_TIME_STOP_MINUTES", 180)
+    g["PM_M3_TIME_STOP_MINUTES"] = _fint("PM_M3_TIME_STOP_MINUTES", 45)
     g["PM_TIME_STOP_MIN_PROGRESS"] = _ffloat("PM_TIME_STOP_MIN_PROGRESS", 0.2)
     g["PM_MIN_SL_ATR"] = _ffloat("PM_MIN_SL_ATR", 1.2)
     g["PM_MAX_SL_ATR"] = _ffloat("PM_MAX_SL_ATR", 3.0)
@@ -388,6 +396,7 @@ def _refresh() -> None:
     g["MACRO_TIMEOUT"] = _fint("MACRO_TIMEOUT", 8)
 
     g["MONITOR_POLL_SECONDS"] = _fint("MONITOR_POLL_SECONDS", 60)
+    g["FAST_BURST_WATCH_SECONDS"] = max(0, _fint("FAST_BURST_WATCH_SECONDS", 10))
 
     g["SESSION_ENFORCE"] = _fget("SESSION_ENFORCE", "1") == "1"
     g["TRADING_DAYS"] = _fget("TRADING_DAYS", "0,1,2,3,4")

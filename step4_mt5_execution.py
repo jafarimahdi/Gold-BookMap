@@ -547,37 +547,48 @@ class MT5Executor:
         # Futures 4310 vs Spot 4265 = $45 basis normal, but if >50 or widening fast -> risk
         try:
             futures_price = float(getattr(snapshot, "price", 0.0) or 0.0)
-            basis = futures_price - price if futures_price > 0 and price > 0 else 0.0
+            _tb0 = float(getattr(tick, "bid", 0.0) or 0.0)
+            _ta0 = float(getattr(tick, "ask", 0.0) or 0.0)
+            cfd_mid = (0.5 * (_tb0 + _ta0)) if (_tb0 > 0 and _ta0 >= _tb0) else price
+            basis = futures_price - cfd_mid if futures_price > 0 and cfd_mid > 0 else 0.0
             basis_max = float(getattr(config, "BASIS_MAX", 50.0))
             basis_buffer_mult = float(getattr(config, "BASIS_BUFFER_MULT", 1.5))
-            # v6.0 fast widen check: if basis jumps >1% in 5 min -> pause
+            # v6.0 fast widen check: if basis jumps >1% of price within 5 min -> defer once
             try:
-                if getattr(config, "V6_4TEAMS_ENABLED", False):
+                if getattr(config, "V6_4TEAMS_ENABLED", False) and cfd_mid > 0:
                     fast_pct = float(getattr(config, "V6_BASIS_FAST_WIDEN_PCT", 1.0))
-                    # Store last basis in memory
-                    last_basis = float(getattr(self, "_last_basis_stored", basis) or basis)
-                    basis_change_pct = abs(basis - last_basis) / max(abs(last_basis), 1.0) * 100.0
-                    if basis_change_pct > fast_pct:
-                        logger.warning("STEP 4 v6.0: Basis fast widen %.2f%% (%.2f -> %.2f) > %.2f%% — DEFERRED", basis_change_pct, last_basis, basis, fast_pct)
-                        reason = f"Basis fast widen {basis_change_pct:.2f}% > {fast_pct}% — DEFERRED"
-                        return ExecutionResult(status="DEFERRED", reason=reason, symbol=self.symbol, price=price, timestamp=now)
+                    now_ep = time.time()
+                    prev_basis = getattr(self, "_last_basis_stored", None)
+                    prev_ts = float(getattr(self, "_last_basis_ts", 0.0) or 0.0)
                     self._last_basis_stored = basis
+                    self._last_basis_ts = now_ep
+                    if prev_basis is not None and (now_ep - prev_ts) <= 300.0:
+                        basis_change_pct = abs(basis - float(prev_basis)) / cfd_mid * 100.0
+                        if basis_change_pct > fast_pct:
+                            logger.warning(
+                                "STEP 4 v6.0: Basis fast widen %.2f%% (%.2f -> %.2f) > %.2f%% — DEFERRED",
+                                basis_change_pct, float(prev_basis), basis, fast_pct)
+                            reason = f"Basis fast widen {basis_change_pct:.2f}% > {fast_pct}% — DEFERRED"
+                            return ExecutionResult(status="DEFERRED", reason=reason, symbol=self.symbol, price=price, timestamp=now)
             except Exception as be:
                 logger.warning("STEP 4 v6.0 basis fast check error: %s", be)
 
-            # v6.0 CFD spread max check
+            # v6.0 CFD spread max check (use real MT5 broker tick first; snapshot fallback)
             try:
                 if getattr(config, "V6_4TEAMS_ENABLED", False):
                     spread_max = float(getattr(config, "V6_CFD_SPREAD_MAX", 0.60))
-                    # Estimate spread from tick if available
                     spread = 0.0
                     try:
-                        # Try to get spread from market_data or tick
-                        bid = float(getattr(snapshot, "bid", 0) or 0)
-                        ask = float(getattr(snapshot, "ask", 0) or 0)
-                        if bid>0 and ask>0:
-                            spread = ask - bid
-                    except:
+                        t_bid = float(getattr(tick, "bid", 0.0) or 0.0)
+                        t_ask = float(getattr(tick, "ask", 0.0) or 0.0)
+                        if t_bid > 0 and t_ask >= t_bid:
+                            spread = t_ask - t_bid
+                        else:
+                            bid = float(getattr(snapshot, "bid", 0) or 0)
+                            ask = float(getattr(snapshot, "ask", 0) or 0)
+                            if bid > 0 and ask > 0:
+                                spread = ask - bid
+                    except Exception:
                         spread = 0.0
                     if spread > spread_max and spread_max>0:
                         reason = f"CFD spread wide {spread:.2f} > max {spread_max} — DEFERRED"
@@ -717,13 +728,48 @@ class MT5Executor:
         # Falls back to the old ATR multiples when no structure exists.
         # v8 wall brackets first (user decision 2026-10-07): TP just BEFORE the
         # opposing wall, SL just BEHIND the wall behind us. Structure/ATR fallback.
-        sl, tp, struct_notes = None, None, []
+        # Exception (Shooting A2_BURST_FIXED): A2 bursts use measured fixed 1.8/1.8
+        # burst geometry anchored on the CFD quote ("Never wall-based for bursts").
+        cfd_tick_spread = 0.0
         try:
-            from wall_brackets import compute_wall_brackets
-            sl, tp, wb_notes = compute_wall_brackets(action, price, atr, snapshot)
-            struct_notes = list(wb_notes or [])
+            _tb = float(getattr(tick, "bid", 0.0) or 0.0)
+            _ta = float(getattr(tick, "ask", 0.0) or 0.0)
+            if _tb > 0 and _ta >= _tb:
+                cfd_tick_spread = _ta - _tb
         except Exception:
-            logger.exception("wall brackets failed - structural fallback")
+            cfd_tick_spread = 0.0
+
+        shot_plan = getattr(snapshot, "shot", None)
+        is_a2_burst_order = (
+            isinstance(shot_plan, dict)
+            and str(shot_plan.get("shot", "")).upper() == "GO"
+            and str(shot_plan.get("side", "")).upper() == str(action).upper()
+            and str(shot_plan.get("stop_source", "")).upper() == "A2_BURST_FIXED"
+        )
+        sl, tp, struct_notes = None, None, []
+        if is_a2_burst_order:
+            try:
+                pt_scale = (price / src_price) if src_price > 0 else 1.0
+                a2_sl_pts = max(0.1, float(getattr(config, "A2_BURST_SL_PTS", 1.8) or 1.8)) * pt_scale
+                a2_tp_pts = max(0.1, float(getattr(config, "A2_BURST_TP_PTS", 1.8) or 1.8)) * pt_scale
+                sl = (price - a2_sl_pts) if is_buy else (price + a2_sl_pts)
+                tp = (price + a2_tp_pts) if is_buy else (price - a2_tp_pts)
+                struct_notes = [
+                    f"A2 burst fixed bracket: TP {tp:.2f} ({a2_tp_pts:.2f} pts), "
+                    f"SL {sl:.2f} ({a2_sl_pts:.2f} pts)"
+                ]
+            except Exception:
+                logger.exception("A2 burst bracket failed - falling back to wall brackets")
+                sl, tp = None, None
+                is_a2_burst_order = False
+        if sl is None or tp is None:
+            try:
+                from wall_brackets import compute_wall_brackets
+                sl, tp, wb_notes = compute_wall_brackets(
+                    action, price, atr, snapshot, cfd_spread=cfd_tick_spread)
+                struct_notes = list(wb_notes or [])
+            except Exception:
+                logger.exception("wall brackets failed - structural fallback")
         if sl is None or tp is None:
             try:
                 from position_manager import compute_structural_stops
@@ -743,7 +789,14 @@ class MT5Executor:
         # taking. Not worth it -> skip the trade and say why.
         try:
             from wall_brackets import value_gate
-            vg_ok, vg_reason = value_gate(action, price, sl, tp, atr, config)
+            if is_a2_burst_order:
+                vg_ok, vg_reason = value_gate(
+                    action, price, sl, tp, atr, config,
+                    min_rr_override=float(getattr(config, "A2_MIN_RR", 1.0) or 1.0),
+                    min_reward_atr_override=0.0,
+                )
+            else:
+                vg_ok, vg_reason = value_gate(action, price, sl, tp, atr, config)
         except Exception:
             vg_ok, vg_reason = True, ""
         if not vg_ok:
@@ -991,7 +1044,7 @@ class MT5Executor:
                 "tp": tp,
                 "deviation": 20,
                 "magic": self.magic,
-                "comment": "gold-trading-bot",
+                "comment": "gold-bot A2 burst" if is_a2_burst_order else "gold-trading-bot",
                 "type_time": mt5.ORDER_TIME_GTC,
                 "type_filling": self._select_filling_mode(info),
             }

@@ -1066,16 +1066,29 @@ class PositionManager:
 
         # ---- adopt / restore state ----------------------------------------
         now = time.time()
+        pos_comment = str(getattr(position, "comment", "") or "")
+        comment_is_a2 = "A2" in pos_comment.upper()
         st = self._state.get(ticket)
         adopted = False
         if st is None:
             adopted = True
+            shot_obj = getattr(snapshot, "shot", None)
+            snap_is_a2 = (
+                isinstance(shot_obj, dict)
+                and str(shot_obj.get("side", "")).upper() == side
+                and str(shot_obj.get("stop_source", "")).upper() == "A2_BURST_FIXED"
+            )
             st = {"initial_sl": cur_sl if cur_sl > 0 else 0.0,
-                  "be_done": False, "adopted_ts": now, "last_modify_ts": 0.0}
+                  "be_done": False, "adopted_ts": now, "last_modify_ts": 0.0,
+                  "is_a2_burst": bool(comment_is_a2 or snap_is_a2)}
             self._state[ticket] = st
             self._save_state()
             logger.info("PM: adopted %s position ticket=%s (entry %.2f, "
-                        "SL %.2f, TP %.2f)", side, ticket, entry, cur_sl, cur_tp)
+                        "SL %.2f, TP %.2f%s)", side, ticket, entry, cur_sl, cur_tp,
+                        ", A2 burst" if st.get("is_a2_burst") else "")
+        elif comment_is_a2 and not st.get("is_a2_burst"):
+            st["is_a2_burst"] = True
+            self._save_state()
         initial_sl = float(st.get("initial_sl", 0.0) or 0.0)
         if initial_sl <= 0:
             # position had no SL at all — synthesize one for R math
@@ -1149,19 +1162,29 @@ class PositionManager:
                         f"{r_now:+.2f}R", ctx)
             return
 
-        # 3) TIME_STOP — old and going nowhere
+        # 3) TIME_STOP — old and going nowhere (A3 burst = 12m; M3 scalp = 45m)
         age_min = (now - float(st.get("adopted_ts", now))) / 60.0
         if cur_tp > 0 and entry > 0:
             progress = ((mid - entry) if is_buy else (entry - mid)) / \
                 abs(cur_tp - entry)
         else:
             progress = r_now / 2.0
-        if (config.PM_TIME_STOP_MINUTES > 0
-                and age_min >= config.PM_TIME_STOP_MINUTES
+        raw_time_stop = float(getattr(config, "PM_TIME_STOP_MINUTES", 180) or 0.0)
+        if raw_time_stop <= 0:
+            eff_time_stop = 0.0
+        elif st.get("is_a2_burst"):
+            eff_time_stop = max(1.0, float(getattr(config, "A2_BURST_TIME_STOP_MINUTES", 12.0) or 12.0))
+        elif raw_time_stop == 180.0 and int(getattr(config, "POWER_BAR_SECONDS", 300) or 300) <= 180:
+            eff_time_stop = max(1.0, float(getattr(config, "PM_M3_TIME_STOP_MINUTES", 45) or 45.0))
+        else:
+            eff_time_stop = raw_time_stop
+        if (eff_time_stop > 0
+                and age_min >= eff_time_stop
                 and progress < config.PM_TIME_STOP_MIN_PROGRESS):
+            lane_tag = " [A2 burst]" if st.get("is_a2_burst") else ""
             self._close(position, "TIME_STOP",
-                        f"{age_min:.0f} min old, only {progress*100:.0f}% "
-                        f"of the way to TP", ctx)
+                        f"{age_min:.0f} min old (limit {eff_time_stop:.0f}m){lane_tag}, "
+                        f"only {progress*100:.0f}% of the way to TP", ctx)
             return
 
         # 3b) v4.3 MOMENTUM_EXIT — a PROFITABLE position whose momentum is

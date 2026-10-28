@@ -503,6 +503,105 @@ def _power_probe_startup_history(symbol, now, live_ticks, bar_seconds=300):
     return live_ticks or [], diagnostics, history_bars
 
 
+def _regime_bar_cache_path(symbol: str, bar_seconds: int):
+    """Return path to local verified active-timeframe OHLC cache, or None when disabled."""
+    import os
+    from pathlib import Path
+    if not bool(getattr(config, "POWER_REGIME_BAR_CACHE_ENABLED", True)):
+        return None
+    sym_upper = str(symbol or "").strip().upper()
+    if not sym_upper or sym_upper.startswith("XAUUSD"):
+        return None
+    explicit_dir = os.environ.get("POWER_REGIME_BAR_CACHE_DIR", "").strip()
+    if explicit_dir:
+        base = Path(os.path.expandvars(explicit_dir))
+    elif bool(getattr(config, "POWER_V2_MEMORY_ENABLED", False)):
+        base = Path(getattr(config, "DATA_DIR", "data")) / "power_v2_memory"
+    else:
+        return None
+    return base / f"regime_bars_{int(bar_seconds)}s.json"
+
+
+def _load_local_regime_bar_cache(symbol: str, now: Any, bar_seconds: int):
+    """Load verified active-timeframe OHLC bars saved from earlier live cycles."""
+    import json
+    import os
+    path = _regime_bar_cache_path(symbol, bar_seconds)
+    if path is None or not path.is_file():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            return []
+        if int(payload.get("bar_seconds", 0) or 0) != int(bar_seconds):
+            return []
+        saved_sym = str(payload.get("symbol") or "").strip().upper()
+        req_sym = str(symbol or "").strip().upper()
+        if saved_sym != req_sym:
+            # Allow exact vendor suffix differences only when contract root+expiry match
+            from bookmap_bridge_provider import _instrument_matches
+            if not _instrument_matches(saved_sym, req_sym):
+                return []
+        max_age = float(os.environ.get("POWER_HISTORY_PROBE_MAX_AGE_SECONDS", "21600") or 21600.0)
+        now_ep = _datetime_epoch_utc(now)
+        out = []
+        for raw in payload.get("bars") or []:
+            if not isinstance(raw, dict):
+                continue
+            st = float(raw.get("start", 0.0) or 0.0)
+            if st <= 0 or (now_ep > 0 and (now_ep - (st + bar_seconds)) > max_age):
+                continue
+            out.append({
+                "start": st,
+                "open": float(raw["open"]),
+                "high": float(raw["high"]),
+                "low": float(raw["low"]),
+                "close": float(raw["close"]),
+                "bar_seconds": int(bar_seconds),
+            })
+        return out[-60:]
+    except Exception:
+        return []
+
+
+def _save_local_regime_bar_cache(symbol: str, bar_seconds: int, bars: list) -> None:
+    """Atomically persist verified completed active-timeframe OHLC bars."""
+    import json
+    if not bars:
+        return
+    path = _regime_bar_cache_path(symbol, bar_seconds)
+    if path is None:
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        clean = []
+        for b in bars[-60:]:
+            if not isinstance(b, dict):
+                continue
+            clean.append({
+                "start": float(b["start"]),
+                "open": float(b["open"]),
+                "high": float(b["high"]),
+                "low": float(b["low"]),
+                "close": float(b["close"]),
+                "bar_seconds": int(bar_seconds),
+            })
+        if not clean:
+            return
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(
+            json.dumps({
+                "symbol": str(symbol or "").strip(),
+                "bar_seconds": int(bar_seconds),
+                "bars": clean,
+            }),
+            encoding="utf-8",
+        )
+        tmp.replace(path)
+    except Exception:
+        pass
+
+
 __all__ = [
     "OrderFlowMetrics", "FootprintMetrics", "Level3Events", "VolatilityMetrics",
     "TrendMetrics", "VolumeProfileMetrics", "MacroMetrics", "NewsAndEvents",
@@ -5375,8 +5474,18 @@ def analyze_market(market_data: Dict[str, Any],
             _p2_set_bar_seconds(_power_bar_seconds)
         _regime_ticks, _probe_diagnostics, _probe_history_bars = _power_probe_startup_history(
             symbol, now, tick_data, bar_seconds=_power_bar_seconds)
+        if not _probe_history_bars:
+            _cached_tf_bars = _load_local_regime_bar_cache(
+                symbol, now, _power_bar_seconds)
+            if _cached_tf_bars:
+                _probe_history_bars = _cached_tf_bars
+                _probe_diagnostics["local_tf_cache_bars"] = len(_cached_tf_bars)
         _regime_v2 = classify_m5_regime(
             _regime_ticks, now=now, history_bars=_probe_history_bars)
+        if (_regime_v2.get("completed_bars")
+                and str(_regime_v2.get("reason", "")) != "HISTORY_PRICE_SCALE_MISMATCH"):
+            _save_local_regime_bar_cache(
+                symbol, _power_bar_seconds, _regime_v2.get("completed_bars") or [])
         _probe_diagnostics["regime_completed_buckets"] = _regime_v2.get("bars_available", 0)
         _probe_diagnostics["regime_latest_contiguous_bars"] = _regime_v2.get(
             "latest_contiguous_bars", 0)

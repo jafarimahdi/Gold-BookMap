@@ -188,20 +188,50 @@ class TradeMonitor:
         return positions
 
     # ------------------------------------------------------------------ #
+    def _smart_sleep_until_next_cycle(self, cycle_started: float, main_mod) -> None:
+        """Sleep up to poll_seconds, waking early if a mid-minute A2 burst fires."""
+        fast_watch = int(getattr(config, "FAST_BURST_WATCH_SECONDS", 10) or 0)
+        if (fast_watch <= 0
+                or fast_watch >= self.poll_seconds
+                or main_mod is None
+                or not hasattr(main_mod, "check_fast_burst_wakeup")):
+            time.sleep(self.poll_seconds)
+            return
+        deadline = cycle_started + float(self.poll_seconds)
+        while True:
+            rem = deadline - time.monotonic()
+            if rem <= 0.0:
+                break
+            time.sleep(min(float(fast_watch), rem))
+            if deadline - time.monotonic() <= 1.0:
+                break
+            if main_mod.check_fast_burst_wakeup():
+                break
+
     def run_loop(self, pipeline_fn: Callable[[], None],
                  max_iterations: Optional[int] = None) -> None:
         """Run pipeline_fn every poll_seconds; Ctrl-C to stop.
 
         pipeline_fn is typically main.run_pipeline.
         """
+        import sys
         iteration = 0
         logger.info("STEP 5: starting monitoring loop "
                     "(every %ds). Ctrl-C to stop.", self.poll_seconds)
+        main_mod = sys.modules.get("main")
+        if main_mod is not None and hasattr(main_mod, "set_async_loop_mode"):
+            main_mod.set_async_loop_mode(True)
         try:
             while max_iterations is None or iteration < max_iterations:
                 iteration += 1
+                cycle_started = time.monotonic()
                 logger.info("STEP 5: --- loop iteration %d ---", iteration)
                 pipeline_fn()
-                time.sleep(self.poll_seconds)
+                if max_iterations is not None and iteration >= max_iterations:
+                    break
+                self._smart_sleep_until_next_cycle(cycle_started, main_mod)
         except KeyboardInterrupt:
             logger.info("STEP 5: loop stopped by user.")
+        finally:
+            if main_mod is not None and hasattr(main_mod, "set_async_loop_mode"):
+                main_mod.set_async_loop_mode(False)

@@ -1096,8 +1096,216 @@ def _record_ai_call() -> None:
         pass
 
 
+import threading as _threading
+
+_STANDING_AI_SLIP = None
+_AI_BG_LOCK = _threading.Lock()
+_AI_BG_STATE = {
+    "in_flight": False,
+    "result": None,
+    "finished_epoch": 0.0,
+    "snapshot_meta": None,
+}
+_ASYNC_LOOP_ACTIVE = False
+_LAST_PIPELINE_CONTEXT = {}
+
+
+def set_async_loop_mode(enabled: bool) -> None:
+    """Enable off-hot-path async Gemini refresh during continuous --loop mode."""
+    global _ASYNC_LOOP_ACTIVE
+    _ASYNC_LOOP_ACTIVE = bool(enabled)
+
+
+def _snapshot_atr(snapshot) -> float:
+    """Read ATR from canonical snapshot.volatility.atr (or synthetic indicators fallback)."""
+    vol = getattr(snapshot, "volatility", None)
+    if vol is not None:
+        v = float(getattr(vol, "atr", 0.0) or 0.0)
+        if v > 0.0:
+            return v
+    ind = getattr(snapshot, "indicators", None)
+    if ind is not None:
+        v = float(getattr(ind, "atr_14", 0.0) or getattr(ind, "atr", 0.0) or 0.0)
+        if v > 0.0:
+            return v
+    return 0.0
+
+
+def _extract_slip_meta(snapshot) -> dict:
+    pw = getattr(snapshot, "power", None) or {}
+    return {
+        "regime": str(getattr(snapshot, "regime", "") or "").upper(),
+        "power_dir": str(pw.get("direction", "") or "").upper(),
+        "price": float(getattr(snapshot, "price", 0.0) or 0.0),
+        "atr": _snapshot_atr(snapshot),
+    }
+
+
+def _is_paid_ai_model_tag(m_tag: str) -> bool:
+    return bool(
+        m_tag
+        and not m_tag.startswith("none-")
+        and not m_tag.endswith("-cached")
+        and not m_tag.startswith("fallback-")
+        and not m_tag.startswith("power-lead")
+    )
+
+
+def _store_standing_ai_slip(decision, meta: dict, issued_epoch: float) -> None:
+    """Persist or clear the in-memory Standing AI Permission Slip."""
+    global _STANDING_AI_SLIP
+    m_tag = str(getattr(decision, "model", "") or "")
+    if not _is_paid_ai_model_tag(m_tag):
+        return
+    act = str(getattr(decision, "action", "HOLD") or "HOLD").upper()
+    conf = float(getattr(decision, "confidence", 0.0) or 0.0)
+    if act in ("BUY", "SELL") and conf > 0.0:
+        _STANDING_AI_SLIP = {
+            "action": act,
+            "confidence": conf,
+            "rationale": str(getattr(decision, "rationale", "") or ""),
+            "model": m_tag,
+            "issued_epoch": float(issued_epoch),
+            "regime": meta.get("regime", ""),
+            "power_dir": meta.get("power_dir", ""),
+            "price": float(meta.get("price", 0.0) or 0.0),
+            "atr": float(meta.get("atr", 0.0) or 0.0),
+        }
+    else:
+        _STANDING_AI_SLIP = None
+
+
+def _evaluate_standing_ai_slip(snapshot, now: float, min_interval: float,
+                               effective_interval: float):
+    """Return a cached standing Decision if still valid for live tape, else None."""
+    if not bool(getattr(config, "AI_STANDING_PERMISSION_ENABLED", True)):
+        return None
+    slip = _STANDING_AI_SLIP
+    if not isinstance(slip, dict) or _LAST_AI_CALL <= 0.0:
+        return None
+    issued = float(slip.get("issued_epoch", 0.0) or 0.0)
+    if abs(issued - _LAST_AI_CALL) > 1.0:
+        return None
+    age = now - issued
+    if age < 0.0 or age >= effective_interval:
+        return None
+    act = str(slip.get("action", "") or "").upper()
+    if act not in ("BUY", "SELL"):
+        return None
+    # 1) News blackout immediately voids standing permission
+    news_obj = getattr(snapshot, "news", None)
+    news_state = str(
+        (news_obj.get("news_state") if isinstance(news_obj, dict)
+         else getattr(news_obj, "news_state", "QUIET")) or "QUIET"
+    ).upper()
+    if news_state == "BLACKOUT":
+        return None
+    # 2) Regime flip check
+    live_reg = str(getattr(snapshot, "regime", "") or "").upper()
+    slip_reg = str(slip.get("regime", "") or "").upper()
+    if (slip_reg in ("TREND", "RANGE")
+            and live_reg in ("TREND", "RANGE", "VOLATILE", "HIGH_VOL")
+            and live_reg != slip_reg):
+        return None
+    # 3) POWER v2 opposing flip check
+    pw = getattr(snapshot, "power", None) or {}
+    live_pdir = str(pw.get("direction", "") or "").upper()
+    if (act == "BUY" and live_pdir == "DOWN") or (act == "SELL" and live_pdir == "UP"):
+        return None
+    # 4) Price excursion check (<= 2.0 * ATR or 0.3% fallback)
+    slip_px = float(slip.get("price", 0.0) or 0.0)
+    live_px = float(getattr(snapshot, "price", 0.0) or 0.0)
+    live_atr = _snapshot_atr(snapshot)
+    ref_atr = live_atr if live_atr > 0.0 else float(slip.get("atr", 0.0) or 0.0)
+    if slip_px > 0.0 and live_px > 0.0:
+        max_exc = (2.0 * ref_atr) if ref_atr > 0.0 else (slip_px * 0.003)
+        if abs(live_px - slip_px) > max_exc:
+            return None
+    # 5) Live L3 flow / depth-normalized OFI opposing sweep check
+    try:
+        from step3_ai_decision import compute_ofi_conflict_threshold
+        l3 = getattr(snapshot, "level3", None)
+        if l3 is not None:
+            net_flow = (float(getattr(l3, "aggressive_buy_volume", 0.0) or 0.0)
+                        - float(getattr(l3, "aggressive_sell_volume", 0.0) or 0.0))
+            ofi_l3 = float(getattr(l3, "ofi", 0.0) or 0.0)
+            ofi_thr = compute_ofi_conflict_threshold(snapshot, config)
+            if act == "BUY" and (net_flow < -50.0 or ofi_l3 < -ofi_thr):
+                return None
+            if act == "SELL" and (net_flow > 50.0 or ofi_l3 > ofi_thr):
+                return None
+    except Exception:
+        pass
+
+    from step3_ai_decision import Decision
+    dec = Decision(
+        action=act,
+        confidence=float(slip.get("confidence", 0.0) or 0.0),
+        rationale=f"standing AI slip ({age:.0f}s/{min_interval:.0f}s): {slip.get('rationale', '')}",
+        model=f"{slip.get('model', 'gemini')}-cached",
+    )
+    dec.decision_source = "AI_STANDING_PERMISSION"
+    return dec
+
+
+def _harvest_async_ai_result(now: float, min_interval: float):
+    """Harvest a completed background Gemini refresh if one finished."""
+    global _LAST_AI_CALL
+    with _AI_BG_LOCK:
+        dec = _AI_BG_STATE.get("result")
+        if dec is None:
+            return None
+        fin_epoch = float(_AI_BG_STATE.get("finished_epoch", now) or now)
+        meta = dict(_AI_BG_STATE.get("snapshot_meta") or {})
+        _AI_BG_STATE["result"] = None
+        _AI_BG_STATE["finished_epoch"] = 0.0
+        _AI_BG_STATE["snapshot_meta"] = None
+    m_tag = str(getattr(dec, "model", "") or "")
+    if _is_paid_ai_model_tag(m_tag):
+        _LAST_AI_CALL = fin_epoch
+        _record_ai_call()
+        _store_standing_ai_slip(dec, meta, fin_epoch)
+    elif m_tag in ("none-timeout-budget", "none-call-failed", "none-model-overloaded"):
+        if min_interval > 60.0:
+            _LAST_AI_CALL = fin_epoch - (min_interval - 60.0)
+        else:
+            _LAST_AI_CALL = fin_epoch
+    return dec
+
+
+def _dispatch_async_ai_refresh(snapshot) -> bool:
+    """Launch a single off-hot-path background Gemini refresh if none is running."""
+    with _AI_BG_LOCK:
+        if _AI_BG_STATE.get("in_flight"):
+            return False
+        _AI_BG_STATE["in_flight"] = True
+    meta = _extract_slip_meta(snapshot)
+
+    def _bg_worker():
+        import time as _t
+        from step3_ai_decision import AIDecisionEngine, Decision
+        try:
+            res = AIDecisionEngine().decide(snapshot)
+        except Exception as exc:
+            res = Decision(
+                action="HOLD", confidence=0.0,
+                rationale=f"async AI error: {type(exc).__name__}",
+                model="none-call-failed",
+            )
+        fin = _t.time()
+        with _AI_BG_LOCK:
+            _AI_BG_STATE["result"] = res
+            _AI_BG_STATE["finished_epoch"] = fin
+            _AI_BG_STATE["snapshot_meta"] = meta
+            _AI_BG_STATE["in_flight"] = False
+
+    t = _threading.Thread(target=_bg_worker, name="step3-ai-async", daemon=True)
+    t.start()
+    return True
+
+
 def run_step3(snapshot):
-    """Consult the AI — but only when it is worth it.
+    """Consult the AI — off hot path in --loop mode, with Standing Permission Slips.
 
     The free Gemini tier allows ~20 requests/day. Calling every 60 seconds
     would burn the whole quota in ~20 minutes. So the AI is consulted only
@@ -1112,6 +1320,32 @@ def run_step3(snapshot):
     min_strength = config.AI_MIN_SIGNAL_STRENGTH
     min_interval = config.AI_MIN_INTERVAL_MINUTES * 60.0
     max_per_day = config.AI_MAX_CALLS_PER_DAY
+    now = _time.time()
+    effective_interval = (min_interval - 5.0) if min_interval >= 60.0 else min_interval
+
+    # Harvest any completed background AI call first so quota & slips stay exact.
+    harvested = _harvest_async_ai_result(now, min_interval)
+    if harvested is not None:
+        h_tag = str(getattr(harvested, "model", "") or "")
+        if _is_paid_ai_model_tag(h_tag):
+            # Re-verify the just-harvested directional slip against current snapshot;
+            # if still valid, emit the real model tag once for audit visibility.
+            h_act = str(getattr(harvested, "action", "HOLD") or "HOLD").upper()
+            if h_act in ("BUY", "SELL"):
+                checked = _evaluate_standing_ai_slip(
+                    snapshot, now, min_interval, max(effective_interval, 60.0))
+                if checked is None:
+                    harvested = Decision(
+                        action="HOLD", confidence=0.0,
+                        rationale="async AI slip invalidated by tape change before apply",
+                        model=h_tag)
+            _rat_txt = str(getattr(harvested, "rationale", "") or "")[-110:]
+            if " " in _rat_txt:
+                _rat_txt = _rat_txt[_rat_txt.find(" ") + 1:]
+            _record("STEP 3  AI DECISION",
+                    f"{harvested.action} @ {harvested.confidence:.1f}%"
+                    + (f" | {_rat_txt}" if _rat_txt.strip() else ""))
+            return harvested
 
     if strength < min_strength:
         decision = Decision(
@@ -1123,9 +1357,16 @@ def run_step3(snapshot):
                 f"HOLD (signal {strength:.1f} < {min_strength:.0f}, AI skipped)")
         return decision
 
-    now = _time.time()
-    effective_interval = (min_interval - 5.0) if min_interval >= 60.0 else min_interval
     if now - _LAST_AI_CALL < effective_interval:
+        standing = _evaluate_standing_ai_slip(
+            snapshot, now, min_interval, effective_interval)
+        if standing is not None:
+            logger.info("STEP 3: Using cached AI decision (%s -> %s @ %.1f%%)",
+                        standing.model, standing.action, standing.confidence)
+            _record("STEP 3  AI DECISION",
+                    f"{standing.action} @ {standing.confidence:.1f}% "
+                    f"(standing slip, {standing.model})")
+            return standing
         wait = max(0.0, (min_interval - (now - _LAST_AI_CALL)) / 60.0)
         decision = Decision(
             action="HOLD", confidence=0.0,
@@ -1144,14 +1385,23 @@ def run_step3(snapshot):
                 f"HOLD (daily AI cap {max_per_day} reached)")
         return decision
 
+    if _ASYNC_LOOP_ACTIVE and bool(getattr(config, "AI_ASYNC_REFRESH_ENABLED", True)):
+        launched = _dispatch_async_ai_refresh(snapshot)
+        note = "AI async refresh dispatched (off hot path)" if launched else "AI async refresh in flight"
+        decision = Decision(
+            action="HOLD", confidence=0.0,
+            rationale=note,
+            model="none-async-pending")
+        _record("STEP 3  AI DECISION", f"HOLD ({note})")
+        return decision
+
+    meta = _extract_slip_meta(snapshot)
     decision = AIDecisionEngine().decide(snapshot)
     m_tag = str(getattr(decision, "model", "") or "")
-    if (m_tag and not m_tag.startswith("none-")
-            and not m_tag.endswith("-cached")
-            and not m_tag.startswith("fallback-")
-            and not m_tag.startswith("power-lead")):
+    if _is_paid_ai_model_tag(m_tag):
         _LAST_AI_CALL = now
         _record_ai_call()
+        _store_standing_ai_slip(decision, meta, now)
     elif m_tag in ("none-timeout-budget", "none-call-failed", "none-model-overloaded"):
         # Do not count failed attempts as paid calls and do not lock out a full
         # bar; pause at most ~60s so the loop stays responsive without hammering.
@@ -2193,10 +2443,53 @@ def run_pipeline(allow_new_entries: bool = True) -> None:
     # ------------------------------------------------------------------ #
     # SAFETY GATES before execution: session, stale feed, risk limits.
     # On weekends / holidays / feed drops / big losses the bot must NOT trade.
+    # If Step 2/3 took >= EXECUTION_FRESH_REACQUIRE_SECONDS (e.g. slow AI call),
+    # re-acquire a fresh Step-1 quote and verify <= 1.0*ATR drift so an AI
+    # timeout never falsely kills a live Bookmap cycle as STALE QUOTE.
     # ------------------------------------------------------------------ #
+    _drift_block_reason = ""
+    _reacquire_after = float(
+        getattr(config, "EXECUTION_FRESH_REACQUIRE_SECONDS", 2.0) or 0.0)
+    _pre_gate_elapsed = (
+        max(0.0, time.monotonic() - data_acquired_monotonic)
+        if data_acquired_monotonic is not None else 0.0)
+    if (allow_new_entries
+            and snapshot is not None
+            and _reacquire_after > 0.0
+            and _pre_gate_elapsed >= _reacquire_after):
+        try:
+            _fresh_data = run_step1()
+            _fresh_bad = _preflight_data_reason(_fresh_data, 0.0)
+            if not _fresh_bad and isinstance(_fresh_data, dict):
+                _old_px = float(getattr(snapshot, "price", 0.0) or 0.0)
+                _new_px = float(_fresh_data.get("price", 0.0) or 0.0)
+                _atr = _snapshot_atr(snapshot)
+                _max_drift = (_atr * 1.0) if _atr > 0.0 else (_old_px * 0.0015 if _old_px > 0.0 else 5.0)
+                if _old_px <= 0.0 or _new_px <= 0.0 or abs(_new_px - _old_px) <= _max_drift:
+                    data = _fresh_data
+                    data_acquired_monotonic = time.monotonic()
+                    if _new_px > 0.0:
+                        snapshot.price = _new_px
+                    if float(_fresh_data.get("bid", 0.0) or 0.0) > 0.0:
+                        snapshot.bid = float(_fresh_data["bid"])
+                    if float(_fresh_data.get("ask", 0.0) or 0.0) > 0.0:
+                        snapshot.ask = float(_fresh_data["ask"])
+                    _record("STEP 1  REVALIDATE",
+                            f"re-acquired fresh quote ({_new_px:.2f}) after {_pre_gate_elapsed:.1f}s Step 2/3")
+                else:
+                    _drift_block_reason = (
+                        f"quote drifted {abs(_new_px - _old_px):.2f} > {_max_drift:.2f} "
+                        f"during {_pre_gate_elapsed:.1f}s Step 2/3")
+        except Exception as _re_exc:
+            logger.warning("Pre-gate quote re-acquire failed: %s", _re_exc)
+
     _feed_elapsed = (max(0.0, time.monotonic() - data_acquired_monotonic)
                     if data_acquired_monotonic is not None else 0.0)
-    gate_ok, gate_reason = _safety_gates(data, _feed_elapsed)
+    if _drift_block_reason:
+        gate_ok, gate_reason = False, _drift_block_reason
+        _record("SAFETY: EXECUTION DRIFT", _drift_block_reason)
+    else:
+        gate_ok, gate_reason = _safety_gates(data, _feed_elapsed)
     if not gate_ok:
         from step3_ai_decision import Decision
         # 24m/A1d: the AI is never called when a safety gate blocks the cycle, so the
@@ -2395,7 +2688,91 @@ def run_pipeline(allow_new_entries: bool = True) -> None:
     if getattr(config, "LATENCY_LOG_ENABLED", True):
         logger.info(f"L4 Latency summary: total {total_ms:.0f}ms target {getattr(config,'LATENCY_TARGET_MS',500)}ms")
 
+    try:
+        _pw_ctx = (getattr(snapshot, "power", None) or {}) if snapshot is not None else {}
+        _sh_ctx = (getattr(snapshot, "shot", None) or {}) if snapshot is not None else {}
+        _nw_ctx = getattr(snapshot, "news", None) if snapshot is not None else None
+        _nw_state = (
+            _nw_ctx.get("news_state") if isinstance(_nw_ctx, dict)
+            else getattr(_nw_ctx, "news_state", "QUIET")
+        )
+        _LAST_PIPELINE_CONTEXT.clear()
+        _LAST_PIPELINE_CONTEXT.update({
+            "open_positions_count": len(open_positions or []),
+            "power_dir": str(_pw_ctx.get("direction", "") or "").upper(),
+            "power_reason": str(_pw_ctx.get("reason_code", _pw_ctx.get("reason", "")) or "").upper(),
+            "last_shot": str(_sh_ctx.get("shot", "") or "").upper() if isinstance(_sh_ctx, dict) else "",
+            "news_state": str(_nw_state or "QUIET").upper(),
+            "allow_new_entries": bool(allow_new_entries),
+        })
+    except Exception:
+        pass
+
     print_summary()
+
+
+def check_fast_burst_wakeup() -> bool:
+    """Mid-minute 10s sub-poll: wake early ONLY when flat, POWER v2 is active,
+    and a fresh aggressive impulse ignites on the live Bookmap tape.
+    """
+    try:
+        if not bool(_LAST_PIPELINE_CONTEXT.get("allow_new_entries", False)):
+            return False
+        if int(_LAST_PIPELINE_CONTEXT.get("open_positions_count", 0) or 0) > 0:
+            return False
+        if _entries_paused():
+            return False
+        pdir = str(_LAST_PIPELINE_CONTEXT.get("power_dir", "") or "").upper()
+        preason = str(_LAST_PIPELINE_CONTEXT.get("power_reason", "") or "").upper()
+        if pdir not in ("UP", "DOWN") or "FORCE_DOMINATES" not in preason:
+            return False
+        if str(_LAST_PIPELINE_CONTEXT.get("last_shot", "") or "").upper() == "GO":
+            return False
+        if not bool(getattr(config, "AGGRESSIVE_ENTRY_ENABLED", False)):
+            return False
+        md = run_step1()
+        if not isinstance(md, dict) or not md.get("has_data"):
+            return False
+        from aggressive_trigger import evaluate_aggressive_trigger
+        ticks = md.get("tick_data") or []
+        now_ep = time.time()
+        bv = sv = 0.0
+        for tk in ticks:
+            if not isinstance(tk, dict):
+                continue
+            ts_v = tk.get("ts") or tk.get("timestamp")
+            if isinstance(ts_v, datetime) and (now_ep - ts_v.timestamp()) > 30.0:
+                continue
+            vol = float(tk.get("volume", 0.0) or 0.0)
+            if vol <= 0.0:
+                continue
+            sd = str(tk.get("side") or tk.get("operation") or "").upper()
+            if sd in ("BUY", "BID_HIT_BUY", "AGGR_BUY"):
+                bv += vol
+            elif sd in ("SELL", "ASK_HIT_SELL", "AGGR_SELL"):
+                sv += vol
+        if (bv + sv) <= 0.0:
+            return False
+        trig = evaluate_aggressive_trigger(
+            power={"direction": pdir, "reason_code": preason},
+            shot_context={
+                "has_data": bool(md.get("has_data")),
+                "data_quality_ok": True,
+                "last_data_age_seconds": float(md.get("last_data_age_seconds", 0.5) or 0.5),
+                "bid": float(md.get("bid", 0.0) or 0.0),
+                "ask": float(md.get("ask", 0.0) or 0.0),
+                "news_state": str(_LAST_PIPELINE_CONTEXT.get("news_state", "QUIET") or "QUIET"),
+            },
+            config=config,
+            price=float(md.get("price", 0.0) or 0.0),
+            order_flow={"aggressive_buy_volume": bv, "aggressive_sell_volume": sv},
+        )
+        if bool(trig.get("confirmed")):
+            logger.info("FAST BURST WATCH: %s -> waking pipeline!", trig.get("reason", ""))
+            return True
+    except Exception:
+        return False
+    return False
 
 
 def print_summary() -> None:
