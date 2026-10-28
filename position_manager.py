@@ -154,6 +154,28 @@ BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 STATE_PATH = DATA_DIR / "pm_state.json"
 JOURNAL_PATH = DATA_DIR / "management_log.csv"
+_DEFAULT_STATE_PATH = STATE_PATH
+_DEFAULT_JOURNAL_PATH = JOURNAL_PATH
+
+
+def _resolve_state_path(instance=None) -> Path:
+    inst_path = getattr(instance, "_state_path", None) if instance is not None else None
+    if inst_path is not None:
+        return Path(inst_path)
+    if STATE_PATH != _DEFAULT_STATE_PATH:
+        return Path(STATE_PATH)
+    live_data_dir = getattr(config, "DATA_DIR", DATA_DIR)
+    return Path(live_data_dir) / "pm_state.json"
+
+
+def _resolve_journal_path(instance=None) -> Path:
+    inst_path = getattr(instance, "_journal_path", None) if instance is not None else None
+    if inst_path is not None:
+        return Path(inst_path)
+    if JOURNAL_PATH != _DEFAULT_JOURNAL_PATH:
+        return Path(JOURNAL_PATH)
+    live_data_dir = getattr(config, "DATA_DIR", DATA_DIR)
+    return Path(live_data_dir) / "management_log.csv"
 
 PM_MAGIC = 234000          # must match step4.MT5Executor.magic
 
@@ -508,9 +530,10 @@ class PositionManager:
 
     # ---------------- state persistence ---------------- #
     def _load_state(self) -> None:
+        sp = _resolve_state_path(self)
         try:
-            if STATE_PATH.exists():
-                raw = json.loads(STATE_PATH.read_text(encoding="utf-8"))
+            if sp.exists():
+                raw = json.loads(sp.read_text(encoding="utf-8"))
                 if isinstance(raw, dict):
                     # v4.2: the "_flow" key holds the CVD/price history so
                     # flow health survives a restart without a warm-up
@@ -524,12 +547,13 @@ class PositionManager:
             self._state = {}
 
     def _save_state(self) -> None:
+        sp = _resolve_state_path(self)
         try:
-            DATA_DIR.mkdir(parents=True, exist_ok=True)
+            sp.parent.mkdir(parents=True, exist_ok=True)
             data = dict(self._state)
             data["_flow"] = [list(h) for h in self._hist[-15:]]
-            STATE_PATH.write_text(json.dumps(data, indent=1),
-                                  encoding="utf-8")
+            sp.write_text(json.dumps(data, indent=1),
+                          encoding="utf-8")
         except OSError as exc:
             logger.warning("PM: could not save state: %s", exc)
 
@@ -585,21 +609,21 @@ class PositionManager:
     # ---------------- journal ---------------- #
     @staticmethod
     def _journal(row: dict) -> None:
+        jp = _resolve_journal_path()
         try:
-            DATA_DIR.mkdir(parents=True, exist_ok=True)
-            new_file = not JOURNAL_PATH.exists() or \
-                JOURNAL_PATH.stat().st_size == 0
+            jp.parent.mkdir(parents=True, exist_ok=True)
+            new_file = not jp.exists() or jp.stat().st_size == 0
             row = {k: row.get(k, "") for k in _MGMT_LOG_FIELDS}
             # v4.4: stamp the row here so no caller can forget it
             if not row.get("timestamp"):
                 row["timestamp"] = datetime.now(timezone.utc).strftime(
                     "%Y-%m-%d %H:%M:%S")
-            with open(JOURNAL_PATH, "a", newline="", encoding="utf-8") as fh:
+            with open(jp, "a", newline="", encoding="utf-8") as fh:
                 writer = csv.DictWriter(fh, fieldnames=_MGMT_LOG_FIELDS)
                 if new_file:
                     writer.writeheader()
                 writer.writerow(row)
-            logger.info("PM: journaled -> %s", JOURNAL_PATH)
+            logger.info("PM: journaled -> %s", jp)
         except OSError as exc:
             logger.warning("PM: could not write journal: %s", exc)
 

@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Optional, Tuple
 
 import config
@@ -30,6 +31,14 @@ import config
 logger = logging.getLogger(__name__)
 
 STATE_FILE = config.DATA_DIR / "trade_guard_state.json"
+_DEFAULT_STATE_FILE = STATE_FILE
+
+
+def _resolve_state_file() -> Path:
+    if STATE_FILE != _DEFAULT_STATE_FILE:
+        return Path(STATE_FILE)
+    live_data_dir = getattr(config, "DATA_DIR", _DEFAULT_STATE_FILE.parent)
+    return Path(live_data_dir) / "trade_guard_state.json"
 
 
 class TradeGuard:
@@ -44,22 +53,25 @@ class TradeGuard:
 
     # -- persisted state -------------------------------------------------------
     def load_state(self) -> dict:
-        if STATE_FILE.exists():
+        sf = _resolve_state_file()
+        if sf.exists():
             try:
-                return json.loads(STATE_FILE.read_text(encoding="utf-8"))
+                return json.loads(sf.read_text(encoding="utf-8"))
             except (json.JSONDecodeError, OSError):
                 return {}
         return {}
 
     def save_state(self, state: dict) -> None:
+        sf = _resolve_state_file()
         try:
-            STATE_FILE.write_text(json.dumps(state), encoding="utf-8")
+            sf.parent.mkdir(parents=True, exist_ok=True)
+            sf.write_text(json.dumps(state), encoding="utf-8")
         except OSError as exc:
             logger.warning("Could not persist trade-guard state: %s", exc)
 
     def reset(self) -> None:
         try:
-            STATE_FILE.unlink(missing_ok=True)
+            _resolve_state_file().unlink(missing_ok=True)
         except OSError:
             pass
 

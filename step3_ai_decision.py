@@ -119,12 +119,13 @@ def _key_cooldown_minutes() -> int:
 
 
 def _key_state_path():
-    global _KEY_STATE_FILE
-    if _KEY_STATE_FILE is None:
-        from pathlib import Path
-        _KEY_STATE_FILE = Path(__file__).resolve().parent / "data" / \
-            "gemini_keys_state.json"
-    return _KEY_STATE_FILE
+    if _KEY_STATE_FILE is not None:
+        return _KEY_STATE_FILE
+    from pathlib import Path
+    data_dir = getattr(config, "DATA_DIR", None) or (
+        Path(__file__).resolve().parent / "data"
+    )
+    return Path(data_dir) / "gemini_keys_state.json"
 
 
 def _key_id(key: str) -> str:
@@ -415,6 +416,48 @@ class AIDecisionEngine:
     # v5.2: Prompt cache for similar market conditions
     _PROMPT_CACHE = {"hash": None, "decision": None, "timestamp": None, "price": 0.0}
     _UNAVAILABLE_MODELS: set = set()
+    _MODEL_SLOW_STRIKES: Dict[str, int] = {}
+    _MODEL_DEMOTED_UNTIL: Dict[str, float] = {}
+
+    @classmethod
+    def _order_models_by_health(cls, models: List[str]) -> List[str]:
+        """Keep fast/healthy models ahead of any model temporarily demoted after
+        repeated consecutive timeouts/503s; demoted models remain at the tail
+        as fallbacks and automatically return to the front once cooldown expires."""
+        if len(models) <= 1:
+            return list(models)
+        now_m = time.monotonic()
+        healthy: List[str] = []
+        demoted: List[str] = []
+        for m in models:
+            until = cls._MODEL_DEMOTED_UNTIL.get(m, 0.0)
+            if until > now_m:
+                demoted.append(m)
+            else:
+                if m in cls._MODEL_DEMOTED_UNTIL:
+                    cls._MODEL_DEMOTED_UNTIL.pop(m, None)
+                    cls._MODEL_SLOW_STRIKES[m] = 0
+                healthy.append(m)
+        return healthy + demoted
+
+    @classmethod
+    def _record_model_slow_or_overloaded(cls, model: str, reason: str) -> None:
+        max_strikes = max(1, int(getattr(config, "AI_MODEL_SLOW_STRIKES", 3) or 3))
+        demote_s = max(60.0, float(getattr(config, "AI_MODEL_DEMOTE_SECONDS", 900.0) or 900.0))
+        strikes = int(cls._MODEL_SLOW_STRIKES.get(model, 0) or 0) + 1
+        cls._MODEL_SLOW_STRIKES[model] = strikes
+        if strikes >= max_strikes:
+            cls._MODEL_DEMOTED_UNTIL[model] = time.monotonic() + demote_s
+            logger.warning(
+                "STEP 3: demoting slow/congested model %s to fallback tail for %.0fm "
+                "after %d consecutive %s events.",
+                model, demote_s / 60.0, strikes, reason,
+            )
+
+    @classmethod
+    def _record_model_success(cls, model: str) -> None:
+        cls._MODEL_SLOW_STRIKES[model] = 0
+        cls._MODEL_DEMOTED_UNTIL.pop(model, None)
 
     def __init__(self, api_key: Optional[str] = None,
                  model: Optional[str] = None,
@@ -748,18 +791,34 @@ class AIDecisionEngine:
                             genai_types.AutomaticFunctionCallingConfig(disable=True)
                         )
                     }
-                    think_lvl = str(getattr(config, "GEMINI_THINKING_LEVEL", "LOW") or "").strip().upper()
+                    raw_think = str(getattr(config, "GEMINI_THINKING_LEVEL", "low") or "").strip().lower()
                     m_low = str(model or "").lower()
-                    if (think_lvl and think_lvl != "NONE"
-                            and "gemini-3" in m_low
-                            and hasattr(genai_types, "ThinkingConfig")):
-                        try:
-                            cfg_kwargs["thinking_config"] = genai_types.ThinkingConfig(
-                                thinking_level=think_lvl
-                            )
-                        except Exception:
-                            pass
-                    request_config = genai_types.GenerateContentConfig(**cfg_kwargs)
+                    request_config = None
+                    if (raw_think in ("minimal", "low", "medium", "high")
+                            and "gemini-3" in m_low):
+                        # Gemini 3.8 Flash supports low/medium/high (rejects minimal);
+                        # Gemini 3.6 Flash & 3.5 Flash-Lite support minimal/low/medium/high.
+                        eff_think = "low" if ("gemini-3.8" in m_low and raw_think == "minimal") else raw_think
+                        if hasattr(genai_types, "ThinkingConfig"):
+                            try:
+                                cfg_kwargs["thinking_config"] = genai_types.ThinkingConfig(
+                                    thinking_level=eff_think
+                                )
+                                request_config = genai_types.GenerateContentConfig(**cfg_kwargs)
+                            except Exception:
+                                cfg_kwargs.pop("thinking_config", None)
+                                request_config = None
+                        if request_config is None:
+                            try:
+                                request_config = genai_types.GenerateContentConfig(
+                                    **{**cfg_kwargs, "thinking_config": {"thinking_level": eff_think}}
+                                )
+                                cfg_kwargs["thinking_config"] = {"thinking_level": eff_think}
+                            except Exception:
+                                cfg_kwargs.pop("thinking_config", None)
+                                request_config = None
+                    if request_config is None:
+                        request_config = genai_types.GenerateContentConfig(**cfg_kwargs)
                     client = genai.Client(api_key=key,
                                           http_options=http_options)
                     try:
@@ -878,7 +937,8 @@ class AIDecisionEngine:
             raw_models = [self.model]
         else:
             raw_models = list(getattr(config, "GEMINI_MODELS", None) or [self.model])
-        models = [m for m in raw_models if m not in self._UNAVAILABLE_MODELS] or list(raw_models)
+        avail_models = [m for m in raw_models if m not in self._UNAVAILABLE_MODELS] or list(raw_models)
+        models = self._order_models_by_health(avail_models)
         exhausted = _exhausted_keys()
         active_keys = [k for k in self.api_keys if _key_id(k) not in exhausted]
         total_candidates = len(models) * max(1, len(active_keys))
@@ -888,10 +948,11 @@ class AIDecisionEngine:
         started_monotonic = time.monotonic()
         deadline_monotonic = started_monotonic + budget_s
         budget_exhausted = False
-        fair_attempt_s = min(15.0, budget_s * 0.8)
+        saw_timeout_slice = False
+        saw_non_timeout_error = False
         if len(models) >= 3 and budget_s >= 18.0:
             # Ensure 3-model cascade (3.8-flash -> 3.6-flash -> 3.5-flash-lite)
-            # leaves ~5s for the ultra-fast lite model instead of starving it at 0s.
+            # leaves ~5s+ for the ultra-fast lite model instead of starving it at 0s.
             per_attempt_cap_s = max(8.0, min(10.0, budget_s * 0.40))
         elif budget_s >= 10.0 and total_candidates > 1:
             per_attempt_cap_s = max(8.0, min(14.0, budget_s * 0.55))
@@ -900,10 +961,11 @@ class AIDecisionEngine:
         self._active_deadline_monotonic = deadline_monotonic
 
         try:
-            for model in models:
+            for model_idx, model in enumerate(models):
                 if budget_exhausted:
                     break
                 tried_model = model
+                is_last_model = (model_idx == len(models) - 1)
                 for key_index, key in enumerate(self.api_keys, 1):
                     if _key_id(key) in exhausted:
                         continue
@@ -911,9 +973,16 @@ class AIDecisionEngine:
                     if remaining_s <= 0.0:
                         budget_exhausted = True
                         break
-                    attempt_budget_s = min(remaining_s, per_attempt_cap_s)
+                    # Give the final model in the cascade the full remaining budget
+                    # when only one healthy key is in play, instead of slicing at 10s
+                    # with no model left behind it.
+                    if is_last_model and len(active_keys) <= 1:
+                        attempt_budget_s = remaining_s
+                    else:
+                        attempt_budget_s = min(remaining_s, per_attempt_cap_s)
                     try:
                         text = self._invoke_bounded(key, model, prompt, attempt_budget_s)
+                        self._record_model_success(model)
                         action, confidence, rationale = self._parse_response(text)
                         # v5.8 L3 Confidence Calibration
                         try:
@@ -970,9 +1039,12 @@ class AIDecisionEngine:
                         self._update_cache(snapshot, decision)
                         return decision
                     except _Step3BudgetTimeoutError as texc:
+                        saw_timeout_slice = True
                         last_error = str(texc)[:300]
+                        if len(models) > 1 and attempt_budget_s >= 5.0:
+                            self._record_model_slow_or_overloaded(model, "slice-timeout")
                         left_s = deadline_monotonic - time.monotonic()
-                        if left_s > 2.0 and budget_s >= 10.0 and total_candidates > 1:
+                        if left_s > 2.0 and budget_s >= 10.0 and not is_last_model:
                             logger.warning(
                                 "STEP 3: attempt slice (%.1fs) reached on key #%d (%s); "
                                 "failing over with %.1fs budget left.",
@@ -985,10 +1057,9 @@ class AIDecisionEngine:
                             "stopping further retries this cycle.",
                             budget_s, key_index, model,
                         )
-                        if remaining_s >= fair_attempt_s:
-                            _note_key_failure(key, key_index)
                         break
                     except Exception as exc:
+                        saw_non_timeout_error = True
                         last_error = str(exc)[:300]
                         if self._is_quota_error(exc):
                             _mark_exhausted(key)
@@ -998,6 +1069,8 @@ class AIDecisionEngine:
                                            key_index, _key_cooldown_minutes())
                             continue
                         if self._is_model_overloaded(exc):
+                            if len(models) > 1:
+                                self._record_model_slow_or_overloaded(model, "503-overload")
                             logger.warning(
                                 "STEP 3: model %s overloaded (503/UNAVAILABLE on key #%d); "
                                 "failing over immediately to next model without penalizing key.",
@@ -1022,7 +1095,7 @@ class AIDecisionEngine:
         finally:
             self._active_deadline_monotonic = None
 
-        if budget_exhausted:
+        if budget_exhausted or (saw_timeout_slice and not saw_non_timeout_error):
             elapsed_s = time.monotonic() - started_monotonic
             logger.warning(
                 "STEP 3: Gemini total wait budget exhausted (%.1fs / %.1fs cap) "

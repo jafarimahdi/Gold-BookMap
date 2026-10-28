@@ -46,6 +46,11 @@ def _f(x, d=0.0):
 
 def _path(data_dir) -> Path:
     try:
+        if data_dir in (None, "", "data", Path("data")):
+            import config as _cfg
+            cfg_dir = getattr(_cfg, "DATA_DIR", None)
+            if cfg_dir:
+                return Path(cfg_dir) / STATE_FILE
         return Path(data_dir) / STATE_FILE
     except Exception:
         return Path(STATE_FILE)

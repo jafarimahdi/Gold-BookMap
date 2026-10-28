@@ -446,16 +446,24 @@ def _refresh() -> None:
         "gemini-3.8-flash",
         "gemini-3.6-flash",
         "gemini-3.5-flash-lite",
-        "gemini-2.5-flash",
     ]
+    _retired_google_gemini_models = {
+        "gemini-2.5-flash",
+        "gemini-2.0-flash",
+        "gemini-1.5-flash",
+        "gemini-3.5-flash",
+        "gemini-3.7-flash",
+    }
     _raw_gemini_models = _fget("GEMINI_MODELS", "").strip()
     if _raw_gemini_models:
-        g["GEMINI_MODELS"] = [m.strip() for m in _raw_gemini_models.split(",") if m.strip()]
+        _parsed_models = [m.strip() for m in _raw_gemini_models.split(",") if m.strip()]
+        _active_models = [m for m in _parsed_models if m not in _retired_google_gemini_models]
+        g["GEMINI_MODELS"] = _active_models or _parsed_models
     else:
         g["GEMINI_MODELS"] = [g["GEMINI_MODEL"]] + [
             m for m in _default_gemini_models if m != g["GEMINI_MODEL"]
         ]
-    g["GEMINI_THINKING_LEVEL"] = _fget("GEMINI_THINKING_LEVEL", "LOW").strip().upper() or "LOW"
+    g["GEMINI_THINKING_LEVEL"] = _fget("GEMINI_THINKING_LEVEL", "low").strip().lower() or "low"
     _gemini_keys = [_fget("GEMINI_API_KEY", "")]
     for _n in range(2, 21):
         _gemini_keys.append(_fget("GEMINI_API_KEY_%d" % _n, ""))

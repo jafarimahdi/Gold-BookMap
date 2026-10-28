@@ -197,16 +197,33 @@ def trading_session(now: Optional[datetime] = None) -> Tuple[str, str]:
     return active[0], overlap
 
 
+def budapest_offset_hours(now: Optional[datetime] = None) -> int:
+    """UTC offset in hours for Europe/Budapest (+1 CET winter, +2 CEST summer)."""
+    n = now or datetime.now(timezone.utc)
+    if n.tzinfo is None:
+        n = n.replace(tzinfo=timezone.utc)
+    try:
+        from zoneinfo import ZoneInfo
+        off = n.astimezone(ZoneInfo("Europe/Budapest")).utcoffset()
+        if off is not None:
+            return int(round(off.total_seconds() / 3600.0))
+    except Exception:
+        pass
+    u = n.astimezone(timezone.utc).replace(tzinfo=None)
+    return _eu_offset_hours(u)
+
+
 def session_context(now: Optional[datetime] = None) -> Dict[str, str]:
     """Everything the AI needs to know about 'when' we are (for the prompt)."""
     now = _now(now)
     session, overlap = trading_session(now)
     b_h = budapest_hour(now)
+    b_off = budapest_offset_hours(now)
     is_bud = is_budapest_trading_hours(now)
     return {
         "day_of_week": day_of_week(now),
         "time_of_day_utc": now.strftime("%H:%M"),
-        "time_of_day_budapest": f"{b_h:02d}:{now.strftime('%M')} (Budapest, UTC+2)",
+        "time_of_day_budapest": f"{b_h:02d}:{now.strftime('%M')} (Budapest, UTC{b_off:+d})",
         "session": session,
         "session_overlap": overlap or "none",
         "budapest_trading": "yes" if is_bud else "no (outside 08:00-23:00 Budapest)",

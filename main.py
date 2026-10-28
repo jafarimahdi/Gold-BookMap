@@ -1052,10 +1052,10 @@ _AI_STATE_FILE = None
 
 
 def _ai_state_path():
-    global _AI_STATE_FILE
-    if _AI_STATE_FILE is None:
-        _AI_STATE_FILE = DATA_DIR / "ai_calls.json"
-    return _AI_STATE_FILE
+    if _AI_STATE_FILE is not None:
+        return _AI_STATE_FILE
+    live_data_dir = getattr(config, "DATA_DIR", DATA_DIR)
+    return Path(live_data_dir) / "ai_calls.json"
 
 
 def _local_day_key() -> str:
@@ -1298,10 +1298,26 @@ def _dispatch_async_ai_refresh(snapshot) -> bool:
             _AI_BG_STATE["finished_epoch"] = fin
             _AI_BG_STATE["snapshot_meta"] = meta
             _AI_BG_STATE["in_flight"] = False
+            _AI_BG_STATE["thread"] = None
 
     t = _threading.Thread(target=_bg_worker, name="step3-ai-async", daemon=True)
+    with _AI_BG_LOCK:
+        _AI_BG_STATE["thread"] = t
     t.start()
     return True
+
+
+def _snapshot_has_live_go_shot(snapshot) -> bool:
+    """True when Step 2 already built an executable Shooting=GO plan on this cycle."""
+    shot = getattr(snapshot, "shot", None)
+    if not isinstance(shot, dict):
+        return False
+    return (
+        str(shot.get("shot", "") or "").upper() == "GO"
+        and str(shot.get("side", "") or "").upper() in ("BUY", "SELL")
+        and str(shot.get("entry_style", "") or "").upper()
+        in ("PASSIVE_LIMIT", "AGGRESSIVE_MARKET")
+    )
 
 
 def run_step3(snapshot):
@@ -1322,6 +1338,7 @@ def run_step3(snapshot):
     max_per_day = config.AI_MAX_CALLS_PER_DAY
     now = _time.time()
     effective_interval = (min_interval - 5.0) if min_interval >= 60.0 else min_interval
+    live_go = _snapshot_has_live_go_shot(snapshot)
 
     # Harvest any completed background AI call first so quota & slips stay exact.
     harvested = _harvest_async_ai_result(now, min_interval)
@@ -1367,14 +1384,20 @@ def run_step3(snapshot):
                     f"{standing.action} @ {standing.confidence:.1f}% "
                     f"(standing slip, {standing.model})")
             return standing
-        wait = max(0.0, (min_interval - (now - _LAST_AI_CALL)) / 60.0)
-        decision = Decision(
-            action="HOLD", confidence=0.0,
-            rationale=f"AI throttled ({wait:.0f} min until next call)",
-            model="none-throttled")
-        _record("STEP 3  AI DECISION",
-                f"HOLD (AI throttled, {wait:.0f} min until next call)")
-        return decision
+        # When an executable Shooting=GO plan fires mid-window with no valid
+        # standing slip (e.g. an A2 burst or fresh POWER breakout right after an
+        # earlier NEITHER->HOLD call), re-consult AI instead of dropping GO behind
+        # none-throttled, subject to a 15s anti-burst floor.
+        min_go_reask_s = float(getattr(config, "AI_GO_REASK_MIN_SECONDS", 15.0) or 15.0)
+        if not (live_go and (now - _LAST_AI_CALL) >= max(0.0, min_go_reask_s)):
+            wait = max(0.0, (min_interval - (now - _LAST_AI_CALL)) / 60.0)
+            decision = Decision(
+                action="HOLD", confidence=0.0,
+                rationale=f"AI throttled ({wait:.0f} min until next call)",
+                model="none-throttled")
+            _record("STEP 3  AI DECISION",
+                    f"HOLD (AI throttled, {wait:.0f} min until next call)")
+            return decision
 
     if max_per_day > 0 and _ai_calls_today() >= max_per_day:
         decision = Decision(
@@ -1386,14 +1409,47 @@ def run_step3(snapshot):
         return decision
 
     if _ASYNC_LOOP_ACTIVE and bool(getattr(config, "AI_ASYNC_REFRESH_ENABLED", True)):
-        launched = _dispatch_async_ai_refresh(snapshot)
-        note = "AI async refresh dispatched (off hot path)" if launched else "AI async refresh in flight"
-        decision = Decision(
-            action="HOLD", confidence=0.0,
-            rationale=note,
-            model="none-async-pending")
-        _record("STEP 3  AI DECISION", f"HOLD ({note})")
-        return decision
+        if not live_go:
+            launched = _dispatch_async_ai_refresh(snapshot)
+            note = "AI async refresh dispatched (off hot path)" if launched else "AI async refresh in flight"
+            decision = Decision(
+                action="HOLD", confidence=0.0,
+                rationale=note,
+                model="none-async-pending")
+            _record("STEP 3  AI DECISION", f"HOLD ({note})")
+            return decision
+        # Executable Shooting=GO cycle with cold slip: if an async worker is
+        # already in flight, join it briefly so we do not waste A2's 5m cooldown
+        # on none-async-pending; otherwise run synchronous bounded decide() below.
+        with _AI_BG_LOCK:
+            bg_thread = _AI_BG_STATE.get("thread") if _AI_BG_STATE.get("in_flight") else None
+        if bg_thread is not None:
+            join_cap = max(1.0, float(getattr(config, "AI_GO_AWAIT_SECONDS", 12.0) or 12.0))
+            bg_thread.join(timeout=join_cap)
+            joined = _harvest_async_ai_result(_time.time(), min_interval)
+            if joined is not None:
+                j_tag = str(getattr(joined, "model", "") or "")
+                if _is_paid_ai_model_tag(j_tag):
+                    j_act = str(getattr(joined, "action", "HOLD") or "HOLD").upper()
+                    if j_act in ("BUY", "SELL"):
+                        checked = _evaluate_standing_ai_slip(
+                            snapshot, _time.time(), min_interval, max(effective_interval, 60.0))
+                        if checked is None:
+                            joined = Decision(
+                                action="HOLD", confidence=0.0,
+                                rationale="async AI slip invalidated by tape change before GO apply",
+                                model=j_tag)
+                    _rat_txt = str(getattr(joined, "rationale", "") or "")[-110:]
+                    if " " in _rat_txt:
+                        _rat_txt = _rat_txt[_rat_txt.find(" ") + 1:]
+                    _record("STEP 3  AI DECISION",
+                            f"{joined.action} @ {joined.confidence:.1f}%"
+                            + (f" | {_rat_txt}" if _rat_txt.strip() else ""))
+                    return joined
+            note = "AI async refresh still in flight past GO await window"
+            decision = Decision(action="HOLD", confidence=0.0, rationale=note, model="none-async-pending")
+            _record("STEP 3  AI DECISION", f"HOLD ({note})")
+            return decision
 
     meta = _extract_slip_meta(snapshot)
     decision = AIDecisionEngine().decide(snapshot)

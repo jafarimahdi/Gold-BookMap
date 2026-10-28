@@ -1792,8 +1792,10 @@ def test_5_guards(text, decisions, feed):
                 why.append("      none-weak-signal = the strategy never asked (signal below "
                            "AI_MIN_SIGNAL_STRENGTH) - by design. none-throttled / none-daily-cap "
                            "= AI_MIN_INTERVAL_MINUTES or AI_MAX_CALLS_PER_DAY silenced it - your "
-                           "setting, changeable. none-rate-limited / none-call-failed = Google "
-                           "refused or the call broke - not your choice, and worth watching")
+                           "setting, changeable. none-async-pending = non-blocking background AI "
+                           "refresh launched off hot path (harvested next pass). "
+                           "none-timeout-budget / none-rate-limited / none-call-failed = Google "
+                           "timed out, refused, or the call broke - worth watching")
             if _fb.get("none"):
                 why.append(f"   of those, {_fb['none']} cycle(s) got NO answer at all "
                            f"(no API key / SDK missing / every key rate-limited / every call "

@@ -208,17 +208,35 @@ class TradeMonitor:
             if main_mod.check_fast_burst_wakeup():
                 break
 
+    @staticmethod
+    def _resolve_main_module(pipeline_fn: Optional[Callable[[], None]] = None):
+        """Resolve the live main module whether imported as 'main' or executed
+        directly via `python main.py --loop` (`__main__`)."""
+        import sys
+        candidates = []
+        fn_mod_name = getattr(pipeline_fn, "__module__", None)
+        if fn_mod_name:
+            candidates.append(sys.modules.get(fn_mod_name))
+        candidates.append(sys.modules.get("main"))
+        candidates.append(sys.modules.get("__main__"))
+        for mod in candidates:
+            if mod is not None and (
+                hasattr(mod, "set_async_loop_mode")
+                or hasattr(mod, "check_fast_burst_wakeup")
+            ):
+                return mod
+        return None
+
     def run_loop(self, pipeline_fn: Callable[[], None],
                  max_iterations: Optional[int] = None) -> None:
         """Run pipeline_fn every poll_seconds; Ctrl-C to stop.
 
         pipeline_fn is typically main.run_pipeline.
         """
-        import sys
         iteration = 0
         logger.info("STEP 5: starting monitoring loop "
                     "(every %ds). Ctrl-C to stop.", self.poll_seconds)
-        main_mod = sys.modules.get("main")
+        main_mod = self._resolve_main_module(pipeline_fn)
         if main_mod is not None and hasattr(main_mod, "set_async_loop_mode"):
             main_mod.set_async_loop_mode(True)
         try:

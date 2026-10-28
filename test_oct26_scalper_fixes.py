@@ -142,7 +142,6 @@ def test_fix3_gemini_models_chain_attempt_failover_and_404_memory(tmp_path, monk
             "gemini-3.8-flash",
             "gemini-3.6-flash",
             "gemini-3.5-flash-lite",
-            "gemini-2.5-flash",
         ]
 
         # Explicit GEMINI_MODEL without GEMINI_MODELS promotes that model first

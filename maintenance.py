@@ -39,6 +39,14 @@ import config
 logger = logging.getLogger(__name__)
 
 _STATE_FILE = config.DATA_DIR / "maintenance_state.json"
+_DEFAULT_STATE_FILE = _STATE_FILE
+
+
+def _resolve_state_file() -> Path:
+    if _STATE_FILE != _DEFAULT_STATE_FILE:
+        return Path(_STATE_FILE)
+    live_data_dir = getattr(config, "DATA_DIR", _DEFAULT_STATE_FILE.parent)
+    return Path(live_data_dir) / "maintenance_state.json"
 
 
 def _now() -> datetime:
@@ -46,18 +54,21 @@ def _now() -> datetime:
 
 
 def _last_run_date() -> Optional[str]:
+    sf = _resolve_state_file()
     try:
-        if _STATE_FILE.exists():
-            return json.loads(_STATE_FILE.read_text(encoding="utf-8")).get("date")
+        if sf.exists():
+            return json.loads(sf.read_text(encoding="utf-8")).get("date")
     except Exception:
         pass
     return None
 
 
 def _set_last_run(date_str: str) -> None:
+    sf = _resolve_state_file()
     try:
-        _STATE_FILE.write_text(json.dumps({"date": date_str}),
-                               encoding="utf-8")
+        sf.parent.mkdir(parents=True, exist_ok=True)
+        sf.write_text(json.dumps({"date": date_str}),
+                      encoding="utf-8")
     except OSError as exc:
         logger.warning("Could not write maintenance state: %s", exc)
 

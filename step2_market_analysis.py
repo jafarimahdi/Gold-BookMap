@@ -2780,8 +2780,9 @@ class SignalEngine:
         try:
             if getattr(config, "V6_KILLZONES_ENABLED", False):
                 from datetime import datetime, timezone
+                from session import budapest_hour as _bud_hour
                 now_utc = datetime.now(timezone.utc)
-                bud_hour = (now_utc.hour + 2) % 24  # Budapest CEST UTC+2
+                bud_hour = _bud_hour(now_utc)
                 bud_min = now_utc.minute
                 killzone = _get_killzone(bud_hour, bud_min)
                 if killzone in ("LONDON", "NY"):
@@ -4698,6 +4699,10 @@ def _is_fresh_direct_trade_tick(tick: Dict[str, Any],
             return False
         max_age = float(raw_max_age)
         age = now_epoch - tick_epoch
+        # Allow up to 5ms sub-microsecond clock rounding (Windows datetime.now()
+        # microsecond rounding vs raw time.time()), while rejecting future ticks.
+        if -0.005 <= age < 0.0:
+            age = 0.0
         return (np.isfinite(tick_epoch) and np.isfinite(age) and age >= 0
                 and np.isfinite(max_age) and max_age > 0 and age <= max_age)
     except (TypeError, ValueError, OverflowError, OSError):
@@ -4824,6 +4829,8 @@ def _fresh_l3_order_events(market_data: Dict[str, Any],
         if event_epoch is None:
             continue
         age = current - event_epoch
+        if -0.005 <= age < 0.0:
+            age = 0.0
         if np.isfinite(age) and 0.0 <= age <= max_age:
             trusted.append(event)
     return trusted

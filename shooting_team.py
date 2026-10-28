@@ -168,6 +168,63 @@ def _epoch(value: Any) -> Optional[float]:
 _ROAD_HISTORY: "deque" = deque(maxlen=4096)
 
 
+def _observe_passive_road_sample(signal_map: Any, power: Any, price: Any,
+                                 spread: Any, ctx: Mapping[str, Any],
+                                 config: Any) -> None:
+    """Keep Crowd v2 Q2's rolling road-history baseline warm on fresh live book
+    cycles even when POWER is NEITHER/RANGE or news is WARNING/BLACKOUT.
+
+    Without this, _ROAD_HISTORY (45m window, min 12 samples) only saw cycles
+    where POWER already spoke UP/DOWN in QUIET news -- starving Q2 whenever
+    POWER spoke <12 times inside any 45-minute window (74/74 live POWER cycles
+    blocked on 2026-10-28, max 9/12). Fail-closed on stale/uncrossed/missing
+    data and rate-limited by SHOOT_ROAD_PASSIVE_SAMPLE_GAP_SECONDS (5s default)
+    so sub-second duplicate calls within one cycle never inflate sample counts.
+    """
+    p, sp = _num(price), _num(spread)
+    if p is None or p <= 0 or sp is None or sp <= 0:
+        return
+    bid, ask = _num(ctx.get("bid")), _num(ctx.get("ask"))
+    if bid is None or ask is None or bid <= 0 or ask <= 0 or ask <= bid:
+        return
+    if abs((ask - bid) - sp) > max(0.02, sp * 0.20):
+        return
+    if ctx.get("has_data") is not True or ctx.get("data_quality_ok") is not True:
+        return
+    age_data = _num(ctx.get("last_data_age_seconds"))
+    stale_after = _cfg(config, "STALE_DATA_SECONDS", 300.0)
+    if age_data is None or age_data < 0 or age_data > stale_after:
+        return
+    if not isinstance(signal_map, Mapping):
+        return
+
+    direction = (
+        str(power.get("direction", "") or "").upper()
+        if isinstance(power, Mapping) else ""
+    )
+    candidate_dirs = (direction,) if direction in {"UP", "DOWN"} else ("UP", "DOWN")
+    valid_roads = []
+    for side_dir in candidate_dirs:
+        door = _nearest_door(signal_map, side_dir, p)
+        if not door:
+            continue
+        rc = _num(door.get("doors_between"))
+        rl = _num(door.get("lots_between"))
+        if rc is not None and rl is not None and rc >= 0 and rl >= 0:
+            valid_roads.append(float(rl))
+    if not valid_roads:
+        return
+
+    now = time.time()
+    window = max(300.0, _cfg(config, "SHOOT_ROAD_HISTORY_SECONDS", 2700.0))
+    while _ROAD_HISTORY and now - _ROAD_HISTORY[0][0] > window:
+        _ROAD_HISTORY.popleft()
+    min_gap = max(0.0, _cfg(config, "SHOOT_ROAD_PASSIVE_SAMPLE_GAP_SECONDS", 5.0))
+    if _ROAD_HISTORY and (now - _ROAD_HISTORY[-1][0]) < min_gap:
+        return
+    _ROAD_HISTORY.append((now, sum(valid_roads) / len(valid_roads)))
+
+
 def _crowd_v2(door_size, road_lots, shot_lots, recent_volume, config):
     """Three Fair Questions.  Returns a verdict dict; every field is a receipt."""
     now = time.time()
@@ -398,6 +455,7 @@ def plan_shot(signal_map: Dict[str, Any], power: Dict[str, Any],
     plan_ttl = max(1.0, _cfg(config, "SHOOT_PLAN_TTL_SECONDS", 30.0))
     bad_power = _power_gate(power, ctx, config)
     if bad_power:
+        _observe_passive_road_sample(signal_map, power, price, spread, ctx, config)
         return _wait(bad_power, price, power=power, context=ctx, config=config,
                      atr=atr, spread=spread, plan_ttl=plan_ttl)
 

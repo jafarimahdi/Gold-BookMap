@@ -51,10 +51,17 @@ MAX_CLOSED_TRADES = 200
 # --------------------------------------------------------------------------- #
 
 def _base_dir() -> str:
-    # Same layout rule as the rest of the robot: file lives in the
-    # package dir, data goes to ./data next to it.
+    # Honor config.DATA_DIR dynamically so test suites and workdirs never
+    # spill trade_memory.json / tca_log.csv into the live ./data folder.
     here = os.path.dirname(os.path.abspath(__file__))
     data_dir = os.path.join(here, "data")
+    try:
+        import config as _cfg
+        cfg_dir = getattr(_cfg, "DATA_DIR", None)
+        if cfg_dir:
+            data_dir = os.fspath(cfg_dir)
+    except Exception:
+        pass
     try:
         os.makedirs(data_dir, exist_ok=True)
     except OSError:
