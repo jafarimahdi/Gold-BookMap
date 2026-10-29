@@ -79,6 +79,7 @@ import insight as i
 for n in ('decisions_page','trades_page','judges_page','explain','weight_ab','walk_forward'):
     assert callable(getattr(i,n)), n
 print('[OK] learning layer complete (decision drill-down, trades page, weight A/B, walk-forward)')" || { echo "[FAIL] tools/insight.py API incomplete - re-copy it from the kit"; exit 1; }
+  [ -f tools/xray_report.py ] && { "$PY" -W error::SyntaxWarning -m py_compile tools/xray_report.py && echo "[OK] tools/xray_report.py compiles" || { echo "[FAIL] tools/xray_report.py syntax error"; exit 1; }; }
   DEMO=$(GBM_NO_BROWSER=1 "$PY" audit_day.py --demo 2>&1); rc1=$?
   echo "$DEMO" | tail -4
   SELF=""; rc2=0

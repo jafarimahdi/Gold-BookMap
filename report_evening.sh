@@ -2,25 +2,25 @@
 # ==============================================================================
 # report_evening.sh -- THE ONE EVENING COMMAND (Company 2: The Report Office).
 #
-#   bash report_evening.sh                # newest trading day: ALL tests + ALL reports + opens ONE HTML page
+#   bash report_evening.sh                # newest trading day: ALL tests + ALL reports + X-Ray + opens ONE HTML page
 #   bash report_evening.sh 2026-10-23     # same, for a specific trading day
-#   bash report_evening.sh --fast         # ~45s quick evening check (skips slow replay Desks 4-6 & flow_probe)
-#   bash report_evening.sh --paper-only   # run only Today's Paper desks (Desks 1-10) + update master HTML
-#   bash report_evening.sh --with-book-probe  # also run heavy MBO book_probe.py (~1-2 min on 3.5M MBO rows)
+#   bash report_evening.sh --fast         # ~45s quick evening check (skips slow replay Desks 4-6 & flow/book/wall probes)
+#   bash report_evening.sh --paper-only   # run only Today's Paper desks (Desks 1-10) + X-Ray + update master HTML
+#   bash report_evening.sh --no-book-probe # skip heavy MBO book_probe.py (enabled by default in full runs)
 #   bash report_evening.sh --no-tests     # skip pytest/rigs (still runs daily_check.sh --check auditor gate)
-#   bash report_evening.sh --no-browser   # write all reports & HTML without opening a browser tab
+#   bash report_evening.sh --no-browser   # write all reports, X-Ray & HTML without opening a browser tab
 #   bash report_evening.sh --open         # re-open the latest master HTML report immediately, run nothing
 #
 # Covers EVERY department of COMPANY 2 -- THE REPORT OFFICE in one run:
 #   Stage 1/6: Toolkit & Code Self-Tests (daily_check.sh --check, pytest -q, rig_g11, rig_memory, rig_tf_robot)
 #   Stage 2/6: Setup Preflight + 17-Test Day Audit (audit_day.py + 4 diagnostics) + All-Days History
 #   Stage 3/6: The Truck Camera (tail_probe.py -- STEP1/STEP2/STEP3 full-pipeline latency attribution)
-#   Stage 4/6: The Spies (flow_probe.py print tilt/LIFT + optional book_probe.py MBO eOFI)
+#   Stage 4/6: The Spies & Signal Doctors (signal_health.py, signal_map.py, flow_probe.py, book_probe.py)
 #   Stage 5/6: Today's Paper (Desks 1 Accountant, 2 Geometer, 3 Shadow, 9 POWER Card, 10 Council Shadow,
 #              4 Lens, 5 Anatomist, 6 Universes M1-M10, 7 Clocks C1/C2/C3/C6, Watchman, 8 the AI COST line,
 #              + 3-Desk Reconciliation Law)
-#   Stage 6/6: Stitches EVERYTHING into ONE self-contained browser page: data/report_<DATE>.html
-#              and saves the full terminal transcript to: data/evening_suite_<DATE>.log
+#   Stage 6/6: Desk 11 X-Ray (`data/xray_<DATE>.txt` single-file overview + plain-text artifact vault, no .zip needed)
+#              + Master One-Page Browser Report (`data/report_<DATE>.html`) + `data/evening_suite_<DATE>.log`
 #
 # Read-only with respect to trading: no robot runtime state, .env, threshold, or order is ever touched.
 # ==============================================================================
@@ -33,7 +33,7 @@ FAST=0
 PAPER_ONLY=0
 RUN_TESTS=1
 RUN_CHECK=1
-BOOK_PROBE=0
+BOOK_PROBE=1
 NO_BROWSER=0
 OPEN_ONLY=0
 CONTINUE_ON_TEST_FAIL=0
@@ -47,6 +47,7 @@ for a in "$@"; do
     --no-tests) RUN_TESTS=0 ;;
     --no-check) RUN_CHECK=0 ;;
     --with-book-probe|--book-probe) BOOK_PROBE=1 ;;
+    --no-book-probe) BOOK_PROBE=0 ;;
     --no-browser|--quiet) NO_BROWSER=1 ;;
     --open) OPEN_ONLY=1 ;;
     --continue-on-test-fail) CONTINUE_ON_TEST_FAIL=1 ;;
@@ -100,7 +101,11 @@ SUITE_LOG="data/evening_suite_${DATE}.log"
 ABS_SUITE_LOG="$(pwd)/$SUITE_LOG"
 if [ "${GBM_EVENING_SUITE_ACTIVE_LOG:-}" != "$ABS_SUITE_LOG" ] && [ -z "${GBM_DISABLE_AUTO_TEE:-}" ]; then
   GBM_EVENING_SUITE_ACTIVE_LOG="$ABS_SUITE_LOG" bash "$0" "$@" 2>&1 | tee "$SUITE_LOG"
-  exit "${PIPESTATUS[0]}"
+  SUITE_RC="${PIPESTATUS[0]}"
+  if [ "$SUITE_RC" -eq 0 ] && [ -f tools/xray_report.py ]; then
+    "$PY" tools/xray_report.py --date "$DATE" --quiet >/dev/null 2>&1 || true
+  fi
+  exit "$SUITE_RC"
 fi
 
 hr() { printf '%s\n' "--------------------------------------------------------------------------------------------------------------"; }
@@ -243,13 +248,23 @@ if [ "$PAPER_ONLY" = 0 ]; then
 fi
 
 # ==============================================================================
-# STAGE 4/6: The Flow & Book Spies (flow_probe.py + optional book_probe.py)
+# STAGE 4/6: The Spies & Signal Doctors (signal_health + signal_map + flow_probe + book_probe)
 # ==============================================================================
 if [ "$PAPER_ONLY" = 0 ]; then
-  echo "== [4/6] The Flow & Order-Book Spies =="
+  echo "== [4/6] The Flow, Order-Book & Signal Spies =="
+  if [ -f tools/signal_health.py ] && [ -f audit_day.py ]; then
+    "$PY" tools/signal_health.py --date "$DATE" --quality --teams > "data/signal_health_${DATE}.txt" 2>&1 || true
+    head -n 28 "data/signal_health_${DATE}.txt" 2>/dev/null || true
+    hr
+  fi
   if [ "$FAST" = 1 ]; then
-    echo "  (flow_probe.py / book_probe.py skipped in --fast mode)"
+    echo "  (signal_map.py / flow_probe.py / book_probe.py skipped in --fast mode)"
   else
+    if [ -f tools/signal_map.py ] && [ -f audit_day.py ]; then
+      "$PY" tools/signal_map.py --date "$DATE" > "data/signal_map_${DATE}.txt" 2>&1 || true
+      tail -n 24 "data/signal_map_${DATE}.txt" 2>/dev/null || true
+      hr
+    fi
     if [ -f flow_probe.py ] && [ -f tf_lens.py ]; then
       "$PY" flow_probe.py --date "$DATE"
     else
@@ -445,9 +460,12 @@ PYEOF
 hr
 
 # ==============================================================================
-# STAGE 6/6: Stitch EVERYTHING into ONE HTML page & open it
+# STAGE 6/6: Build Desk 11 X-Ray + Stitch EVERYTHING into ONE HTML page & open it
 # ==============================================================================
-echo "== [6/6] Master One-Page Report (all tests + all Company 2 desks in one place) =="
+echo "== [6/6] Desk 11 X-Ray + Master One-Page Report (all tests + all desks in one place) =="
+if [ -f tools/xray_report.py ]; then
+  "$PY" tools/xray_report.py --date "$DATE"
+fi
 MASTER_HTML="data/report_${DATE}.html"
 if [ -f tools/report_office_bundle.py ]; then
   "$PY" tools/report_office_bundle.py --date "$DATE"
@@ -461,10 +479,10 @@ fi
 
 echo ""
 echo "=============================================================================================================="
-echo " DONE -- CHECK ONLY ONE PLACE FOR EVERYTHING ($DATE):"
-echo "   1. Master HTML Report : data\\report_${DATE}.html   (opened in browser: tests, 17 checks, scoreboard, veto,"
-echo "                           Evening Paper Desks 1-10, Reconciliation, Truck Camera, Flow Spy, decisions & trades)"
-echo "   2. All Audited Days   : data\\index.html"
-echo "   3. Full Text Log      : data\\evening_suite_${DATE}.log"
+echo " DONE -- EVERYTHING FOR $DATE IS READY FROM ONE COMMAND:"
+echo "   1. Share in Chat (1 .txt, NO .zip!) : data\\xray_${DATE}.txt"
+echo "      (Executive X-Ray Funnel/Vetoes/AI/Basis/Hygiene + ALL embedded text/CSV/JSON reports in one file)"
+echo "   2. Browser Dashboard (1 HTML page)  : data\\report_${DATE}.html"
+echo "   3. All Audited Days / Raw Log       : data\\index.html  |  data\\evening_suite_${DATE}.log"
 echo "=============================================================================================================="
 exit 0

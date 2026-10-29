@@ -210,6 +210,27 @@ def _parse_shadow_badge(shadow_txt: str, paper_txt: str) -> Tuple[str, str, str]
     return "ran", "Shadow replay", ""
 
 
+def _parse_xray_badge(xray_json: Dict[str, Any], xray_overview_txt: str) -> Tuple[str, str, str]:
+    if isinstance(xray_json, dict) and xray_json:
+        st = str(xray_json.get("overall_status") or "READY").upper()
+        attn = xray_json.get("attention_items") if isinstance(xray_json.get("attention_items"), list) else []
+        emb = int(xray_json.get("embedded_vault_count") or 0)
+        cls = "good" if st == "CLEAN" else ("bad" if st == "CRITICAL" else "warn")
+        sub = f"X-Ray ({len(attn)} findings, {emb} files in 1 .txt)"
+        return st, sub, cls
+    if xray_overview_txt:
+        return "READY", "X-Ray full-app overview", "good"
+    return "not run", "X-Ray (tools/xray_report.py)", ""
+
+
+def _extract_xray_part1(raw_txt: str) -> str:
+    if not raw_txt:
+        return ""
+    marker = "===== XRAY_VAULT_INDEX ====="
+    idx = raw_txt.find(marker)
+    return (raw_txt[:idx] if idx >= 0 else raw_txt).strip()
+
+
 def _section_html(sid: str, title: str, inner_html: str, subtitle: str = "", open_default: bool = False) -> str:
     op = " open" if open_default else ""
     sub = f"<p class='sub'>{subtitle}</p>" if subtitle else ""
@@ -251,10 +272,15 @@ def collect_office_artifacts(root: Path, day_str: str) -> Dict[str, Any]:
         "tail_txt": _read_text(data_dir / f"tail_probe_{day_str}.txt"),
         "flow_txt": _read_text(data_dir / f"flow_probe_{day_str}.txt"),
         "book_txt": _read_text(data_dir / f"book_probe_{day_str}.txt"),
+        "signal_health_txt": _read_text(data_dir / f"signal_health_{day_str}.txt"),
+        "signal_map_txt": _read_text(data_dir / f"signal_map_{day_str}.txt"),
+        "xray_json": _read_json(data_dir / f"xray_{day_str}.json"),
+        "xray_overview_txt": _extract_xray_part1(_read_text(data_dir / f"xray_{day_str}.txt")),
         "history_txt": _read_text(data_dir / f"history_summary_{day_str}.txt"),
         "has_index": (data_dir / "index.html").exists(),
         "has_history_html": (data_dir / "history_report.html").exists(),
         "has_suite_log": (data_dir / f"evening_suite_{day_str}.log").exists(),
+        "has_xray_txt": (data_dir / f"xray_{day_str}.txt").exists(),
     }
 
 
@@ -293,6 +319,7 @@ def render_office_bundle(art: Dict[str, Any]) -> Tuple[str, str]:
     rc_val, rc_sub, rc_cls, rec_block = _parse_reconciliation_badge(art["paper_txt"])
     tl_val, tl_sub, tl_cls = _parse_tail_badge(art["tail_txt"])
     sh_val, sh_sub, sh_cls = _parse_shadow_badge(art["shadow_txt"], art["paper_txt"])
+    xr_val, xr_sub, xr_cls = _parse_xray_badge(art.get("xray_json") or {}, art.get("xray_overview_txt") or "")
 
     badges = {
         "tests": (t_val, t_sub, t_cls),
@@ -301,6 +328,7 @@ def render_office_bundle(art: Dict[str, Any]) -> Tuple[str, str]:
         "recon": (rc_val, rc_sub, rc_cls),
         "tail": (tl_val, tl_sub, tl_cls),
         "shadow": (sh_val, sh_sub, sh_cls),
+        "xray": (xr_val, xr_sub, xr_cls),
     }
 
     nav_items: List[Tuple[str, str]] = [("office_hub", "Company 2 Hub")]
@@ -308,39 +336,59 @@ def render_office_bundle(art: Dict[str, Any]) -> Tuple[str, str]:
 
     # 1. Top Company 2 Executive Hub (always open at top)
     digest_txt = _build_chat_digest(art, badges, rec_block)
-    cards_html = "".join(
+    xray_overview_txt = art.get("xray_overview_txt") or ""
+    badge_tuple_list = [
+        badges["tests"],
+        badges["preflight"],
+        badges["audit"],
+        badges["recon"],
+        badges["shadow"],
+        badges["tail"],
+    ]
+    if art.get("has_xray_txt") or xray_overview_txt:
+        badge_tuple_list.append(badges["xray"])
+    cards_html = "<div class='cards'>" + "".join(
         f"<div class='card {cls}'><b>{_esc(val)}</b><span>{_esc(sub)}</span></div>"
-        for val, sub, cls in (
-            badges["tests"],
-            badges["preflight"],
-            badges["audit"],
-            badges["recon"],
-            badges["shadow"],
-            badges["tail"],
-        )
-    )
+        for val, sub, cls in badge_tuple_list
+    ) + "</div>"
     links_html = [
         "<button type='button' class='c2-btn' id='c2copybtn'>Copy Evening Summary for Chat</button>",
-        "<button type='button' class='c2-btn' onclick='window.print()'>Print / Save PDF</button>",
     ]
+    if xray_overview_txt:
+        links_html.append("<button type='button' class='c2-btn' id='c2copyxraybtn'>Copy X-Ray Overview for Chat</button>")
+    links_html.append("<button type='button' class='c2-btn' onclick='window.print()'>Print / Save PDF</button>")
     if art["has_index"]:
         links_html.append("<a class='c2-btn' href='index.html'>All Audited Days (index.html)</a>")
     if art["has_history_html"]:
         links_html.append("<a class='c2-btn' href='history_report.html'>Multi-Day Trend Table</a>")
-    suite_note = (
-        f"Plain-text master transcript saved at <code>data/evening_suite_{_esc(day_str)}.log</code>."
-        if art["has_suite_log"]
-        else f"Run <code>bash report_evening.sh {_esc(day_str)}</code> to refresh every Company 2 desk in one command."
+    suite_notes = []
+    if art.get("has_xray_txt"):
+        suite_notes.append(
+            f"<b>Single-file chat share (no .zip needed):</b> drag <code>data/xray_{_esc(day_str)}.txt</code> into chat "
+            "(contains Executive X-Ray + all embedded text/CSV/JSON artifacts)."
+        )
+    if art["has_suite_log"]:
+        suite_notes.append(f"Master terminal transcript: <code>data/evening_suite_{_esc(day_str)}.log</code>.")
+    if not suite_notes:
+        suite_notes.append(f"Run <code>bash report_evening.sh {_esc(day_str)}</code> to refresh every Company 2 desk + X-Ray in one command.")
+    suite_note = " ".join(suite_notes)
+    xray_hidden = (
+        f"<textarea id='c2xraydigest' style='position:fixed;left:-9999px;top:-9999px' readonly>{_esc(xray_overview_txt)}</textarea>"
+        if xray_overview_txt
+        else ""
     )
     copy_js = (
         "<textarea id='c2digest' style='position:fixed;left:-9999px;top:-9999px' readonly>"
         f"{_esc(digest_txt)}</textarea>"
-        "<script>(function(){var b=document.getElementById('c2copybtn'),t=document.getElementById('c2digest');"
+        f"{xray_hidden}"
+        "<script>(function(){function wire(bid,tid,msg){var b=document.getElementById(bid),t=document.getElementById(tid);"
         "if(!b||!t)return;b.onclick=function(){var v=t.value;"
-        "function ok(){var old=b.textContent;b.textContent='Copied Evening Summary!';"
+        "function ok(){var old=b.textContent;b.textContent=msg;"
         "setTimeout(function(){b.textContent=old;},2000);}"
         "if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(v).then(ok).catch(function(){t.select();document.execCommand('copy');ok();});}"
-        "else{t.select();document.execCommand('copy');ok();}};})();</script>"
+        "else{t.select();document.execCommand('copy');ok();}};}"
+        "wire('c2copybtn','c2digest','Copied Evening Summary!');"
+        "wire('c2copyxraybtn','c2xraydigest','Copied X-Ray Overview!');})();</script>"
     )
     hub_inner = cards_html + f"<div class='c2-toolbar'>{''.join(links_html)}</div><p class='sub'>{suite_note}</p>" + copy_js
     sections.append(
@@ -348,11 +396,24 @@ def render_office_bundle(art: Dict[str, Any]) -> Tuple[str, str]:
             "office_hub",
             "Company 2 &mdash; The Report Office (one-place evening overview)",
             hub_inner,
-            "Every test, probe, replay desk, and audit check for this day in one document. "
-            "Nothing below is recomputed: each block embeds the exact output written by its tool.",
+            "Every test, probe, replay desk, X-Ray funnel check, and audit check for this day in one document. "
+            "Nothing below alters trading or scoring: each block embeds the exact output written by its tool.",
             open_default=True,
         )
     )
+
+    # 1b. Desk 11 — The X-Ray (Full-App Funnel, Veto, AI, Basis/Spread, Hygiene & Manifest)
+    if xray_overview_txt:
+        nav_items.append(("xray_overview", "X-Ray Overview"))
+        sections.append(
+            _section_html(
+                "xray_overview",
+                "Desk 11 &mdash; The X-Ray (Step 1&ndash;5 Funnel, Vetoes, AI Routing, Basis/Spread &amp; State Hygiene)",
+                f"<pre class='console' style='max-height:none'>{_esc(xray_overview_txt)}</pre>",
+                f"Full plain-text X-Ray + embedded artifact vault saved at data/xray_{_esc(day_str)}.txt (ready to share directly as one .txt file).",
+                open_default=True,
+            )
+        )
 
     # 2. Test & Setup Gate section (auto-opens if anything failed or blocked)
     gate_display_txt = art["gate_txt"]
@@ -418,10 +479,14 @@ def render_office_bundle(art: Dict[str, Any]) -> Tuple[str, str]:
             )
         )
 
-    # 5. Flow & Order-Book Spies (flow_probe.py / book_probe.py)
-    if art["flow_txt"] or art["book_txt"]:
+    # 5. Flow, Order-Book Spies & Signal Doctors (flow_probe / book_probe / signal_health / signal_map)
+    if art["flow_txt"] or art["book_txt"] or art.get("signal_health_txt") or art.get("signal_map_txt"):
         nav_items.append(("flow_spies", "Flow &amp; Book Spies"))
         spy_parts = []
+        if art.get("signal_health_txt"):
+            spy_parts.append(_subdesk_html("Signal Team Doctor — detector votes vs silence & 4-team check (tools/signal_health.py)", art["signal_health_txt"], open_default=True))
+        if art.get("signal_map_txt"):
+            spy_parts.append(_subdesk_html("Wall Magnet & Barrier Test — do walls attract and hold? (tools/signal_map.py)", art["signal_map_txt"], open_default=False))
         if art["flow_txt"]:
             spy_parts.append(_subdesk_html("Print Flow Spy — sustained CVD tilt & LIFT (flow_probe.py)", art["flow_txt"], open_default=True))
         if art["book_txt"]:
@@ -429,9 +494,9 @@ def render_office_bundle(art: Dict[str, Any]) -> Tuple[str, str]:
         sections.append(
             _section_html(
                 "flow_spies",
-                "The Spies &mdash; between-bell print flow &amp; order-book tilt",
+                "The Spies &amp; Signal Doctors &mdash; detector health, wall targets, print flow &amp; order-book tilt",
                 "".join(spy_parts),
-                "Read-only flow diagnostics measuring sustained tape/book leans vs random-anchor baseline.",
+                "Read-only diagnostics checking L3 detector liveness, wall magnet/barrier behavior, and tape/book leans.",
                 open_default=False,
             )
         )
@@ -475,7 +540,7 @@ def inject_into_report_html(root: Path, day_str: str) -> Path:
     # and build index.html BEFORE collecting artifacts so the index link button is
     # already present on the very first run (strict idempotency).
     if not existed_before:
-        report_path.write_text("<!doctype html><html></html>", encoding="utf-8")
+        report_path.write_text("<!doctype html><html></html>", encoding="utf-8", newline="\n")
     try:
         tools_dir = str((root / "tools").resolve())
         if tools_dir not in sys.path:
@@ -523,7 +588,7 @@ def inject_into_report_html(root: Path, day_str: str) -> Path:
             "its Report Office tool without recomputing.</p></div></body></html>"
         )
 
-    report_path.write_text(html, encoding="utf-8")
+    report_path.write_text(html, encoding="utf-8", newline="\n")
 
     day_report_path = data_dir / f"day_report_{day_str}.html"
     if day_report_path.exists():
@@ -535,7 +600,7 @@ def inject_into_report_html(root: Path, day_str: str) -> Path:
                 "border-bottom:2px solid #22c55e;font-family:system-ui,sans-serif;font-size:14px;"
                 "display:flex;align-items:center;justify-content:space-between;gap:12px'>"
                 "<span><b>Note:</b> This is the raw audit sub-page. The complete Company 2 Master Evening Report "
-                "(Test Gate + Preflight + 17 Tests + Desks 1&ndash;10 + Probes) is in "
+                "(Test Gate + Preflight + 17 Tests + Desks 1&ndash;11 X-Ray + Probes) is in "
                 f"<code>report_{_esc(day_str)}.html</code>.</span>"
                 f"<a href='report_{_esc(day_str)}.html' style='background:#22c55e;color:#052e16;"
                 "font-weight:700;padding:6px 14px;border-radius:6px;text-decoration:none;white-space:nowrap'>"
@@ -543,7 +608,7 @@ def inject_into_report_html(root: Path, day_str: str) -> Path:
             )
             if marker not in dr_html and "<body>" in dr_html:
                 dr_html = dr_html.replace("<body>", f"<body>{banner_link}", 1)
-                day_report_path.write_text(dr_html, encoding="utf-8")
+                day_report_path.write_text(dr_html, encoding="utf-8", newline="\n")
         except Exception:
             pass
 
