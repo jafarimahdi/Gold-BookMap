@@ -642,6 +642,9 @@ def _refresh() -> None:
     g["FLASH_CRASH_ENABLED"] = _fget("FLASH_CRASH_ENABLED", "1") == "1"
     g["FLASH_CRASH_ATR_MULT"] = _ffloat("FLASH_CRASH_ATR_MULT", 3.0)
     g["FLASH_CRASH_MINUTES"] = _ffloat("FLASH_CRASH_MINUTES", 1.0)
+    g["FLASH_CRASH_MIN_PTS"] = _ffloat("FLASH_CRASH_MIN_PTS", 12.0)
+    g["FLASH_CRASH_MIN_PCT"] = _ffloat("FLASH_CRASH_MIN_PCT", 0.25)
+    g["MT5_SERVER_TZ_OFFSET_HOURS"] = _fget("MT5_SERVER_TZ_OFFSET_HOURS", "auto")
 
     # L6 Volatility Regime PM (adaptive giveback)
     g["PM_VOL_ADAPTIVE"] = _fget("PM_VOL_ADAPTIVE", "1") == "1"

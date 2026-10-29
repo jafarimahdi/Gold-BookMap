@@ -63,7 +63,7 @@ from typing import Any, Deque, Dict, List, Mapping, Optional, Tuple
 __all__ = [
     "evaluate_aggressive_trigger", "TRIGGER_KEYS",
     "BurstEyes", "EYES", "a2_eval", "a2_full_compute_ctx", "a2_serve_eval",
-    "a2_count_fire", "a2_fire_count", "a2_v1_gate",
+    "a2_count_fire", "a2_fire_count", "a2_v1_gate", "a2_commit_fire",
 ]
 
 
@@ -389,13 +389,29 @@ def _one_sidedness(order_flow: Any) -> Optional[float]:
 
 # -- the daily burst counter (persisted; restart-safe; twin-safe: cwd-local) ----
 
-def _counter_path() -> str:
+_REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
+
+
+def _counter_path(config: Any = None) -> str:
+    try:
+        if os.path.abspath(os.getcwd()) == _REPO_ROOT:
+            import sys as _sys
+            cfg = (
+                config
+                if (config is not None and hasattr(config, "DATA_DIR"))
+                else _sys.modules.get("config")
+            )
+            dd = getattr(cfg, "DATA_DIR", None) if cfg is not None else None
+            if dd is not None:
+                return os.path.join(str(dd), "a2_burst_count.json")
+    except Exception:
+        pass
     return os.path.join("data", "a2_burst_count.json")
 
 
-def a2_fire_count(now: datetime) -> int:
+def a2_fire_count(now: datetime, config: Any = None) -> int:
     try:
-        with open(_counter_path(), encoding="utf-8") as f:
+        with open(_counter_path(config), encoding="utf-8") as f:
             rec = json.load(f)
         if rec.get("date") == now.strftime("%Y-%m-%d"):
             return int(rec.get("count") or 0)
@@ -404,12 +420,14 @@ def a2_fire_count(now: datetime) -> int:
     return 0
 
 
-def a2_count_fire(now: datetime) -> int:
+def a2_count_fire(now: datetime, config: Any = None) -> int:
     """Persist one more burst fire for today; returns the new count."""
-    rec = {"date": now.strftime("%Y-%m-%d"), "count": a2_fire_count(now) + 1}
+    cpath = _counter_path(config)
+    rec = {"date": now.strftime("%Y-%m-%d"), "count": a2_fire_count(now, config) + 1}
     try:
-        os.makedirs("data", exist_ok=True)
-        with open(_counter_path(), "w", encoding="utf-8") as f:
+        parent = os.path.dirname(cpath) or "data"
+        os.makedirs(parent, exist_ok=True)
+        with open(cpath, "w", encoding="utf-8") as f:
             json.dump(rec, f)
     except OSError:
         pass
@@ -426,7 +444,7 @@ def a2_eval(power: Any, order_flow: Any, panel_direction: Any, now: datetime,
     anything missing -> fire=False with the honest reason.
     """
     out: Dict[str, Any] = {"fire": False, "direction": None, "reason": "",
-                           "lean": None, "panel": None, "count": a2_fire_count(now)}
+                           "lean": None, "panel": None, "count": a2_fire_count(now, config=config)}
     if not _enabled(config):
         out["reason"] = "A2 disabled (AGGRESSIVE_ENTRY_ENABLED!=1)"
         return out
@@ -470,7 +488,7 @@ def a2_eval(power: Any, order_flow: Any, panel_direction: Any, now: datetime,
         out["reason"] = f"eye 2 (panel {direction}) not seen within {win_s:.0f}s"
         return out
 
-    count = a2_fire_count(now)
+    count = a2_fire_count(now, config=config)
     out["count"] = count
     if count >= max_day:
         out["reason"] = f"daily burst cap reached ({count}/{max_day})"
@@ -521,18 +539,41 @@ def a2_full_compute_ctx(power: Any, order_flow: Any, direction_local: Any,
     }
 
 
+def a2_commit_fire(meta: Mapping[str, Any], now: datetime,
+                   config: Any = None,
+                   notes: Optional[List[str]] = None) -> str:
+    """Commit an A2 burst fire (counter + cooldown + note) once plan_shot approves GO."""
+    EYES.last_fire = now
+    n = a2_count_fire(now, config=config)
+    max_day = int(meta.get("max_day") or 10)
+    lean = meta.get("lean") or {}
+    panel = meta.get("panel") or {}
+    reason = str(meta.get("v1_reason") or "")
+    if notes is not None:
+        notes.append(
+            f"A2 burst: FIRE (v1 lane + rails) | eyes: lean "
+            f"{lean.get('direction', '?')} {float(lean.get('strength', 0.0)):.2f}/"
+            f"{float(lean.get('held_s', 0.0)):.0f}s"
+            f" | panel {panel.get('direction', '?')} {float(panel.get('age_s', 0.0)):.0f}s ago"
+            f" | burst trade {n}/{max_day}"
+        )
+    return f"A2 burst FIRE {n}/{max_day}: " + reason[:160]
+
+
 # -- A2 gate around the LIVE v1 wiring (installed on the owner's machine 2026-10-06) --
 
 def a2_v1_gate(v1: Any, power: Any, order_flow: Any, panel_direction: Any,
                now: datetime, config: Any,
-               notes: Optional[List[str]] = None) -> Dict[str, Any]:
+               notes: Optional[List[str]] = None,
+               *, defer_commit: bool = False) -> Dict[str, Any]:
     """A2 rails around the live v1 wiring (apply_aggressive_patches.py, 10-06).
 
     The v1 verdict passes through UNTOUCHED when the lane is disabled. When
     enabled, a confirmed v1 verdict additionally needs the three measured
     eyes (lean + panel direction) and the caps; a fire sets ``a2_burst=True``
     which activates the burst bracket in the (already-installed) shooting
-    patch. Counting happens here, at confirm time. Fail-closed everywhere.
+    patch. When ``defer_commit=True``, daily-counter increment and cooldown
+    stamping wait until ``plan_shot`` confirms ``GO`` via ``a2_commit_fire``.
     """
     if notes is None:
         notes = []
@@ -567,7 +608,7 @@ def a2_v1_gate(v1: Any, power: Any, order_flow: Any, panel_direction: Any,
     direction = str(_get(power, "direction") or "").upper()
     max_day = int(_num(_cfg(config, "A2_BURST_MAX_PER_DAY", 10), 10) or 10)
     cool_s = 60.0 * (_num(_cfg(config, "A2_BURST_COOLDOWN_MINUTES", 5), 5) or 5)
-    count = a2_fire_count(now)
+    count = a2_fire_count(now, config=config)
     panel = (EYES.panel_agrees(now, direction, window_s=(win_s or 300.0))
              if direction in ("UP", "DOWN") else None)
     why = None
@@ -585,14 +626,23 @@ def a2_v1_gate(v1: Any, power: Any, order_flow: Any, panel_direction: Any,
         notes.append(f"A2 burst: v1 confirmed -> refused by A2 rails: {why}")
         return {"aggressive_trigger_confirmed": False,
                 "aggressive_trigger_reason": f"A2 rails: {why} (v1: {reason[:100]})"}
-    EYES.last_fire = now
-    n = a2_count_fire(now)
-    notes.append(f"A2 burst: FIRE (v1 lane + rails) | eyes: lean "
-                 f"{lean['direction']} {lean['strength']:.2f}/{lean['held_s']:.0f}s"
-                 f" | panel {panel['direction']} {panel['age_s']:.0f}s ago"
-                 f" | burst trade {n}/{max_day}")
+    commit_meta = {
+        "max_day": max_day,
+        "lean": dict(lean),
+        "panel": dict(panel),
+        "v1_reason": reason,
+    }
+    if defer_commit:
+        return {
+            "aggressive_trigger_confirmed": True,
+            "aggressive_trigger_reason": f"A2 burst FIRE {count + 1}/{max_day}: " + reason[:160],
+            "a2_burst": True,
+            "_a2_pending_commit": True,
+            "_a2_commit_meta": commit_meta,
+        }
+    committed_reason = a2_commit_fire(commit_meta, now, config=config, notes=notes)
     return {"aggressive_trigger_confirmed": True,
-            "aggressive_trigger_reason": f"A2 burst FIRE {n}/{max_day}: " + reason[:160],
+            "aggressive_trigger_reason": committed_reason,
             "a2_burst": True}
 
 
@@ -671,7 +721,7 @@ def a2_serve_eval(served: Any, market_data: Mapping[str, Any], now: datetime,
                          book=get_book(), entry_context=ctx)
         if shot.get("entry_style") == "AGGRESSIVE_MARKET":
             EYES.last_fire = now
-            count = a2_count_fire(now)
+            count = a2_count_fire(now, config=config)
             notes.append(f"A2 burst: FIRE {_eyes_state(v)} | burst trade {count}"
                          f" today | entry {shot.get('entry')} stop {shot.get('stop')}"
                          f" target {shot.get('target')}")

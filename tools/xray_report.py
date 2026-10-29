@@ -595,7 +595,12 @@ def _analyze_diary_and_execution_organs(root: Path, day_str: str) -> Dict[str, A
             for c in closed:
                 if not isinstance(c, dict):
                     continue
-                pnl = _safe_float(c.get("profit") if "profit" in c else c.get("pnl"), 0.0) or 0.0
+                raw_pnl = (
+                    c.get("profit")
+                    if "profit" in c
+                    else (c.get("pnl") if "pnl" in c else c.get("pnl_usd_est"))
+                )
+                pnl = _safe_float(raw_pnl, 0.0) or 0.0
                 net_all += pnl
                 if pnl > 0:
                     wins += 1
@@ -742,7 +747,12 @@ def _analyze_state_hygiene(
     # 9. tracked_bot_positions.json & demo smoke files
     tbp = _read_json(data_dir / "tracked_bot_positions.json")
     if tbp is not None:
-        open_n = len(tbp) if isinstance(tbp, (list, dict)) else 0
+        if isinstance(tbp, dict) and isinstance(tbp.get("position_ids"), list):
+            open_n = len(tbp["position_ids"])
+        elif isinstance(tbp, (list, dict)):
+            open_n = len(tbp)
+        else:
+            open_n = 0
         states["tracked_bot_positions_count"] = open_n
     if (data_dir / "demo_order_test_pending.json").exists():
         drifts.append("demo_order_test_pending.json is present in data/ (unconsumed one-shot smoke request)")
@@ -794,13 +804,25 @@ def _analyze_logs(root: Path, day_str: str) -> Dict[str, Any]:
                     ul = line.upper()
                     if "TRACEBACK (MOST RECENT CALL LAST)" in ul:
                         out["traceback_count"] += 1
-                    if " - CRITICAL - " in ul or "[CRITICAL]" in ul:
+                    if (
+                        " - CRITICAL - " in ul
+                        or "[CRITICAL]" in ul
+                        or re.search(r"\bCRITICAL\s+\[", ul)
+                    ):
                         out["critical_count"] += 1
                         err_counter[_normalize_log_sig(line)] += 1
-                    elif " - ERROR - " in ul or "[ERROR]" in ul:
+                    elif (
+                        " - ERROR - " in ul
+                        or "[ERROR]" in ul
+                        or re.search(r"\bERROR\s+\[", ul)
+                    ):
                         out["error_count"] += 1
                         err_counter[_normalize_log_sig(line)] += 1
-                    elif " - WARNING - " in ul or "[WARN" in ul:
+                    elif (
+                        " - WARNING - " in ul
+                        or "[WARN" in ul
+                        or re.search(r"\bWARNING\s+\[", ul)
+                    ):
                         out["warning_count"] += 1
                         warn_counter[_normalize_log_sig(line)] += 1
                     if "BASIS" in ul:

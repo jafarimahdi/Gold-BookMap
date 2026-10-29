@@ -1173,21 +1173,29 @@ class MT5Provider(BaseProvider):
                 quote_epoch = None
 
         if quote_status == "valid" and quote_epoch is not None:
-            quote_age = time.time() - quote_epoch
+            try:
+                max_quote_age = float(getattr(
+                    config, "STALE_DATA_SECONDS", 300.0))
+                if not math.isfinite(max_quote_age) or max_quote_age <= 0:
+                    raise ValueError("invalid quote-age limit")
+            except (TypeError, ValueError, OverflowError):
+                max_quote_age = None
+            from step4_mt5_execution import resolve_mt5_quote_age
+            quote_age, self._server_offset_s = resolve_mt5_quote_age(
+                quote_epoch,
+                time.time(),
+                max_age=(max_quote_age if max_quote_age is not None else 300.0),
+                cached_offset_s=getattr(self, "_server_offset_s", None),
+                config_mod=config,
+            )
             if not math.isfinite(quote_age) or quote_age < 0:
                 quote_status = "future_timestamp"
                 spread_pct = None
             else:
                 data["quote_age_seconds"] = quote_age
+                eff_utc_epoch = time.time() - quote_age
                 data["quote_timestamp"] = datetime.fromtimestamp(
-                    quote_epoch, tz=timezone.utc).isoformat()
-                try:
-                    max_quote_age = float(getattr(
-                        config, "STALE_DATA_SECONDS", 300.0))
-                    if not math.isfinite(max_quote_age) or max_quote_age <= 0:
-                        raise ValueError("invalid quote-age limit")
-                except (TypeError, ValueError, OverflowError):
-                    max_quote_age = None
+                    eff_utc_epoch, tz=timezone.utc).isoformat()
                 if max_quote_age is None:
                     quote_status = "invalid_age_limit"
                 elif quote_age > max_quote_age:

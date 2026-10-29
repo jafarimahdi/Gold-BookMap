@@ -135,10 +135,11 @@ from __future__ import annotations
 import csv
 import json
 import logging
+import math
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 try:
     import MetaTrader5 as mt5
@@ -731,6 +732,23 @@ class PositionManager:
         return (ask - bid) / mid * 100.0 if (bid > 0 and ask > 0 and mid > 0) \
             else 0.0
 
+    @staticmethod
+    def _normalize_price(value: float, info: Any) -> float:
+        try:
+            v = float(value or 0.0)
+        except (TypeError, ValueError, OverflowError):
+            return 0.0
+        if not math.isfinite(v) or v <= 0.0:
+            return 0.0
+        tick_size = float(getattr(info, "trade_tick_size", 0.0) or 0.0) if info is not None else 0.0
+        point = float(getattr(info, "point", 0.0) or 0.0) if info is not None else 0.0
+        step = tick_size if tick_size > 0.0 else point
+        digits_raw = getattr(info, "digits", None) if info is not None else None
+        digits = int(digits_raw) if isinstance(digits_raw, int) and 0 <= digits_raw <= 10 else 2
+        if step > 0.0 and math.isfinite(step):
+            v = round(v / step) * step
+        return round(v, digits)
+
     def _modify_stops(self, position, new_sl: float, new_tp: float,
                       rule: str, reason: str, ctx: dict) -> bool:
         """Send TRADE_ACTION_SLTP for one position. Returns True on success."""
@@ -741,6 +759,9 @@ class PositionManager:
             logger.info("PM: postponed %s — CFD spread %.3f%% too wide",
                         rule, spread_pct)
             return False
+        info = ctx.get("info")
+        new_sl = self._normalize_price(new_sl, info) if new_sl and new_sl > 0 else 0.0
+        new_tp = self._normalize_price(new_tp, info) if new_tp and new_tp > 0 else 0.0
         request = {
             "action": self._mt5.TRADE_ACTION_SLTP,
             "symbol": self.symbol,

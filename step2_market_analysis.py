@@ -1639,6 +1639,7 @@ class Level3OrderBookAnalyzer:
         self._iceberg_meta: Dict[float, Dict] = {}  # price -> {refills, first_seen, last_seen, total_size, age_sec, score}
         self._spoof_levels: Dict[float, int] = defaultdict(int)
         self._recent_adds: Dict[str, float] = {}  # order_id -> add timestamp
+        self._clip_reloads: Dict[tuple, Dict] = {}  # (book_side, price_r, size_r) -> {reloads, last_oid, last_canceled, first_seen, last_seen, total_vol}
         # Config thresholds
         try:
             self._iceberg_min_refills = int(getattr(config, "ICEBERG_MIN_REFILLS", 3))
@@ -1895,6 +1896,13 @@ class Level3OrderBookAnalyzer:
                         except:
                             pass
                     # Keep for iceberg history but mark canceled
+                    orig_px = float(existing.get("price", price) or price)
+                    orig_sz = float(existing.get("orig_size", existing.get("size", 0.0)) or 0.0)
+                    if orig_px > 0 and orig_sz >= 2.0:
+                        ck = (existing.get("side", book_side), round(orig_px, 2), round(orig_sz, 2))
+                        crec = self._clip_reloads.get(ck)
+                        if crec is not None and crec.get("last_oid") == order_id:
+                            crec["last_canceled"] = True
                     existing["canceled_ts"] = event_ts
                     existing["size"] = 0.0
                 # Also check recent adds without full map (fallback)
@@ -1907,13 +1915,52 @@ class Level3OrderBookAnalyzer:
             elif event_type in ("MODIFY", "MODIFIED", "REPLACE", "UPDATE"):
                 existing = self._order_map.get(order_id)
                 if existing and existing.get("canceled_ts") is None:
+                    prev_px = float(existing.get("price", price) or price)
+                    prev_sz = float(
+                        known_old_size
+                        if known_old_size is not None
+                        else existing.get("size", 0.0) or 0.0
+                    )
+                    # CME Globex / Rithmic MBO native display/iceberg replenishment:
+                    # same order_id modified at same price with visible slice replenished upward.
+                    if abs(prev_px - price) <= self._iceberg_tol:
+                        if prev_sz > 0.0 and size > prev_sz:
+                            existing["refills"] = int(existing.get("refills", 0) or 0) + 1
+                            existing["total_vol"] = float(existing.get("total_vol", prev_sz) or 0.0) + (size - prev_sz)
+                            if "first_seen" not in existing:
+                                existing["first_seen"] = existing.get("add_ts", event_ts)
+                            if existing["refills"] >= self._iceberg_min_refills:
+                                try:
+                                    import math as _ib_math
+                                    first = existing.get("first_seen", event_ts)
+                                    meta = self._iceberg_meta.get(
+                                        price,
+                                        {"refills": 0, "first_seen": first, "last_seen": event_ts, "total_size": 0.0, "age_sec": 0.0, "score": 0.0},
+                                    )
+                                    if existing["refills"] == self._iceberg_min_refills:
+                                        meta["refills"] = meta.get("refills", 0) + 1
+                                    else:
+                                        meta["refills"] = max(meta.get("refills", 0), existing["refills"] - self._iceberg_min_refills + 1)
+                                    meta["first_seen"] = min(meta.get("first_seen", first), first)
+                                    meta["last_seen"] = max(meta.get("last_seen", event_ts), event_ts)
+                                    meta["total_size"] = meta.get("total_size", 0.0) + (size - prev_sz)
+                                    meta["age_sec"] = max(1.0, meta["last_seen"] - meta["first_seen"])
+                                    meta["score"] = meta["refills"] * _ib_math.log(max(1.0, meta["age_sec"])) * max(size, meta["total_size"])
+                                    self._iceberg_meta[price] = meta
+                                except Exception:
+                                    pass
+                                if existing["refills"] == self._iceberg_min_refills:
+                                    self.iceberg_events += 1
+                                    self._iceberg_levels[price] += 1
+                    else:
+                        existing["refills"] = 0
                     existing["price"] = price
                     existing["size"] = size
                     existing["side"] = book_side
                     existing["last_seen"] = event_ts
                 else:
                     self._order_map[order_id] = {
-                        "price": price, "size": size, "side": book_side,
+                        "price": price, "size": size, "orig_size": size, "side": book_side,
                         "add_ts": event_ts, "first_seen": event_ts,
                         "last_seen": event_ts, "refills": 0, "total_vol": size,
                     }
@@ -1925,8 +1972,56 @@ class Level3OrderBookAnalyzer:
                 self._ofi_add(book_side, size)
             self.order_book[book_side].append((price, size))
             key = (book_side, price, size)
-            # v7.0 P2 FIX: legacy only when order_id invalid, to avoid double-count with MBO order_id path
+            # Track institutional synthetic clip reloads (same side/price/clip-size >=2 lots
+            # repeatedly absorbed & reloaded with fresh CME order_ids without cancel churn)
             is_invalid_oid = (not order_id) or (str(order_id).strip() in ("-1","0","","None","null"))
+            if not is_invalid_oid and price > 0 and size >= 2.0:
+                if order_id in self._order_map:
+                    self._order_map[order_id]["orig_size"] = size
+                ck = (book_side, round(price, 2), round(size, 2))
+                crec = self._clip_reloads.get(ck)
+                if crec is not None and (event_ts - crec.get("last_seen", event_ts)) <= 120.0:
+                    if crec.get("last_oid") != order_id and not crec.get("last_canceled", False):
+                        crec["reloads"] = int(crec.get("reloads", 0) or 0) + 1
+                        crec["total_vol"] = float(crec.get("total_vol", 0.0) or 0.0) + size
+                        crec["last_oid"] = order_id
+                        crec["last_canceled"] = False
+                        crec["last_seen"] = event_ts
+                        min_clip_reloads = max(3, self._iceberg_min_refills)
+                        if crec["reloads"] >= min_clip_reloads:
+                            try:
+                                import math as _math2
+                                first_c = crec.get("first_seen", event_ts)
+                                meta_c = self._iceberg_meta.get(
+                                    price,
+                                    {"refills": 0, "first_seen": first_c, "last_seen": event_ts, "total_size": 0.0, "age_sec": 1.0, "score": 0.0},
+                                )
+                                meta_c["refills"] = max(meta_c.get("refills", 0) + 1, crec["reloads"] - min_clip_reloads + 1)
+                                meta_c["first_seen"] = min(meta_c.get("first_seen", first_c), first_c)
+                                meta_c["last_seen"] = max(meta_c.get("last_seen", event_ts), event_ts)
+                                meta_c["total_size"] = meta_c.get("total_size", 0.0) + size
+                                meta_c["age_sec"] = max(1.0, meta_c["last_seen"] - meta_c["first_seen"])
+                                meta_c["score"] = meta_c["refills"] * _math2.log(max(1.0, meta_c["age_sec"])) * meta_c["total_size"]
+                                self._iceberg_meta[price] = meta_c
+                            except Exception:
+                                pass
+                            if crec["reloads"] == min_clip_reloads:
+                                self.iceberg_events += 1
+                                self._iceberg_levels[price] += 1
+                    else:
+                        crec["last_oid"] = order_id
+                        crec["last_canceled"] = False
+                        crec["last_seen"] = event_ts
+                else:
+                    self._clip_reloads[ck] = {
+                        "reloads": 0,
+                        "last_oid": order_id,
+                        "last_canceled": False,
+                        "first_seen": event_ts,
+                        "last_seen": event_ts,
+                        "total_vol": size,
+                    }
+            # v7.0 P2 FIX: legacy only when order_id invalid, to avoid double-count with MBO order_id path
             if self._last_new_key == key and is_invalid_oid:
                 # Simple same price/size repeat also counts as iceberg (legacy)
                 self.iceberg_events += 1
@@ -3206,19 +3301,20 @@ class SignalEngine:
             except Exception as se:
                 notes.append(f"spoof vote error: {se}")
 
-            # NEW: Queue Position vote for B3 limit
+            # NEW: Queue Position vote for B3 limit / passive depth advantage
             try:
                 if bool(getattr(config, "QUEUE_POS_ENABLED", True)):
-                    # If we have order_book, estimate queue at best bid/ask
-                    # Use iceberg levels as proxy for queue ahead
-                    if level3.iceberg_levels:
-                        # If iceberg support below price and we want BUY, queue good
-                        best_bid = max((p for p in level3.order_book.get("bids", []) or []), default=0)
-                        # Simplified: if bid depth ratio >1 and iceberg support -> good queue
-                        if order_flow.bid_ask_ratio > 1.2 and total_whale_bid > 0:
+                    bids_bk = level3.order_book.get("bids") or []
+                    asks_bk = level3.order_book.get("asks") or []
+                    has_book_depth = bool(bids_bk or asks_bk)
+                    ib_levels = level3.iceberg_levels or {}
+                    has_ib_bid = any(float(p) <= price for p in ib_levels)
+                    has_ib_ask = any(float(p) >= price for p in ib_levels)
+                    if ib_levels or has_book_depth:
+                        if order_flow.bid_ask_ratio > 1.2 and (total_whale_bid > 0 or has_ib_bid):
                             votes.append((+1.0, queue_w * 0.6))
                             notes.append(f"QUEUE_POS good bid ratio {order_flow.bid_ask_ratio:.2f} + whale support -> BUY queue")
-                        elif order_flow.bid_ask_ratio < 0.8 and total_whale_ask > 0:
+                        elif order_flow.bid_ask_ratio < 0.8 and (total_whale_ask > 0 or has_ib_ask):
                             votes.append((-1.0, queue_w * 0.6))
                             notes.append(f"QUEUE_POS good ask ratio {order_flow.bid_ask_ratio:.2f} + whale resistance -> SELL queue")
             except Exception as qe:
@@ -5714,9 +5810,11 @@ def analyze_market(market_data: Dict[str, Any],
                                + type(_ag_err).__name__}
         # A2 (2026-10-13): the gate import. Missing module -> passthrough below.
         try:
-            from aggressive_trigger import a2_v1_gate as _a2_gate
+            from aggressive_trigger import a2_v1_gate as _a2_gate, a2_commit_fire as _a2_commit, EYES as _a2_eyes
         except Exception:
             _a2_gate = None
+            _a2_commit = None
+            _a2_eyes = None
         _crowd_vol = 0.0
         try:
             _crowd_ticks = tick_data[-500:] if isinstance(tick_data, list) else []
@@ -5759,15 +5857,40 @@ def analyze_market(market_data: Dict[str, Any],
             # 2026-10-06, fail-closed: fires only with AGGRESSIVE_ENTRY_ENABLED=1.
             # A2 (2026-10-13): gated -- three measured eyes + caps + burst
             # bracket; passthrough (identical behavior) when lane disabled.
-            **(_a2_gate(_aggr, _power_v2, order_flow, locals().get("direction"),
-                        now, config, notes) if _a2_gate is not None else
-               {"aggressive_trigger_confirmed": bool(_aggr.get("confirmed")),
-                "aggressive_trigger_reason": str(_aggr.get("reason") or "")}),
+            # Deferred commit (2026-10-29): daily counter & cooldown only commit
+            # once plan_shot actually approves AGGRESSIVE_MARKET GO.
         }
+        _a2_gate_out = (
+            _a2_gate(_aggr, _power_v2, order_flow, locals().get("direction"),
+                     now, config, notes, defer_commit=True)
+            if _a2_gate is not None
+            else {
+                "aggressive_trigger_confirmed": bool(_aggr.get("confirmed")),
+                "aggressive_trigger_reason": str(_aggr.get("reason") or ""),
+            }
+        )
+        _a2_pending_commit = bool(_a2_gate_out.pop("_a2_pending_commit", False))
+        _a2_commit_meta = _a2_gate_out.pop("_a2_commit_meta", None) or {}
+        _shot_context.update(_a2_gate_out)
         _shot = _plan(_signal_map, _power_v2, price,
                       getattr(volatility, "atr", 0.0) or 0.0,
                       spread=_spread_now, config=config, book=_get_book(),
                       entry_context=_shot_context)
+        if _a2_pending_commit:
+            if (isinstance(_shot, dict)
+                    and str(_shot.get("shot", "")).upper() == "GO"
+                    and str(_shot.get("entry_style", "")).upper() == "AGGRESSIVE_MARKET"):
+                if callable(_a2_commit):
+                    _committed_reason = _a2_commit(_a2_commit_meta, now, config=config, notes=notes)
+                    _shot["aggressive_trigger_reason"] = _committed_reason
+            else:
+                if _a2_eyes is not None and _a2_eyes.note_ok(now):
+                    _wait_why = "; ".join(str(w) for w in (_shot.get("why") or []))[:140] if isinstance(_shot, dict) else ""
+                    notes.append(
+                        f"A2 burst: candidate held back by plan_shot ({_shot.get('shot', 'WAIT') if isinstance(_shot, dict) else 'WAIT'}) "
+                        f"— counter/cooldown preserved"
+                        + (f" ({_wait_why})" if _wait_why else "")
+                    )
         notes.append(_shot_say(_shot))
     except Exception as _sh_err:
         notes.append(f"shooter unavailable: {type(_sh_err).__name__}: {_sh_err}")

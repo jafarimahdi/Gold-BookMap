@@ -363,7 +363,10 @@ def _quote_age(tick: Any, now_epoch: float) -> float:
     epoch = millis / 1000.0 if millis > 0 else seconds
     if not math.isfinite(epoch) or epoch <= 0:
         raise SmokeTestError("MT5 quote timestamp is unavailable")
-    age = now_epoch - epoch
+    from step4_mt5_execution import resolve_mt5_quote_age
+    age, _ = resolve_mt5_quote_age(
+        epoch, now_epoch, max_age=MAX_BROKER_QUOTE_AGE_SECONDS, config_mod=config
+    )
     if not math.isfinite(age) or age < 0:
         raise SmokeTestError("MT5 quote is future-dated or invalid")
     if age > MAX_BROKER_QUOTE_AGE_SECONDS:

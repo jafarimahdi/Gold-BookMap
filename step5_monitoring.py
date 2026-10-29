@@ -160,7 +160,22 @@ class TradeMonitor:
             since = since or datetime.now(timezone.utc).replace(
                 hour=0, minute=0, second=0, microsecond=0)
             now = datetime.now(timezone.utc)
-            deals = mt5.history_deals_get(since, now) or []
+            query_end = now
+            sym_tick_fn = getattr(mt5, "symbol_info_tick", None)
+            if callable(sym_tick_fn):
+                try:
+                    lt = sym_tick_fn(config.MT5_SYMBOL)
+                    tmsc = int(getattr(lt, "time_msc", 0) or 0)
+                    tsec = float(getattr(lt, "time", 0) or 0.0)
+                    q_ep = (tmsc / 1000.0) if tmsc > 0 else tsec
+                    if q_ep > now.timestamp() + 1800.0:
+                        k_tz = round((q_ep - now.timestamp()) / 3600.0)
+                        if 1 <= k_tz <= 14:
+                            from datetime import timedelta as _td
+                            query_end = now + _td(seconds=k_tz * 3600)
+                except Exception:
+                    pass
+            deals = mt5.history_deals_get(since, query_end) or []
             # Do not use a future end date (such as 2100-01-01): this broker
             # terminal returns no deals for that wide range. A date fallback
             # is retained only for callers with no tracked position IDs.

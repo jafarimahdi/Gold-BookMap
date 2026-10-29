@@ -207,7 +207,7 @@ def _record_latency(stage: str, ms: float):
         logger.info(f"LATENCY {stage} {ms:.0f}ms")
 
 def _check_flash_crash(snapshot) -> str:
-    """L4: If price moves > FLASH_CRASH_ATR_MULT * ATR in FLASH_CRASH_MINUTES, trigger flatten."""
+    """L4: If price moves beyond max(mult*ATR, min_pts, min_pct) in FLASH_CRASH_MINUTES, trigger guard."""
     if not getattr(config, "FLASH_CRASH_ENABLED", True):
         return ""
     try:
@@ -217,6 +217,8 @@ def _check_flash_crash(snapshot) -> str:
             return ""
         mult = float(getattr(config, "FLASH_CRASH_ATR_MULT", 3.0))
         minutes = float(getattr(config, "FLASH_CRASH_MINUTES", 1.0))
+        min_pts = max(0.0, float(getattr(config, "FLASH_CRASH_MIN_PTS", 12.0) or 0.0))
+        min_pct = max(0.0, float(getattr(config, "FLASH_CRASH_MIN_PCT", 0.25) or 0.0))
         now = time.time()
         _PRICE_HISTORY.append((now, price))
         cutoff = now - minutes * 120
@@ -231,11 +233,19 @@ def _check_flash_crash(snapshot) -> str:
                 break
         if old_price is None and len(_PRICE_HISTORY) >= 2:
             old_price = _PRICE_HISTORY[0][1]
-        if old_price is None:
+        if old_price is None or old_price <= 0:
             return ""
-        move = abs(price - old_price)
-        if move > mult * atr:
-            return f"FLASH CRASH: price {old_price:.2f} -> {price:.2f} move {move:.2f} > {mult}*ATR {atr:.2f} in {minutes:.0f}min"
+        signed_move = price - old_price
+        move = abs(signed_move)
+        pct_floor = old_price * (min_pct / 100.0) if min_pct > 0 else 0.0
+        threshold = max(mult * atr, min_pts, pct_floor)
+        if move > threshold:
+            return (
+                f"FLASH CRASH: price {old_price:.2f} -> {price:.2f} "
+                f"move {signed_move:+.2f} ({move:.2f} > {threshold:.2f} "
+                f"[max({mult}*ATR {atr:.2f}, {min_pts:.1f}pts, {min_pct:.2f}%)]) "
+                f"in {minutes:.0f}min"
+            )
     except Exception as e:
         logger.debug(f"Flash crash check error: {e}")
     return ""
@@ -1950,7 +1960,17 @@ def run_signal_bridge(snapshot, decision, *, allow_new_entries: bool = True) -> 
         _v3_enabled = str(_v3_raw).strip() in ("1", "1.0", "true", "True", "TRUE")
         _v3_lean = None
         try:
-            _v3_lean = _v3_eyes.lean(_v3_now)
+            _v3_lmin_raw = None
+            _v3_hold_raw = None
+            try:
+                import os as _v3_os2
+                _v3_lmin_raw = _v3_os2.environ.get("A2_LEAN_MIN")
+                _v3_hold_raw = _v3_os2.environ.get("A2_LEAN_HOLD_SECONDS")
+            except Exception:
+                pass
+            _v3_lmin = float(_v3_lmin_raw if _v3_lmin_raw not in (None, "") else getattr(config, "A2_LEAN_MIN", 0.25) or 0.25)
+            _v3_hold = float(_v3_hold_raw if _v3_hold_raw not in (None, "") else getattr(config, "A2_LEAN_HOLD_SECONDS", 60.0) or 60.0)
+            _v3_lean = _v3_eyes.lean(_v3_now, min_abs=_v3_lmin, hold_s=_v3_hold)
         except Exception:
             _v3_lean = None
         if isinstance(_v3_lean, dict):
@@ -2414,6 +2434,7 @@ def run_pipeline(allow_new_entries: bool = True) -> None:
     # STEP 2
     t1 = time.time()
     snapshot = None
+    _flash_crash_reason = ""
     if data is not None:
         try:
             snapshot = run_step2(data)
@@ -2421,48 +2442,103 @@ def run_pipeline(allow_new_entries: bool = True) -> None:
             # L4 Flash crash kill switch check immediately after fresh snapshot
             crash_reason = _check_flash_crash(snapshot)
             if crash_reason:
-                logger.error(f"L4 KILL SWITCH TRIGGERED: {crash_reason} -> flattening all")
+                _flash_crash_reason = crash_reason
+                logger.error(f"L4 KILL SWITCH TRIGGERED: {crash_reason} -> protecting open positions")
                 _record("SAFETY: FLASH_CRASH", f"TRIGGERED — {crash_reason}")
                 try:
-                    from position_manager import get_position_manager
-                    # Force flatten via manage will handle session flatten? We do manual flatten here
+                    import re as _fc_re
+                    from step4_mt5_execution import MT5Executor
+                    import trade_history as _fc_th
+                    _fc_signed = 0.0
+                    _fc_m = _fc_re.search(r"price\s+([0-9.]+)\s*->\s*([0-9.]+)", crash_reason)
+                    if _fc_m:
+                        _fc_signed = float(_fc_m.group(2)) - float(_fc_m.group(1))
                     import MetaTrader5 as mt5
                     if mt5 and config.mt5_initialize(mt5):
-                        positions = mt5.positions_get(symbol=config.MT5_SYMBOL)
-                        if positions:
-                            for p in positions:
-                                if int(getattr(p, "magic", -1)) == 234000:
-                                    # close urgent
+                        try:
+                            positions = mt5.positions_get(symbol=config.MT5_SYMBOL)
+                            info = mt5.symbol_info(config.MT5_SYMBOL)
+                            filling = (
+                                MT5Executor._select_filling_mode(info)
+                                if info is not None
+                                else getattr(mt5, "ORDER_FILLING_IOC", 1)
+                            )
+                            if positions:
+                                for p in positions:
+                                    if int(getattr(p, "magic", -1)) != 234000:
+                                        continue
+                                    is_buy = p.type == mt5.POSITION_TYPE_BUY
+                                    # Never panic-dump a position when price surged IN FAVOR of it;
+                                    # only emergency-flatten when the shock moved ADVERSELY (or direction unknown).
+                                    if (_fc_signed > 0 and is_buy) or (_fc_signed < 0 and not is_buy):
+                                        logger.info(
+                                            "L4 FLASH CRASH favorable to open %s ticket=%s (%+.2f) — keeping position for PM trail",
+                                            "BUY" if is_buy else "SELL",
+                                            getattr(p, "ticket", "?"),
+                                            _fc_signed,
+                                        )
+                                        continue
                                     tick = mt5.symbol_info_tick(config.MT5_SYMBOL)
                                     if tick:
-                                        is_buy = p.type == mt5.POSITION_TYPE_BUY
                                         price = tick.bid if is_buy else tick.ask
+                                        vol = float(p.volume)
+                                        ticket_id = int(p.ticket)
                                         req = {
                                             "action": mt5.TRADE_ACTION_DEAL,
                                             "symbol": config.MT5_SYMBOL,
-                                            "volume": float(p.volume),
+                                            "volume": vol,
                                             "type": mt5.ORDER_TYPE_SELL if is_buy else mt5.ORDER_TYPE_BUY,
-                                            "position": int(p.ticket),
+                                            "position": ticket_id,
                                             "price": price,
                                             "deviation": 20,
                                             "magic": 234000,
                                             "comment": "flash crash flatten",
                                             "type_time": mt5.ORDER_TIME_GTC,
-                                            "type_filling": mt5.ORDER_FILLING_IOC,
+                                            "type_filling": filling,
                                         }
-                                        mt5.order_send(req)
-                        mt5.shutdown()
+                                        res = mt5.order_send(req)
+                                        done_codes = (
+                                            getattr(mt5, "TRADE_RETCODE_DONE", 10009),
+                                            getattr(mt5, "TRADE_RETCODE_DONE_PARTIAL", 10010),
+                                        )
+                                        if res is not None and getattr(res, "retcode", None) in done_codes:
+                                            fill_px = float(getattr(res, "price", 0.0) or price)
+                                            open_px = float(getattr(p, "price_open", 0.0) or fill_px)
+                                            gain_pts = (fill_px - open_px) if is_buy else (open_px - fill_px)
+                                            try:
+                                                _fc_th.record_tca("EXIT", ticket_id, price, fill_px, vol, note="FLASH_CRASH")
+                                                _fc_th.record_close(
+                                                    ticket_id,
+                                                    "BUY" if is_buy else "SELL",
+                                                    fill_px,
+                                                    "FLASH_CRASH",
+                                                    gain_pts=gain_pts,
+                                                    volume=vol,
+                                                )
+                                            except Exception:
+                                                pass
+                        finally:
+                            mt5.shutdown()
                 except Exception as fe:
                     logger.error(f"Flash crash flatten failed: {fe}")
         except Exception as exc:
             logger.exception("STEP 2 failed")
             _record("STEP 2  MARKET ANALYSIS", f"ERROR — {exc}")
 
-    # STEP 3 (skipped entirely when the PAUSE file exists — saves AI quota)
+    # STEP 3 (skipped entirely when the PAUSE file exists or L4 flash crash fired — saves AI quota)
     t2 = time.time()
     decision = None
     if _entries_paused():
         _record("STEP 3  AI DECISION", "PAUSED — PAUSE file present")
+    elif _flash_crash_reason:
+        from step3_ai_decision import Decision as _FcDecision
+        decision = _FcDecision(
+            action="HOLD",
+            confidence=0.0,
+            rationale=f"safety gate: {_flash_crash_reason}",
+            model="none-safety-gate",
+        )
+        _record("STEP 3  AI DECISION", "HOLD (L4 flash-crash guard active)")
     elif snapshot is not None:
         try:
             decision = run_step3(snapshot)
@@ -2541,7 +2617,9 @@ def run_pipeline(allow_new_entries: bool = True) -> None:
 
     _feed_elapsed = (max(0.0, time.monotonic() - data_acquired_monotonic)
                     if data_acquired_monotonic is not None else 0.0)
-    if _drift_block_reason:
+    if _flash_crash_reason:
+        gate_ok, gate_reason = False, _flash_crash_reason
+    elif _drift_block_reason:
         gate_ok, gate_reason = False, _drift_block_reason
         _record("SAFETY: EXECUTION DRIFT", _drift_block_reason)
     else:

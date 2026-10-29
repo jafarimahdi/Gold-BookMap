@@ -40,6 +40,124 @@ import trade_history
 logger = logging.getLogger(__name__)
 
 
+def _explicit_mt5_tz_offset_seconds(config_mod: Any = None) -> Optional[float]:
+    """Return an operator-configured MT5 server UTC offset in seconds, else None ('auto')."""
+    cfg = config_mod if config_mod is not None else config
+    raw = getattr(cfg, "MT5_SERVER_TZ_OFFSET_HOURS", "auto")
+    if raw is None or isinstance(raw, bool):
+        return None
+    txt = str(raw).strip().lower()
+    if txt in ("", "auto", "none", "null"):
+        return None
+    try:
+        hours = float(txt)
+        if math.isfinite(hours) and -14.0 <= hours <= 14.0:
+            return hours * 3600.0
+    except (TypeError, ValueError, OverflowError):
+        pass
+    return None
+
+
+def resolve_mt5_quote_age(
+    quote_epoch: float,
+    now_epoch: float,
+    *,
+    max_age: float = 300.0,
+    cached_offset_s: Optional[float] = None,
+    config_mod: Any = None,
+) -> tuple[float, Optional[float]]:
+    """Compute true quote age in seconds accounting for MT5 broker trade-server timezone.
+
+    MetaTrader 5 encodes ``MqlTick.time`` / ``time_msc`` in the broker's trade-server
+    wall clock (e.g. ``GMT+2`` / ``GMT+3`` = ``+7,200s`` / ``+10,800s`` on Pepperstone
+    and MetaQuotes-Demo) rather than true UTC. Without server-clock normalization,
+    ``now_epoch - quote_epoch`` is ``~ -10,800s`` and fails closed as 'future-dated'.
+
+    Safety invariants:
+    - Windows ``datetime.now()`` sub-millisecond rounding (``-0.005s <= age < 0``) clamps to ``0.0``.
+    - Small bogus future timestamps (e.g. ``now + 1s``) have no integer timezone match and
+      still return ``< 0`` ('future-dated').
+    - Auto-detection only calibrates positive broker server offsets ``k * 3600s``
+      (``1 <= k <= 14``) when the initial tick is genuinely live
+      (``0 <= implied_age <= min(max_age, 60.0)``), then locks ``cached_offset_s`` on the
+      caller so a later 1-hour-stale tick stays ``3,600s`` stale instead of shifting ``k``.
+    """
+    explicit = _explicit_mt5_tz_offset_seconds(config_mod)
+    if explicit is not None:
+        age = (now_epoch + explicit) - quote_epoch
+        if -0.005 <= age < 0.0:
+            age = 0.0
+        return age, explicit
+
+    raw_age = now_epoch - quote_epoch
+    if -0.005 <= raw_age < 0.0:
+        return 0.0, 0.0
+    if 0.0 <= raw_age <= max_age:
+        return raw_age, 0.0
+
+    # Quote is ahead of UTC (e.g. GMT+2 / GMT+3 broker server clock)
+    if raw_age < -0.005:
+        if cached_offset_s is not None and cached_offset_s > 0.0:
+            age = (now_epoch + cached_offset_s) - quote_epoch
+            if -0.005 <= age < 0.0:
+                age = 0.0
+            # Keep cached_offset_s locked for the session so a 1-hour-stale tick
+            # stays 3,600s stale instead of snapping down to (k - 1) * 3600s.
+            return age, cached_offset_s
+
+        k = round((quote_epoch - now_epoch) / 3600.0)
+        if 1 <= k <= 14:
+            cand_offset = k * 3600.0
+            implied_age = (now_epoch + cand_offset) - quote_epoch
+            if -0.005 <= implied_age < 0.0:
+                implied_age = 0.0
+            if 0.0 <= implied_age <= min(max_age, 60.0):
+                logger.info(
+                    "MT5 broker server clock offset detected: +%ds (UTC+%d)",
+                    int(cand_offset), int(k),
+                )
+                return implied_age, cand_offset
+
+    return raw_age, cached_offset_s
+
+
+def resolve_mt5_deal_epoch_utc(
+    deal_epoch: float,
+    now_epoch: float,
+    *,
+    tick: Any = None,
+    config_mod: Any = None,
+) -> float:
+    """Convert an MT5 deal timestamp from broker server time into true UTC epoch."""
+    if not math.isfinite(deal_epoch) or deal_epoch <= 0.0:
+        return deal_epoch
+    explicit = _explicit_mt5_tz_offset_seconds(config_mod)
+    if explicit is not None:
+        return deal_epoch - explicit
+
+    # Prefer live tick calibration when available
+    if tick is not None:
+        try:
+            tmsc = int(getattr(tick, "time_msc", 0) or 0)
+            tsec = float(getattr(tick, "time", 0) or 0.0)
+            q_ep = (tmsc / 1000.0) if tmsc > 0 else tsec
+            if math.isfinite(q_ep) and q_ep > now_epoch + 1800.0:
+                k = round((q_ep - now_epoch) / 3600.0)
+                if 1 <= k <= 14 and abs((now_epoch + k * 3600.0) - q_ep) <= 900.0:
+                    return deal_epoch - (k * 3600.0)
+        except (TypeError, ValueError, OverflowError):
+            pass
+
+    # Fallback when deal itself is stamped >=55m ahead of UTC on a GMT+1..+14 server
+    if deal_epoch > now_epoch + 3300.0:
+        k = round((deal_epoch - now_epoch) / 3600.0)
+        if 1 <= k <= 14:
+            cand_utc = deal_epoch - (k * 3600.0)
+            if cand_utc <= now_epoch + 5.0:
+                return cand_utc
+    return deal_epoch
+
+
 @dataclass
 class ExecutionResult:
     """Outcome of a Step 4 attempt."""
@@ -68,6 +186,7 @@ class MT5Executor:
         # Trade on the MT5 (CFD) market, NOT the futures data market.
         self.symbol = symbol or config.MT5_SYMBOL or config.SYMBOL
         self.magic = 234000  # unique id for this EA's orders
+        self._server_offset_s: Optional[float] = None
 
     # ------------------------------------------------------------------ #
     def execute(self, decision, snapshot, *,
@@ -403,6 +522,23 @@ class MT5Executor:
             volume = minimum + math.floor((volume - minimum + 1e-12) / step) * step
         return round(max(minimum, min(volume, maximum)), self._volume_digits(step))
 
+    @staticmethod
+    def _normalize_price(value: Optional[float], info: Any) -> float:
+        """Quantize an order/stop price to the broker symbol's tick size & digits."""
+        if value is None:
+            return 0.0
+        v = float(value)
+        if not math.isfinite(v) or v <= 0.0:
+            return 0.0
+        tick_size = float(getattr(info, "trade_tick_size", 0.0) or 0.0) if info is not None else 0.0
+        point = float(getattr(info, "point", 0.0) or 0.0) if info is not None else 0.0
+        step = tick_size if tick_size > 0.0 else point
+        digits_raw = getattr(info, "digits", None) if info is not None else None
+        digits = int(digits_raw) if isinstance(digits_raw, int) and 0 <= digits_raw <= 10 else 2
+        if step > 0.0 and math.isfinite(step):
+            v = round(v / step) * step
+        return round(v, digits)
+
     def _validate_stops(self, action: str, price: float, sl: float,
                         tp: float, info) -> Optional[str]:
         """Validate SL/TP against broker stops level; return an error reason."""
@@ -486,15 +622,22 @@ class MT5Executor:
         if not math.isfinite(quote_epoch) or quote_epoch <= 0:
             return False, "broker quote timestamp unavailable", None, None
         now_epoch = time.time() if now_epoch is None else float(now_epoch)
-        quote_age = now_epoch - quote_epoch
-        if not math.isfinite(quote_age) or quote_age < 0:
-            return False, "broker quote timestamp is future-dated/invalid", None, None
         try:
             max_age = float(getattr(config, "STALE_DATA_SECONDS", 300.0))
             if not math.isfinite(max_age) or max_age <= 0:
                 raise ValueError("invalid stale-data threshold")
         except (TypeError, ValueError, OverflowError):
-            return False, "invalid STALE_DATA_SECONDS configuration", None, quote_age
+            raw_age = now_epoch - quote_epoch
+            return False, "invalid STALE_DATA_SECONDS configuration", None, raw_age
+        quote_age, self._server_offset_s = resolve_mt5_quote_age(
+            quote_epoch,
+            now_epoch,
+            max_age=max_age,
+            cached_offset_s=self._server_offset_s,
+            config_mod=config,
+        )
+        if not math.isfinite(quote_age) or quote_age < 0:
+            return False, "broker quote timestamp is future-dated/invalid", None, None
         if quote_age > max_age:
             return (False, f"broker quote stale ({quote_age:.3f}s > "
                     f"{max_age:.3f}s)", None, quote_age)
@@ -750,10 +893,16 @@ class MT5Executor:
         if is_a2_burst_order:
             try:
                 pt_scale = (price / src_price) if src_price > 0 else 1.0
-                a2_sl_pts = max(0.1, float(getattr(config, "A2_BURST_SL_PTS", 1.8) or 1.8)) * pt_scale
-                a2_tp_pts = max(0.1, float(getattr(config, "A2_BURST_TP_PTS", 1.8) or 1.8)) * pt_scale
-                sl = (price - a2_sl_pts) if is_buy else (price + a2_sl_pts)
-                tp = (price + a2_tp_pts) if is_buy else (price - a2_tp_pts)
+                a2_sl_pts = self._normalize_price(
+                    max(0.1, float(getattr(config, "A2_BURST_SL_PTS", 1.8) or 1.8)) * pt_scale,
+                    info,
+                )
+                a2_tp_pts = self._normalize_price(
+                    max(0.1, float(getattr(config, "A2_BURST_TP_PTS", 1.8) or 1.8)) * pt_scale,
+                    info,
+                )
+                sl = self._normalize_price((price - a2_sl_pts) if is_buy else (price + a2_sl_pts), info)
+                tp = self._normalize_price((price + a2_tp_pts) if is_buy else (price - a2_tp_pts), info)
                 struct_notes = [
                     f"A2 burst fixed bracket: TP {tp:.2f} ({a2_tp_pts:.2f} pts), "
                     f"SL {sl:.2f} ({a2_sl_pts:.2f} pts)"
@@ -778,6 +927,10 @@ class MT5Executor:
             except Exception:
                 logger.exception("structural stops failed — ATR fallback")
                 sl, tp = self._calc_sl_tp(action, price, atr, news_state)
+        if sl is not None:
+            sl = self._normalize_price(sl, info)
+        if tp is not None:
+            tp = self._normalize_price(tp, info)
         if struct_notes:
             try:
                 if abs(self._last_basis) > 5:
@@ -1018,6 +1171,7 @@ class MT5Executor:
             use_limit = False
 
         if use_limit:
+            limit_price = self._normalize_price(limit_price, info)
             # Place LIMIT order
             request = {
                 "action": mt5.TRADE_ACTION_PENDING,

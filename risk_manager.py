@@ -187,6 +187,17 @@ class RiskManager:
             if not config.mt5_initialize(mt5):
                 return 0.0
 
+            from step4_mt5_execution import resolve_mt5_deal_epoch_utc
+            live_tick = None
+            sym_tick_fn = getattr(mt5, "symbol_info_tick", None)
+            if callable(sym_tick_fn):
+                try:
+                    live_tick = sym_tick_fn(config.MT5_SYMBOL)
+                except Exception:
+                    live_tick = None
+            now_ep = now.timestamp()
+            day_start_ep = day_start.timestamp()
+
             tracked = _tracked_strategy_position_ids()
             if tracked:
                 unique = {}
@@ -202,19 +213,33 @@ class RiskManager:
                                else (position_id, getattr(deal, "time_msc",
                                                           getattr(deal, "time", ""))))
                         deal_ts = _deal_timestamp(deal)
-                        if deal_ts is not None and (
-                                deal_ts < day_start.timestamp()
-                                or deal_ts > now.timestamp()):
-                            continue
+                        if deal_ts is not None:
+                            deal_ts = resolve_mt5_deal_epoch_utc(
+                                deal_ts, now_ep, tick=live_tick, config_mod=config
+                            )
+                            if deal_ts < day_start_ep or deal_ts > now_ep:
+                                continue
                         unique[key] = deal
                 if unique:
                     return sum(_deal_value(deal) for deal in unique.values())
 
             # Compatibility fallback for a fresh installation with no tracked
             # position IDs. Filter out balance/deposit records by symbol and
-            # bot magic. Do not use a future wide end date: this terminal
-            # returns an empty result for that form.
-            deals = mt5.history_deals_get(day_start, now) or []
+            # bot magic. Shift query end bound when broker clock runs ahead of UTC
+            # (e.g. GMT+2/GMT+3) without passing an arbitrary distant year like 2100.
+            query_end = now
+            if live_tick is not None:
+                try:
+                    tmsc = int(getattr(live_tick, "time_msc", 0) or 0)
+                    tsec = float(getattr(live_tick, "time", 0) or 0.0)
+                    q_ep = (tmsc / 1000.0) if tmsc > 0 else tsec
+                    if q_ep > now_ep + 1800.0:
+                        k_tz = round((q_ep - now_ep) / 3600.0)
+                        if 1 <= k_tz <= 14:
+                            query_end = now + timedelta(seconds=k_tz * 3600)
+                except Exception:
+                    pass
+            deals = mt5.history_deals_get(day_start, query_end) or []
             return sum(
                 _deal_value(deal) for deal in deals
                 if getattr(deal, "symbol", "") == config.MT5_SYMBOL
