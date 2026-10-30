@@ -829,6 +829,9 @@ class MarketSnapshot:
     quality_evidence: Dict[str, Any] = field(default_factory=dict)
     # Non-executable alternatives retained for the evidence/shadow review.
     shadow_candidates: Dict[str, Any] = field(default_factory=dict)
+    # 2026-10-30 Step 3 institutional context: compact last-N candle structure + GC/CFD bridge.
+    recent_bars: Dict[str, Any] = field(default_factory=dict)
+    execution_bridge: Dict[str, Any] = field(default_factory=dict)
 
 
 # ----------------------------------------------------------------------------- #
@@ -6127,6 +6130,75 @@ def analyze_market(market_data: Dict[str, Any],
         "passive_limit_imbalance": float(getattr(level3, "passive_limit_imbalance", 0.0) or 0.0),
     }
 
+    _recent_bars: Dict[str, Any] = {}
+    try:
+        _max_b = max(5, min(50, int(getattr(config, "AI_MAX_PROMPT_BARS", 15) or 15)))
+        if candles is not None and hasattr(candles, "tail") and len(candles) > 0:
+            _tail_df = candles.tail(_max_b)
+            _bar_rows: List[Dict[str, Any]] = []
+            for _idx, _row in _tail_df.iterrows():
+                _o = float(_row.get("open", 0.0) or 0.0)
+                _h = float(_row.get("high", 0.0) or 0.0)
+                _l = float(_row.get("low", 0.0) or 0.0)
+                _c = float(_row.get("close", 0.0) or 0.0)
+                _v = float(_row.get("volume", 0.0) or 0.0)
+                _ts_lbl = (
+                    _idx.strftime("%H:%M") if hasattr(_idx, "strftime") else str(_idx)[-8:]
+                )
+                _bar_rows.append({
+                    "t": _ts_lbl,
+                    "o": round(_o, 2),
+                    "h": round(_h, 2),
+                    "l": round(_l, 2),
+                    "c": round(_c, 2),
+                    "v": round(_v, 1),
+                })
+            if _bar_rows:
+                _hi_p = max(b["h"] for b in _bar_rows)
+                _lo_p = min(b["l"] for b in _bar_rows)
+                _rng_p = max(0.0, _hi_p - _lo_p)
+                _recent_bars = {
+                    "count": len(_bar_rows),
+                    "up_bars": sum(1 for b in _bar_rows if b["c"] > b["o"]),
+                    "down_bars": sum(1 for b in _bar_rows if b["c"] < b["o"]),
+                    "net_change_pts": round(_bar_rows[-1]["c"] - _bar_rows[0]["o"], 2),
+                    "period_high": round(_hi_p, 2),
+                    "period_low": round(_lo_p, 2),
+                    "range_pts": round(_rng_p, 2),
+                    "close_pos_pct": round(
+                        100.0 * (_bar_rows[-1]["c"] - _lo_p) / _rng_p, 1
+                    ) if _rng_p > 1e-6 else 50.0,
+                    "bars": _bar_rows,
+                }
+    except Exception:
+        _recent_bars = {}
+
+    _execution_bridge: Dict[str, Any] = {
+        "data_symbol": str(market_data.get("data_symbol") or symbol),
+        "trade_symbol": str(market_data.get("trade_symbol") or ""),
+        "gc_price": round(float(price or 0.0), 2),
+        "gc_bid": round(float(bid or 0.0), 2),
+        "gc_ask": round(float(ask or 0.0), 2),
+        "gc_spread_pts": round(max(0.0, float((ask or 0.0) - (bid or 0.0))), 3) if (bid and ask) else 0.0,
+        "cfd_bid": None,
+        "cfd_ask": None,
+        "cfd_spread_pts": None,
+        "gc_minus_cfd_basis_pts": None,
+    }
+    try:
+        _cfd_b = market_data.get("cfd_bid")
+        _cfd_a = market_data.get("cfd_ask")
+        if _cfd_b is not None and _cfd_a is not None and float(_cfd_b) > 0 and float(_cfd_a) > 0:
+            _cb, _ca = float(_cfd_b), float(_cfd_a)
+            _cmid = 0.5 * (_cb + _ca)
+            _execution_bridge["cfd_bid"] = round(_cb, 2)
+            _execution_bridge["cfd_ask"] = round(_ca, 2)
+            _execution_bridge["cfd_spread_pts"] = round(max(0.0, _ca - _cb), 3)
+            if price > 0:
+                _execution_bridge["gc_minus_cfd_basis_pts"] = round(float(price) - _cmid, 2)
+    except Exception:
+        pass
+
     snapshot = MarketSnapshot(
         judge_votes=judge_panel,
         timestamp=now, price=price, bid=bid, ask=ask, volume=volume,
@@ -6136,6 +6208,8 @@ def analyze_market(market_data: Dict[str, Any],
         power_legacy={},
         shot=_shot, entry_simulation=_entry_simulation, escort=_escort,
         shadow_candidates=_merged_shadows,
+        recent_bars=_recent_bars,
+        execution_bridge=_execution_bridge,
         news=news, signal_strength=strength, signal_direction=direction,
         confidence=confidence, regime=regime, divergence=divergence,
         macro_bias=macro_bias_now,
@@ -6520,4 +6594,3 @@ if __name__ == "__main__":
     out_path.parent.mkdir(exist_ok=True)
     out_path.write_text(json_out)
     print(f"\nFull snapshot written to: {out_path}  ({len(json_out)} bytes)")
-

@@ -399,20 +399,146 @@ class AIDecisionEngine:
     except Exception:
         _TF_LABEL = "M5"
     SYSTEM_PROMPT = (
-        f"You are Captain 5 of Gold-BookMap v7.0 {_TF_LABEL} scalper. 4 other captains vote: "
-        "Flow 1.5x boss (CVD weighted small 0.3x big 1.5x last 5min 2x + footprint + OFI + microprice), "
-        "Whale 1.4x boss (net flow + iceberg persistence old walls >30min score>50k + distance close 2x + sweep), "
-        "Structure 1.2x RANGE/0.6x TREND (VWAP bands +1σ +2σ +2.5σ + POC/VAH/VAL + order blocks), "
-        "Trend 0.8x small (M5 1.2x boss M15 0.8x H1 0.4x). You AI 1.5x news+macro+confluence.\n"
-        "You get market snapshot JSON + 4 Teams scores + L3 Enhanced top 3 bids/asks size+dist% + net flow + top icebergs price+refills+age+score institutional vs noise + spoof + queue + OFI + imbalance + buy/sell streaks + recent 5 trades WIN/LOSS + GC vs CFD basis+spread + KillZone London 09-11 NY 14:30-16:30 Budapest trend 2x else RANGE VWAP 2x.\n"
-        "Vote -1.0 to +1.0 (-1 strong SELL, -0.5 weak SELL, 0 HOLD, +0.5 weak BUY, +1 strong BUY) + confidence 0-100 + rationale with L3.\n"
-        "Rules: +1.0 strong BUY = 3+ teams BUY + whale BUY old + net flow BUY>100 + VWAP -2σ or sweep bullish + no veto. +0.5 weak BUY = 2 teams BUY + whale BUY. 0 HOLD = confluence FAIL (<2 teams) or mixed or HIGH news <30min or spread>0.60 or basis fast widen>1%. -0.5 weak SELL = 2 teams SELL + whale SELL. -1.0 strong SELL = 3+ teams SELL + whale SELL old + net flow SELL<-100 + VWAP +2σ or sweep bearish.\n"
-        "NEWS: wars/risk-off -> bullish, Fed hawkish/strong dollar/high yields -> bearish, dovish/weak dollar/falling yields -> bullish, hot inflation/recession -> bullish hedge, risk-on -> neutral/bearish. If headlines stale, rely technicals.\n"
-        "L3: 250+ lots near price = strong support/resistance, iceberg age 2h score 132k institutional 2x vs 3min score 1.5k noise 0.5x ignore, sweep high 4392 vol 614% reversal = stop hunt SELL, sweep low = BUY.\n"
-        "Output JSON only: {\"vote\": -1.0 to +1.0, \"action\": \"BUY\"|\"SELL\"|\"HOLD\", \"confidence\": 0-100, \"rationale\": \"Flow SELL -0.32 Whale SELL -0.66 old iceberg 304 @4390.1 age 2.1h score 132k resistance + sweep high 4392 vol 614% + VWAP +2.1σ + KillZone OFF RANGE -> SELL\", \"teams_agree\": {\"flow\": -0.32, \"whale\": -0.66, \"structure\": 0.0, \"trend\": 0.13}}\n"
-        "Examples: SELL strong: price 4389.5 Flow -0.32 SELL CVD -288 44% Whale -0.66 SELL net flow -517 iceberg 304 @4390.1 age 2.1h score 132k + sweep bearish high 4392 vol 614% Structure SELL VWAP +2.1σ 4390 Trend NEUTRAL M5:DOWN KillZone OFF RANGE DXY +0.02% small RBA HIGH 376min GC 4389.5 vs CFD 4385.4 basis 4.1 spread 0.30 -> vote -1.0 action SELL conf 78. HOLD confluence FAIL: price 4381.65 Flow 0.00 NEUTRAL CVD 14 50% Whale -0.66 SELL imbalance -0.17 net flow BUY +285 mixed Structure 0.00 VWAP -1.15 not at band Trend +0.13 weak UP M5:DOWN KillZone OFF -> vote 0 HOLD conf 25. Bullish sweep BUY: low 4379 taken then close 4381.6 above recent low + vol 350% + iceberg support 164 @4381.8 age 1.5h score 85k + Flow BUY + Whale BUY + KillZone LONDON trend -> vote +1.0 BUY conf 80.\n"
-        "Think step by step: 1) Flow? 2) Whale old walls? 3) Structure VWAP bands? 4) Trend MTF? 5) KillZone? 6) World veto? 7) Confluence? Then vote. Temperature 0.2 deterministic."
+        f"You are Captain 5 of Gold-BookMap v7.0 {_TF_LABEL} scalper — the Institutional Meta-Labeling Doorman Gate.\n"
+        "YOUR ROLE (Lopez de Prado Meta-Labeling): Primary quantitative microstructure (signal_direction, active_family_summary across 5 independent families TAPE/BOOK/HIDDEN/MAP/WORLD, POWER v2, and SHOOTING plan) proposes the directional side. Your job is to APPROVE that side or VETO to HOLD.\n"
+        "HARD DOORMAN RULES:\n"
+        "1) SIDE DISCIPLINE: If signal_direction is BUY or SELL, output ONLY that same action (approve) or \"HOLD\" (veto). NEVER flip BUY->SELL or SELL->BUY. Weak, mixed, or <2 agreeing families MUST return \"HOLD\" (never output BUY/SELL on weak confluence).\n"
+        "2) SYMMETRIC REGIME LAW (TREND vs LAKE/RANGE): When regime is TREND or power.direction is UP (UPWARD_FORCE_DOMINATES / M5 UP), NEVER treat price above VWAP +1sigma/+2sigma, above Day POC, or resting top_asks as bearish SELL resistance (resting asks above an uptrend are normal limit targets). Symmetrically, when power.direction is DOWN (DOWNWARD_FORCE_DOMINATES / M5 DOWN), NEVER treat price below VWAP -1sigma/-2sigma, below Day POC, or resting top_bids as bullish BUY support. Mean-reversion fades at VWAP +-2sigma / VAH / VAL apply ONLY in RANGE (LAKE) regime when confirmed by sweep, passive absorption, or institutional iceberg.\n"
+        "3) INSTITUTIONAL L3 & BRIDGE: Weigh top_icebergs by age_sec and score (INSTITUTIONAL age_sec>=1800 or refills>=5 = real hidden liquidity; RECENT age_sec<180 = noise). Check recent_bars OHLCV momentum, execution_bridge (GC vs CFD basis/spread; veto HOLD if cfd_spread_pts>0.60), and recent_closed_trades WIN/LOSS streak (avoid repeating consecutive losing fades).\n"
+        "4) NEWS & MACRO: HIGH impact news <30min or BLACKOUT -> HOLD. Geopolitical risk-off/dovish/falling real yields -> bullish Gold; hawkish/rising real yields -> bearish Gold; if headlines stale, rely on live MBO flow & regime.\n"
+        "Output strict JSON only: {\"vote\": -1.0 to +1.0, \"action\": \"BUY\"|\"SELL\"|\"HOLD\", \"confidence\": 0-100, \"rationale\": \"<=28 words citing active families, POWER, L3/icebergs, and regime\", \"key_signals\": [\"...\"], \"risk_notes\": \"<=12 words\"}\n"
+        "Balanced Examples:\n"
+        "- BUY approve: signal_direction BUY, active_family_summary 3 families BUY (TAPE+BOOK+HIDDEN), power UP (UPWARD_FORCE_DOMINATES), recent_bars +4.2pts 10/15 up, iceberg bid @3990.5 refills=6 age_sec=2400 INSTITUTIONAL -> {\"vote\": 1.0, \"action\": \"BUY\", \"confidence\": 78, \"rationale\": \"3 families BUY + POWER UP + institutional bid iceberg @3990.5 + bullish M1 bar impulse in TREND -> BUY\", \"key_signals\": [\"3_families_buy\", \"power_up\", \"inst_iceberg_bid\"], \"risk_notes\": \"normal spread\"}\n"
+        "- SELL approve: signal_direction SELL, active_family_summary 3 families SELL (TAPE+HIDDEN+MAP), power DOWN (DOWNWARD_FORCE_DOMINATES), bearish sweep high + negative near_touch_ofi -> {\"vote\": -1.0, \"action\": \"SELL\", \"confidence\": 78, \"rationale\": \"3 families SELL + POWER DOWN + bearish liquidity sweep + negative MBO near-touch OFI -> SELL\", \"key_signals\": [\"3_families_sell\", \"power_down\", \"bear_sweep\"], \"risk_notes\": \"normal spread\"}\n"
+        "- HOLD veto: signal_direction BUY or NEUTRAL, <2 families agree, mixed OFI vs imbalance, or counter-trend VWAP band fade inside TREND -> {\"vote\": 0.0, \"action\": \"HOLD\", \"confidence\": 20, \"rationale\": \"Confluence fail (<2 families agree) and mixed MBO flow -> HOLD veto\", \"key_signals\": [\"confluence_fail\"], \"risk_notes\": \"mixed flow\"}\n"
+        "Temperature 0.2 deterministic."
     )
+
+    _FALLBACK_FAMILY_MAP: Dict[str, str] = {
+        "cvd_trend": "TAPE", "ofi": "TAPE", "footprint_delta": "TAPE",
+        "footprint_imbalance": "TAPE", "l3_net_flow": "TAPE", "l3_aggr_ratio": "TAPE",
+        "l3_streak": "TAPE", "microprice": "BOOK", "depth_imbalance": "BOOK",
+        "l3_imbalance": "BOOK", "book_absorption": "BOOK", "iceberg": "HIDDEN",
+        "l3_absorption": "HIDDEN", "spoof": "HIDDEN", "cvd_divergence": "HIDDEN",
+        "sweep": "MAP", "vwap_bands": "MAP", "vwap_trend": "MAP",
+        "value_area": "MAP", "order_block": "MAP", "round_level": "MAP",
+        "asia_breakout": "MAP", "mtf_align": "WORLD", "adx_di": "WORLD",
+        "ema_trend": "WORLD", "macro_bias": "WORLD", "cross_market": "WORLD",
+        "news_sentiment": "WORLD",
+    }
+
+    @classmethod
+    def _retired_judge_set(cls) -> set:
+        retired = {"whale_walls", "macro_dxy", "htf_poc", "l3_aggr_limit"}
+        try:
+            from judge_families import RETIRED as _jf_ret
+            retired |= set(_jf_ret)
+        except Exception:
+            pass
+        try:
+            retired |= set(getattr(config, "RETIRED_JUDGES", ()) or ())
+        except Exception:
+            pass
+        return retired
+
+    @classmethod
+    def _filter_active_judges_and_families(cls, judge_votes: Any) -> tuple:
+        if not isinstance(judge_votes, list):
+            return [], {}
+        retired = cls._retired_judge_set()
+        try:
+            from judge_families import JUDGE_FAMILY as _fam_map
+        except Exception:
+            _fam_map = cls._FALLBACK_FAMILY_MAP
+        active_votes: List[Dict[str, Any]] = []
+        fams: Dict[str, Dict[str, int]] = {}
+        for item in judge_votes:
+            if not isinstance(item, dict):
+                continue
+            jname = str(item.get("judge") or "").strip()
+            if not jname or jname in retired:
+                continue
+            raw_dir = item.get("direction", item.get("vote", 0))
+            if isinstance(raw_dir, str):
+                d_up = raw_dir.strip().upper()
+                v_sign = 1 if d_up == "BUY" else (-1 if d_up == "SELL" else 0)
+            else:
+                try:
+                    fv = float(raw_dir or 0.0)
+                    v_sign = 1 if fv > 0 else (-1 if fv < 0 else 0)
+                except Exception:
+                    v_sign = 0
+            fam = str(_fam_map.get(jname, "OTHER")).upper()
+            active_votes.append({
+                "judge": jname,
+                "family": fam,
+                "vote": v_sign,
+                "weight": round(float(item.get("weight", 1.0) or 1.0), 2),
+            })
+            if v_sign != 0 and fam in ("TAPE", "BOOK", "HIDDEN", "MAP", "WORLD"):
+                slot = fams.setdefault(fam, {"buy": 0, "sell": 0, "net": 0})
+                if v_sign > 0:
+                    slot["buy"] += 1
+                else:
+                    slot["sell"] += 1
+                slot["net"] = slot["buy"] - slot["sell"]
+        agree_buy = sum(1 for v in fams.values() if v["net"] > 0)
+        agree_sell = sum(1 for v in fams.values() if v["net"] < 0)
+        summary = {
+            "families": fams,
+            "agreeing_families_buy": agree_buy,
+            "agreeing_families_sell": agree_sell,
+            "active_judge_count": len(active_votes),
+        }
+        return active_votes, summary
+
+    @staticmethod
+    def _recent_closed_trades_for_prompt(snapshot: Any, limit: int = 5) -> List[Dict[str, Any]]:
+        """Return up to `limit` completed trades strictly at/before snapshot.timestamp."""
+        try:
+            from pathlib import Path
+            here_data = (Path(__file__).resolve().parent / "data").resolve()
+            data_dir = here_data
+            cfg_dir = getattr(config, "DATA_DIR", None)
+            if cfg_dir:
+                cand = Path(cfg_dir).resolve()
+                # Honor custom test/override DATA_DIR while keeping isolated rig copies self-contained
+                if cand != here_data and Path(config.__file__).resolve().parent == Path(__file__).resolve().parent:
+                    data_dir = cand
+            mem_file = data_dir / "trade_memory.json"
+            if not mem_file.is_file():
+                return []
+            raw = json.loads(mem_file.read_text(encoding="utf-8"))
+            closed = raw.get("closed") if isinstance(raw, dict) else None
+            if not isinstance(closed, list) or not closed:
+                return []
+            snap_ts = getattr(snapshot, "timestamp", None)
+            max_epoch = None
+            if isinstance(snap_ts, datetime):
+                aware = snap_ts if snap_ts.tzinfo else snap_ts.replace(tzinfo=timezone.utc)
+                max_epoch = aware.timestamp()
+            eligible = []
+            for rec in closed:
+                if not isinstance(rec, dict):
+                    continue
+                cts = rec.get("closed_ts")
+                if max_epoch is not None and cts is not None:
+                    try:
+                        if float(cts) > max_epoch:
+                            continue
+                    except Exception:
+                        pass
+                pnl = float(rec.get("pnl_pts", rec.get("gain_pts", 0.0)) or 0.0)
+                eligible.append({
+                    "side": str(rec.get("side", "") or "").upper(),
+                    "result": "WIN" if pnl > 0 else ("LOSS" if pnl < 0 else "FLAT"),
+                    "pnl_pts": round(pnl, 2),
+                    "exit_reason": str(rec.get("exit_reason", rec.get("reason", "")) or "")[:32],
+                    "closed_utc": str(rec.get("closed_utc", "") or ""),
+                })
+            return eligible[-max(1, int(limit)):]
+        except Exception:
+            return []
 
     # v5.2: Prompt cache for similar market conditions
     _PROMPT_CACHE = {"hash": None, "decision": None, "timestamp": None, "price": 0.0}
@@ -486,105 +612,197 @@ class AIDecisionEngine:
 
     # ------------------------------------------------------------------ #
     def build_prompt(self, snapshot) -> str:
-        """Serialize the MarketSnapshot into the prompt payload, plus the
-        session context (day of week, time, active trading session) so the AI
-        can weigh when we are trading — e.g. thin Asia ranges vs high-volume
-        London/New York moves.
+        """Serialize a compact, high-signal MarketSnapshot briefing for Step 3.
 
-        v5.2: Trimmed to 15 bars, 5 headlines, 3 zones, 100 L3 events for 4s latency
+        2026-10-30 Institutional Upgrade (G-03..G-06):
+        - Removes duplicate dicts (`power_v2`, `power_legacy`, `l3_summary`) and
+          12 KB of raw `level3.order_events` noise ("Lost in the Middle" fix).
+        - Filters retired judges out of `judge_votes`/`notes` and computes exact
+          `active_family_summary` (`TAPE`/`BOOK`/`HIDDEN`/`MAP`/`WORLD`).
+        - Enriches `top_icebergs` with `age_sec`, `score`, and `INSTITUTIONAL` tier.
+        - Includes `recent_bars` (last 15 OHLCV bars), `execution_bridge` (GC vs CFD),
+          and `recent_closed_trades` (last 5 WIN/LOSS when present).
         """
         from step2_market_analysis import snapshot_to_dict
         from session import session_context
         try:
             max_bars = int(getattr(config, "AI_MAX_PROMPT_BARS", 15))
             max_headlines = int(getattr(config, "AI_MAX_HEADLINES", 5))
-        except:
+        except Exception:
             max_bars = 15
             max_headlines = 5
 
         payload = snapshot_to_dict(snapshot)
 
-        # v5.8 L3 Enhanced: Trim + add L3 top levels, net flow, queue
-        if "news" in payload:
+        # 1) Remove exact duplicate / internal paper-audit blocks irrelevant to Step 3
+        for _drop_k in ("power_v2", "power_legacy", "entry_simulation", "escort",
+                        "shadow_candidates", "quality_evidence"):
+            payload.pop(_drop_k, None)
+        if isinstance(payload.get("power"), dict):
+            pw = payload["power"]
+            rd = pw.get("regime_diagnostics") if isinstance(pw.get("regime_diagnostics"), dict) else {}
+            payload["power"] = {
+                "timeframe": pw.get("timeframe"),
+                "direction": pw.get("direction"),
+                "up_power_pct": pw.get("up_power_pct"),
+                "down_power_pct": pw.get("down_power_pct"),
+                "activity": pw.get("activity"),
+                "reason_code": pw.get("reason_code"),
+                "power_streak_cycles": pw.get("power_streak_cycles", 0),
+                "market_regime": rd.get("market_regime", pw.get("market_regime")),
+                "breakout_confirmed": rd.get("breakout_confirmed", False),
+            }
+        if isinstance(payload.get("shot"), dict):
+            sh = payload["shot"]
+            vis = sh.get("visibility") if isinstance(sh.get("visibility"), dict) else {}
+            payload["shot"] = {
+                "shot": sh.get("shot"),
+                "side": sh.get("side"),
+                "entry_style": sh.get("entry_style"),
+                "entry": sh.get("entry"),
+                "stop": sh.get("stop"),
+                "target": sh.get("target"),
+                "rr": sh.get("rr"),
+                "reason": vis.get("primary_reason") or sh.get("reason") or sh.get("why"),
+            }
+
+        # 2) Filter retired toxic judges out of judge_votes and notes, and build active_family_summary
+        if "judge_votes" in payload:
+            active_jv, fam_summary = self._filter_active_judges_and_families(payload.get("judge_votes"))
+            payload["judge_votes"] = active_jv
+            payload["active_family_summary"] = fam_summary
+        if isinstance(payload.get("notes"), list):
+            retired_set = self._retired_judge_set()
+            clean_notes = []
+            for n in payload["notes"]:
+                ns = str(n)
+                low_n = ns.lower()
+                if any(rj in low_n for rj in retired_set) or "whale wall" in low_n or "day poc" in low_n:
+                    continue
+                clean_notes.append(ns)
+            payload["notes"] = clean_notes[:20]
+
+        # 3) Trim news, order blocks, footprint, and signal_map for high signal-to-noise
+        if isinstance(payload.get("news"), dict):
             if "news_headlines" in payload["news"]:
                 payload["news"]["news_headlines"] = payload["news"]["news_headlines"][:max_headlines]
             if "upcoming_events" in payload["news"]:
                 payload["news"]["upcoming_events"] = payload["news"]["upcoming_events"][:3]
-        if "order_blocks" in payload:
+        if isinstance(payload.get("order_blocks"), list):
             payload["order_blocks"] = payload["order_blocks"][:3]
-        if "footprint" in payload and "price_levels" in payload["footprint"]:
+        if isinstance(payload.get("footprint"), dict):
             fp = payload["footprint"]
-            if isinstance(fp.get("price_levels"), dict) and len(fp["price_levels"]) > 10:
+            fp.pop("buying_levels", None)
+            fp.pop("selling_levels", None)
+            if isinstance(fp.get("price_levels"), dict) and len(fp["price_levels"]) > 5:
                 try:
                     levels = fp["price_levels"]
-                    sorted_levels = sorted(levels.items(), key=lambda x: x[1].get("buy",0)+x[1].get("sell",0) if isinstance(x[1], dict) else 0, reverse=True)[:10]
+                    sorted_levels = sorted(
+                        levels.items(),
+                        key=lambda x: x[1].get("buy", 0) + x[1].get("sell", 0) if isinstance(x[1], dict) else 0,
+                        reverse=True,
+                    )[:5]
                     fp["price_levels"] = dict(sorted_levels)
-                except:
+                except Exception:
                     fp["price_levels"] = {}
-        if "level3" in payload:
-            if "order_events" in payload["level3"]:
-                payload["level3"]["order_events"] = payload["level3"]["order_events"][-100:]
-            if "order_book" in payload["level3"]:
-                ob = payload["level3"]["order_book"]
-                if isinstance(ob, dict):
-                    ob["bids"] = ob.get("bids", [])[:10]
-                    ob["asks"] = ob.get("asks", [])[:10]
-            # v5.8 Enhanced L3 summary for AI
+        if isinstance(payload.get("signal_map"), dict) and payload["signal_map"]:
+            sm = payload["signal_map"]
+            slim_sm: Dict[str, Any] = {}
+            for k in ("nearest_above", "nearest_below", "magnet_up", "magnet_down", "summary"):
+                if k in sm:
+                    slim_sm[k] = sm[k]
+            if not slim_sm:
+                for k, v in list(sm.items())[:4]:
+                    slim_sm[k] = v[:4] if isinstance(v, list) else v
+            payload["signal_map"] = slim_sm
+        if isinstance(payload.get("recent_bars"), dict) and isinstance(payload["recent_bars"].get("bars"), list):
+            payload["recent_bars"]["bars"] = payload["recent_bars"]["bars"][-max_bars:]
+            payload["recent_bars"]["count"] = len(payload["recent_bars"]["bars"])
+
+        # 4) Build enriched L3 summary (including iceberg age_sec + score) & strip 12 KB raw order_events
+        if isinstance(payload.get("level3"), dict):
+            l3 = payload["level3"]
             try:
-                l3 = payload["level3"]
-                # Top 3 L3 bid/ask levels by size
-                bids = sorted(l3.get("order_book", {}).get("bids", []), key=lambda x: x[1] if len(x)>1 else 0, reverse=True)[:3]
-                asks = sorted(l3.get("order_book", {}).get("asks", []), key=lambda x: x[1] if len(x)>1 else 0, reverse=True)[:3]
-                # Net aggressive flow
+                px_now = float(payload.get("price", 0) or 0)
+                bids = sorted(
+                    l3.get("order_book", {}).get("bids", []) if isinstance(l3.get("order_book"), dict) else [],
+                    key=lambda x: x[1] if len(x) > 1 else 0,
+                    reverse=True,
+                )[:3]
+                asks = sorted(
+                    l3.get("order_book", {}).get("asks", []) if isinstance(l3.get("order_book"), dict) else [],
+                    key=lambda x: x[1] if len(x) > 1 else 0,
+                    reverse=True,
+                )[:3]
                 buy_vol = float(l3.get("aggressive_buy_volume", 0) or 0)
                 sell_vol = float(l3.get("aggressive_sell_volume", 0) or 0)
                 net_flow = buy_vol - sell_vol
-                # Iceberg levels with refills
                 icebergs = l3.get("iceberg_levels", {}) or {}
-                top_icebergs = sorted(icebergs.items(), key=lambda kv: kv[1], reverse=True)[:3]
-                # Spoof levels
+                ice_meta = l3.get("iceberg_meta", {}) or {}
+                top_icebergs_raw = sorted(icebergs.items(), key=lambda kv: kv[1], reverse=True)[:4]
+                top_icebergs = []
+                for k, v in top_icebergs_raw:
+                    meta = ice_meta.get(k) or ice_meta.get(str(k)) or {}
+                    age_s = float(meta.get("age_sec", 0.0) or 0.0) if isinstance(meta, dict) else 0.0
+                    tot_sz = float(meta.get("total_size", 0.0) or 0.0) if isinstance(meta, dict) else 0.0
+                    sc_val = float(meta.get("score", tot_sz * max(int(v), 1)) or 0.0) if isinstance(meta, dict) else 0.0
+                    tier = "INSTITUTIONAL" if (age_s >= 1800.0 or int(v) >= 5) else ("NOISE" if (0.0 < age_s < 180.0 and int(v) < 3) else "ACTIVE")
+                    top_icebergs.append({
+                        "price": float(k),
+                        "side": "BID" if (px_now > 0 and float(k) <= px_now) else "ASK",
+                        "refills": int(v),
+                        "age_sec": round(age_s, 1),
+                        "total_size": round(tot_sz, 1),
+                        "score": round(sc_val, 1),
+                        "tier": tier,
+                    })
                 spoofs = l3.get("spoof_levels", {}) or {}
-                # Queue pos proxy: use imbalance + bid/ask ratio from order_flow if available
                 payload["l3_enhanced"] = {
-                    "top_bids": [{"price": float(p), "size": float(s), "dist_pct": round(abs(float(p)-float(payload.get("price",0)))/float(payload.get("price",1))*100,3) if payload.get("price") else 0} for p,s in bids],
-                    "top_asks": [{"price": float(p), "size": float(s), "dist_pct": round(abs(float(p)-float(payload.get("price",0)))/float(payload.get("price",1))*100,3) if payload.get("price") else 0} for p,s in asks],
-                    "net_aggressive_flow_M5": round(net_flow,1),
-                    "aggressive_buys": l3.get("aggressive_buys",0),
-                    "aggressive_sells": l3.get("aggressive_sells",0),
-                    "buy_volume": round(buy_vol,1),
-                    "sell_volume": round(sell_vol,1),
-                    "top_icebergs": [{"price": float(k), "refills": int(v)} for k,v in top_icebergs],
-                    "spoof_levels": [{"price": float(k), "count": int(v)} for k,v in list(spoofs.items())[:3]],
-                    "large_order_events": l3.get("large_order_events",0),
-                    "iceberg_events": l3.get("iceberg_events",0),
-                    "spoof_events": l3.get("spoof_events",0),
-                    "ofi_l3": l3.get("ofi",0),
-                    "imbalance": round(l3.get("order_book_imbalance",0),3),
-                    "buy_streak": l3.get("buy_streak",0),
-                    "sell_streak": l3.get("sell_streak",0),
+                    "top_bids": [{"price": float(p), "size": float(s), "dist_pct": round(abs(float(p) - px_now) / px_now * 100, 3) if px_now > 0 else 0} for p, s in bids],
+                    "top_asks": [{"price": float(p), "size": float(s), "dist_pct": round(abs(float(p) - px_now) / px_now * 100, 3) if px_now > 0 else 0} for p, s in asks],
+                    "net_aggressive_flow": round(net_flow, 1),
+                    "aggressive_buys": l3.get("aggressive_buys", 0),
+                    "aggressive_sells": l3.get("aggressive_sells", 0),
+                    "buy_volume": round(buy_vol, 1),
+                    "sell_volume": round(sell_vol, 1),
+                    "top_icebergs": top_icebergs,
+                    "spoof_levels": [{"price": float(k), "count": int(v)} for k, v in list(spoofs.items())[:3]],
+                    "near_touch_ofi": round(float(l3.get("near_touch_ofi", 0.0) or 0.0), 2),
+                    "near_large_order_events": int(l3.get("near_large_order_events", 0) or 0),
+                    "iceberg_events": l3.get("iceberg_events", 0),
+                    "spoof_events": l3.get("spoof_events", 0),
+                    "ofi_l3": round(float(l3.get("ofi", 0) or 0), 2),
+                    "imbalance": round(float(l3.get("order_book_imbalance", 0) or 0), 3),
+                    "buy_streak": l3.get("buy_streak", 0),
+                    "sell_streak": l3.get("sell_streak", 0),
                 }
-                # Keep old summary for backward compat
-                payload["l3_summary"] = payload["l3_enhanced"]
+                # Replace bulky raw level3 arrays with compact scalar counters only
+                payload["level3"] = {
+                    "market_orders": l3.get("market_orders", 0),
+                    "limit_orders": l3.get("limit_orders", 0),
+                    "absorption_events": l3.get("absorption_events", 0),
+                }
             except Exception as e:
-                try:
-                    payload["l3_summary"] = {
-                        "large_order_events": payload["level3"].get("large_order_events", 0),
-                        "iceberg_events": payload["level3"].get("iceberg_events", 0),
-                        "ofi_l3": payload["level3"].get("ofi", 0),
-                        "imbalance": payload["level3"].get("order_book_imbalance", 0),
-                        "error": str(e)[:100]
-                    }
-                except:
-                    pass
+                payload["l3_enhanced"] = {
+                    "iceberg_events": l3.get("iceberg_events", 0),
+                    "ofi_l3": l3.get("ofi", 0),
+                    "imbalance": l3.get("order_book_imbalance", 0),
+                    "error": str(e)[:100],
+                }
+
+        # 5) Attach last 5 closed trades (WIN/LOSS attribution) when present
+        recent_trades = self._recent_closed_trades_for_prompt(snapshot, limit=5)
+        if recent_trades:
+            payload["recent_closed_trades"] = recent_trades
 
         payload["session_context"] = session_context()
         return (
             self.SYSTEM_PROMPT + "\n\n"
             "TRADING SESSION CONTEXT (use this to judge volatility/liquidity):\n"
-            + json.dumps(payload["session_context"], indent=2) + "\n\n"
+            + json.dumps(payload["session_context"], separators=(",", ":")) + "\n\n"
             + _judge_report_card_block(snapshot)
             + "MARKET ANALYSIS METRICS (JSON) — trimmed to last {} bars, {} headlines for speed:\n".format(max_bars, max_headlines)
-            + json.dumps(payload, indent=2, default=str)
+            + json.dumps(payload, separators=(",", ":"), default=str)
         )
 
     def _prompt_hash(self, snapshot) -> str:
@@ -798,8 +1016,11 @@ class AIDecisionEngine:
                     cfg_kwargs: Dict[str, Any] = {
                         "automatic_function_calling": (
                             genai_types.AutomaticFunctionCallingConfig(disable=True)
-                        )
+                        ),
+                        "temperature": round(max(0.0, min(1.0, float(getattr(config, "AI_TEMPERATURE", 0.2) or 0.2))), 2),
                     }
+                    if bool(getattr(config, "AI_JSON_MODE_ENABLED", True)):
+                        cfg_kwargs["response_mime_type"] = "application/json"
                     raw_think = str(getattr(config, "GEMINI_THINKING_LEVEL", "low") or "").strip().lower()
                     m_low = str(model or "").lower()
                     request_config = None
@@ -827,7 +1048,12 @@ class AIDecisionEngine:
                                 cfg_kwargs.pop("thinking_config", None)
                                 request_config = None
                     if request_config is None:
-                        request_config = genai_types.GenerateContentConfig(**cfg_kwargs)
+                        try:
+                            request_config = genai_types.GenerateContentConfig(**cfg_kwargs)
+                        except Exception:
+                            cfg_kwargs.pop("response_mime_type", None)
+                            cfg_kwargs.pop("temperature", None)
+                            request_config = genai_types.GenerateContentConfig(**cfg_kwargs)
                     client = genai.Client(api_key=key,
                                           http_options=http_options)
                     try:
@@ -837,8 +1063,16 @@ class AIDecisionEngine:
                             config=request_config,
                         )
                     except Exception as first_exc:
-                        if "thinking" in str(first_exc).lower() and "thinking_config" in cfg_kwargs:
+                        low_first = str(first_exc).lower()
+                        if "thinking" in low_first and "thinking_config" in cfg_kwargs:
                             cfg_kwargs.pop("thinking_config", None)
+                            response = client.models.generate_content(
+                                model=model,
+                                contents=prompt,
+                                config=genai_types.GenerateContentConfig(**cfg_kwargs),
+                            )
+                        elif ("response_mime_type" in low_first or "mime" in low_first) and "response_mime_type" in cfg_kwargs:
+                            cfg_kwargs.pop("response_mime_type", None)
                             response = client.models.generate_content(
                                 model=model,
                                 contents=prompt,
@@ -994,42 +1228,43 @@ class AIDecisionEngine:
                         text = self._invoke_bounded(key, model, prompt, attempt_budget_s)
                         self._record_model_success(model)
                         action, confidence, rationale = self._parse_response(text)
-                        # v5.8 L3 Confidence Calibration
+                        # v5.8 / 2026-10-30 Symmetric Iceberg & Near-Touch L3 Confidence Calibration
                         try:
-                            if bool(getattr(config, "AI_CONF_CALIBRATION", True)) and action in ("BUY","SELL"):
+                            if bool(getattr(config, "AI_CONF_CALIBRATION", True)) and action in ("BUY", "SELL"):
                                 l3 = getattr(snapshot, "level3", None)
                                 of = getattr(snapshot, "order_flow", None)
                                 if l3 and of:
-                                    dir_sign = 1 if action=="BUY" else -1
-                                    net_flow = float(getattr(l3, "aggressive_buy_volume",0) - getattr(l3, "aggressive_sell_volume",0))
-                                    ofi_l3 = float(getattr(l3, "ofi",0) or 0)
-                                    whale_thr = float(getattr(config, "L3_WHALE_THRESHOLD",100.0))
-                                    price = float(getattr(snapshot, "price",0) or 0)
+                                    dir_sign = 1 if action == "BUY" else -1
+                                    net_flow = float(getattr(l3, "aggressive_buy_volume", 0) - getattr(l3, "aggressive_sell_volume", 0))
+                                    ofi_l3 = float(getattr(l3, "ofi", 0) or 0)
+                                    near_ofi = float(getattr(l3, "near_touch_ofi", 0.0) or 0.0)
+                                    ice_cnt = int(getattr(l3, "iceberg_events", 0) or 0)
+                                    whale_thr = float(getattr(config, "L3_WHALE_THRESHOLD", 100.0))
+                                    price = float(getattr(snapshot, "price", 0) or 0)
                                     whale_confirm = False
-                                    # Check whale in direction
                                     bids = getattr(l3, "order_book", {}).get("bids", []) if hasattr(l3, "order_book") else []
                                     asks = getattr(l3, "order_book", {}).get("asks", []) if hasattr(l3, "order_book") else []
-                                    if dir_sign>0:
-                                        # BUY needs bid whale + positive flow
-                                        has_whale_bid = any(s>=whale_thr and price>0 and abs(p-price)/price<=0.005 for p,s in bids)
-                                        if has_whale_bid and net_flow>50 and ofi_l3>0:
+                                    if dir_sign > 0:
+                                        has_near_bid = any(s >= whale_thr and price > 0 and abs(p - price) / price <= 0.0015 for p, s in bids)
+                                        has_inst_support = has_near_bid or (ice_cnt > 0 and near_ofi >= 0.0)
+                                        if has_inst_support and net_flow > 50 and ofi_l3 > 0:
                                             whale_confirm = True
                                     else:
-                                        has_whale_ask = any(s>=whale_thr and price>0 and abs(p-price)/price<=0.005 for p,s in asks)
-                                        if has_whale_ask and net_flow<-50 and ofi_l3<0:
+                                        has_near_ask = any(s >= whale_thr and price > 0 and abs(p - price) / price <= 0.0015 for p, s in asks)
+                                        has_inst_resist = has_near_ask or (ice_cnt > 0 and near_ofi <= 0.0)
+                                        if has_inst_resist and net_flow < -50 and ofi_l3 < 0:
                                             whale_confirm = True
-                                    boost = float(getattr(config, "AI_L3_CONF_BOOST",15.0))
-                                    penalty = float(getattr(config, "AI_L3_CONF_PENALTY",20.0))
+                                    boost = float(getattr(config, "AI_L3_CONF_BOOST", 15.0))
+                                    penalty = float(getattr(config, "AI_L3_CONF_PENALTY", 20.0))
                                     if whale_confirm:
                                         confidence = min(95.0, confidence + boost)
                                         rationale += f" [L3 CONFIRMS whale+flow+OFI +{boost:.0f}%]"
                                     else:
-                                        # Check conflict: whale opposite or depth-normalized flow/OFI opposite
                                         ofi_thr = compute_ofi_conflict_threshold(snapshot, config)
                                         conflict = False
-                                        if dir_sign>0 and (net_flow<-50 or ofi_l3<-ofi_thr):
+                                        if dir_sign > 0 and (net_flow < -50 or ofi_l3 < -ofi_thr):
                                             conflict = True
-                                        if dir_sign<0 and (net_flow>50 or ofi_l3>ofi_thr):
+                                        if dir_sign < 0 and (net_flow > 50 or ofi_l3 > ofi_thr):
                                             conflict = True
                                         if conflict:
                                             confidence = max(0.0, confidence - penalty)
@@ -1039,6 +1274,46 @@ class AIDecisionEngine:
                                                 rationale += " -> HOLD due L3 conflict"
                         except Exception as ce:
                             logger.debug("L3 conf calibration error: %s", ce)
+
+                        # 2026-10-30 G-01: Institutional Meta-Labeling Doorman Gate (Lopez de Prado AFML Ch.3)
+                        # Primary quantitative engine owns SIDE (BUY/SELL); Step 3 approves or vetoes (HOLD),
+                        # never flips BUY<->SELL (-85.5 pts, 30.0% WR over 10 days).
+                        try:
+                            sig_dir = str(getattr(snapshot, "signal_direction", "") or "").strip().upper()
+                            meta_gate_on = bool(getattr(config, "AI_DOORMAN_META_GATE_ENABLED", True))
+                            neutral_veto_on = bool(getattr(config, "AI_NEUTRAL_PANEL_VETO_ENABLED", False))
+                            if meta_gate_on and action in ("BUY", "SELL"):
+                                if sig_dir in ("BUY", "SELL") and action != sig_dir:
+                                    orig_act = action
+                                    action = "HOLD"
+                                    confidence = 0.0
+                                    rationale = (
+                                        (rationale or "").strip()
+                                        + f" [DOORMAN META-GATE: primary={sig_dir} conflicts with AI {orig_act} -> HOLD veto]"
+                                    ).strip()
+                                elif sig_dir == "NEUTRAL":
+                                    pw_dict = getattr(snapshot, "power", None) or {}
+                                    sh_map = getattr(snapshot, "shadow_candidates", None)
+                                    if isinstance(sh_map, dict):
+                                        sh_map["ai_neutral_panel_veto"] = {
+                                            "shadow_only": not neutral_veto_on,
+                                            "execution_enabled": neutral_veto_on,
+                                            "would_veto": True,
+                                            "ai_action": action,
+                                            "ai_confidence": round(float(confidence or 0.0), 1),
+                                            "power_direction": str(pw_dict.get("direction", "NEITHER") or "NEITHER").upper()
+                                            if isinstance(pw_dict, dict) else "NEITHER",
+                                        }
+                                    if neutral_veto_on:
+                                        orig_act = action
+                                        action = "HOLD"
+                                        confidence = 0.0
+                                        rationale = (
+                                            (rationale or "").strip()
+                                            + f" [DOORMAN META-GATE: primary=NEUTRAL vetoes standalone AI {orig_act} -> HOLD]"
+                                        ).strip()
+                        except Exception as mg_err:
+                            logger.debug("Doorman meta-gate error: %s", mg_err)
 
                         logger.info("STEP 3: Gemini -> %s @ %.1f%% (key #%d, %s)",
                                     action, confidence, key_index, model)

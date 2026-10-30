@@ -227,6 +227,14 @@ if [ "$PAPER_ONLY" = 0 ]; then
   else
     echo "[warn] audit_day.py not found - skipping 17-test day audit"
   fi
+  if [ -f judge_report_card.py ]; then
+    NEXT_AS_OF=$("$PY" -c "from datetime import date, timedelta; print((date.fromisoformat('$DATE') + timedelta(days=1)).isoformat())" 2>/dev/null || echo "")
+    if [ -n "$NEXT_AS_OF" ]; then
+      "$PY" judge_report_card.py --days 5 --as-of "$NEXT_AS_OF" || true
+    else
+      "$PY" judge_report_card.py --days 5 || true
+    fi
+  fi
   hr
   if [ -f tools/check_history.py ]; then
     GBM_NO_BROWSER=1 "$PY" tools/check_history.py --html | tee "data/history_summary_${DATE}.txt"

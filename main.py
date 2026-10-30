@@ -1161,9 +1161,12 @@ def _is_paid_ai_model_tag(m_tag: str) -> bool:
     )
 
 
+_LAST_PAID_AI_VETO: dict | None = None
+
+
 def _store_standing_ai_slip(decision, meta: dict, issued_epoch: float) -> None:
-    """Persist or clear the in-memory Standing AI Permission Slip."""
-    global _STANDING_AI_SLIP
+    """Persist or clear the in-memory Standing AI Permission Slip (and paid HOLD veto)."""
+    global _STANDING_AI_SLIP, _LAST_PAID_AI_VETO
     m_tag = str(getattr(decision, "model", "") or "")
     if not _is_paid_ai_model_tag(m_tag):
         return
@@ -1181,8 +1184,68 @@ def _store_standing_ai_slip(decision, meta: dict, issued_epoch: float) -> None:
             "price": float(meta.get("price", 0.0) or 0.0),
             "atr": float(meta.get("atr", 0.0) or 0.0),
         }
+        _LAST_PAID_AI_VETO = None
     else:
         _STANDING_AI_SLIP = None
+        _LAST_PAID_AI_VETO = {
+            "model": m_tag,
+            "issued_epoch": float(issued_epoch),
+            "regime": meta.get("regime", ""),
+            "power_dir": meta.get("power_dir", ""),
+            "rationale": str(getattr(decision, "rationale", "") or ""),
+        }
+
+
+def _active_paid_ai_veto_model(snapshot, now: float, effective_interval: float) -> str:
+    """Return the model tag of an active paid AI HOLD veto within throttle window, else ''."""
+    veto = _LAST_PAID_AI_VETO
+    if not isinstance(veto, dict) or _LAST_AI_CALL <= 0.0:
+        return ""
+    issued = float(veto.get("issued_epoch", 0.0) or 0.0)
+    if abs(issued - _LAST_AI_CALL) > 1.0:
+        return ""
+    age = now - issued
+    if age < 0.0 or age >= effective_interval:
+        return ""
+    live_reg = str(getattr(snapshot, "regime", "") or "").upper()
+    veto_reg = str(veto.get("regime", "") or "").upper()
+    if veto_reg in ("TREND", "RANGE") and live_reg in ("TREND", "RANGE") and live_reg != veto_reg:
+        return ""
+    pw = getattr(snapshot, "power", None) or {}
+    live_pdir = str(pw.get("direction", "") or "").upper() if isinstance(pw, dict) else ""
+    veto_pdir = str(veto.get("power_dir", "") or "").upper()
+    if veto_pdir in ("UP", "DOWN", "NEITHER") and live_pdir in ("UP", "DOWN") and live_pdir != veto_pdir:
+        return ""
+    return str(veto.get("model", "") or "")
+
+
+def _enrich_snapshot_execution_bridge(snapshot) -> None:
+    """Populate snapshot.execution_bridge with live MT5 CFD bid/ask/basis when already connected."""
+    try:
+        eb = getattr(snapshot, "execution_bridge", None)
+        if not isinstance(eb, dict):
+            return
+        if eb.get("cfd_bid") is not None and eb.get("cfd_ask") is not None:
+            return
+        import sys as _sys
+        _mt5 = _sys.modules.get("MetaTrader5")
+        if _mt5 is None or not hasattr(_mt5, "symbol_info_tick"):
+            return
+        sym = str(eb.get("trade_symbol") or getattr(config, "MT5_SYMBOL", "XAUUSD") or "XAUUSD")
+        tick = _mt5.symbol_info_tick(sym)
+        if tick is None:
+            return
+        cb = float(getattr(tick, "bid", 0.0) or 0.0)
+        ca = float(getattr(tick, "ask", 0.0) or 0.0)
+        if cb > 0.0 and ca > 0.0:
+            eb["cfd_bid"] = round(cb, 2)
+            eb["cfd_ask"] = round(ca, 2)
+            eb["cfd_spread_pts"] = round(max(0.0, ca - cb), 3)
+            gc_px = float(getattr(snapshot, "price", 0.0) or 0.0)
+            if gc_px > 0.0:
+                eb["gc_minus_cfd_basis_pts"] = round(gc_px - 0.5 * (cb + ca), 2)
+    except Exception:
+        pass
 
 
 def _evaluate_standing_ai_slip(snapshot, now: float, min_interval: float,
@@ -1342,6 +1405,7 @@ def run_step3(snapshot):
     import time as _time
     global _LAST_AI_CALL
 
+    _enrich_snapshot_execution_bridge(snapshot)
     strength = float(getattr(snapshot, "signal_strength", 0.0) or 0.0)
     min_strength = config.AI_MIN_SIGNAL_STRENGTH
     min_interval = config.AI_MIN_INTERVAL_MINUTES * 60.0
@@ -1405,6 +1469,10 @@ def run_step3(snapshot):
                 action="HOLD", confidence=0.0,
                 rationale=f"AI throttled ({wait:.0f} min until next call)",
                 model="none-throttled")
+            veto_m = _active_paid_ai_veto_model(snapshot, now, effective_interval)
+            if veto_m:
+                decision.paid_ai_veto_active = True
+                decision.paid_ai_veto_model = veto_m
             _record("STEP 3  AI DECISION",
                     f"HOLD (AI throttled, {wait:.0f} min until next call)")
             return decision
@@ -1537,13 +1605,42 @@ def _shooting_execution_gate(decision, snapshot):
                     getattr(config, "POWER_LEAD_ENABLED", True))
                 _shadow_on = _as_flag(
                     getattr(config, "POWER_LEAD_SHADOW_ENABLED", True))
+                _respect_paid_veto = _as_flag(
+                    getattr(config, "AI_RESPECT_PAID_HOLD_VETO", True))
+                _dec_model = str(getattr(decision, "model", "") or "").strip()
+                _is_explicit_ai_model = bool(
+                    _dec_model
+                    and not _dec_model.startswith("none-")
+                    and not _dec_model.startswith("fallback-")
+                    and not _dec_model.startswith("power-lead")
+                )
+                _paid_veto_active = bool(getattr(decision, "paid_ai_veto_active", False))
+                _veto_label = (
+                    _dec_model if _is_explicit_ai_model
+                    else str(getattr(decision, "paid_ai_veto_model", "") or "paid-ai")
+                )
+                _explicit_paid_hold_veto = _respect_paid_veto and (
+                    _is_explicit_ai_model or _paid_veto_active
+                )
                 _cdir = str(getattr(snapshot, "signal_direction", "") or "").upper()
                 _expected_action = "BUY" if _pd == "UP" else "SELL"
                 _agree = _cdir not in ("BUY", "SELL") or _cdir == _expected_action
                 _passed = (_power_confidence_valid and _live_threshold_valid
-                           and _pc >= _old_gate)
+                           and _pc >= _old_gate and not _explicit_paid_hold_veto)
 
-                if _passed:
+                if _explicit_paid_hold_veto and _power_confidence_valid and _live_threshold_valid and _pc >= _old_gate:
+                    try:
+                        decision.decision_source = "AI_EXPLICIT_HOLD_VETO"
+                    except Exception:
+                        pass
+                    try:
+                        _record("STEP 3  AI VETO",
+                                "explicit AI HOLD veto respected ({}) — POWER carry suppressed "
+                                "(conf {:.1f} >= {:.1f}, POWER {})".format(
+                                    _veto_label, _pc, _old_gate, _pd))
+                    except Exception:
+                        pass
+                elif _passed:
                     # Preserve the pre-existing configured-threshold carry path;
                     # only the former sub-threshold extension becomes shadow-only.
                     try:
@@ -3197,8 +3294,53 @@ def _session_end_summary() -> None:
                 c["iterations"], c["decisions"], c["executed"], c["ai_calls"], ymd, ymd, iso)
 
 
+def _ensure_judge_report_card_ready() -> None:
+    """Refresh data/judge_report_card.json on session start from prior completed judge_panel_*.csv files."""
+    try:
+        data_dir = Path(getattr(config, "DATA_DIR", DATA_DIR))
+        if not data_dir.is_dir() or not any(data_dir.glob("judge_panel_*.csv")):
+            return
+        today_utc = datetime.now(timezone.utc).date().isoformat()
+        card_path = data_dir / "judge_report_card.json"
+        needs_build = not card_path.is_file()
+        if not needs_build:
+            try:
+                existing = json.loads(card_path.read_text(encoding="utf-8"))
+                src_days = [str(d) for d in (existing.get("source_days") or [])]
+                if not src_days or any(d >= today_utc for d in src_days):
+                    needs_build = True
+                else:
+                    from datetime import date as _dt_date
+                    age_d = (_dt_date.fromisoformat(today_utc) - _dt_date.fromisoformat(max(src_days))).days
+                    if age_d > 3:
+                        needs_build = True
+            except Exception:
+                needs_build = True
+        if needs_build:
+            import judge_report_card as _jrc
+            used_days, judges, _ = _jrc.build_card(data_dir, today_utc, 5, 20)
+            if used_days and judges:
+                payload = {
+                    "schema_version": "1.0",
+                    "built_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "as_of": today_utc,
+                    "window_days_requested": 5,
+                    "min_scored_floor": 20,
+                    "source_days": sorted(used_days),
+                    "judges": judges,
+                }
+                tmp_p = card_path.with_suffix(".json.tmp")
+                tmp_p.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+                tmp_p.replace(card_path)
+                logger.info("STEP 3: refreshed judge_report_card.json (%d judges from %s..%s)",
+                            len(judges), min(used_days), max(used_days))
+    except Exception as exc:
+        logger.debug("judge_report_card startup refresh skipped: %s", exc)
+
+
 def _log_session_start(mode: str) -> None:
     """The day's opening line: what this run is, with which rules, on which data."""
+    _ensure_judge_report_card_ready()
     logger.info("SESSION START | mode=%s pid=%d | gate=%s ai_gate=%s spread=%s window=%ss "
                 "depth=%s | %s -> %s",
                 mode, os.getpid(),
@@ -3377,4 +3519,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-

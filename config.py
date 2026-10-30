@@ -603,8 +603,17 @@ def _refresh() -> None:
     g["AI_FALLBACK_STRENGTH"] = _ffloat("AI_FALLBACK_STRENGTH", 35.0)
     g["AI_FALLBACK_CONFIDENCE"] = _ffloat("AI_FALLBACK_CONFIDENCE", 70.0)
     g["AI_CACHE_MINUTES"] = _fint("AI_CACHE_MINUTES", 10)
-    g["AI_MAX_PROMPT_BARS"] = _fint("AI_MAX_PROMPT_BARS", 20)
-    g["AI_MAX_HEADLINES"] = _fint("AI_MAX_HEADLINES", 3)
+    g["AI_MAX_PROMPT_BARS"] = max(5, min(50, _fint("AI_MAX_PROMPT_BARS", 15)))
+    g["AI_MAX_HEADLINES"] = max(1, min(15, _fint("AI_MAX_HEADLINES", 5)))
+    g["AI_TEMPERATURE"] = max(0.0, min(1.0, _ffloat("AI_TEMPERATURE", 0.2)))
+    g["AI_JSON_MODE_ENABLED"] = _fget("AI_JSON_MODE_ENABLED", "1") == "1"
+    # 2026-10-30 Step 3 Institutional Doorman (Meta-Labeling + Monotonic Veto Invariance):
+    # - AI_DOORMAN_META_GATE_ENABLED=1: primary panel owns side (BUY/SELL); opposite AI side -> fail-closed HOLD veto.
+    # - AI_NEUTRAL_PANEL_VETO_ENABLED=0: shadow-first (Law #5) when primary panel is NEUTRAL.
+    # - AI_RESPECT_PAID_HOLD_VETO=1: POWER carry never overrides an explicit real/cached AI HOLD veto.
+    g["AI_DOORMAN_META_GATE_ENABLED"] = _fget("AI_DOORMAN_META_GATE_ENABLED", "1") == "1"
+    g["AI_NEUTRAL_PANEL_VETO_ENABLED"] = _fget("AI_NEUTRAL_PANEL_VETO_ENABLED", "0") == "1"
+    g["AI_RESPECT_PAID_HOLD_VETO"] = _fget("AI_RESPECT_PAID_HOLD_VETO", "1") == "1"
     # v5.8 L3 Enhanced AI
     g["AI_L3_TOP_LEVELS"] = _fint("AI_L3_TOP_LEVELS", 3)  # top 3 L3 levels in prompt
     g["AI_FALLBACK_L3_ENABLED"] = _fget("AI_FALLBACK_L3_ENABLED", "1") == "1"
@@ -795,4 +804,3 @@ def credentials_configured() -> dict:
         "mt5": bool((MT5_LOGIN == 0 and MT5_SYMBOL) or (MT5_LOGIN and MT5_PASSWORD and MT5_SERVER)),
         "bookmap": True,  # file-based, no key needed — BookMap itself holds the Rithmic login
     }
-

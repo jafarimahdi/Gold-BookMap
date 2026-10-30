@@ -78,7 +78,8 @@ def _cme_trade_day(et: datetime) -> str:
 
 def _path(data_dir) -> Path:
     try:
-        if data_dir in (None, "", "data", Path("data")):
+        repo_data = (Path(__file__).resolve().parent / "data").resolve()
+        if data_dir in (None, "", "data", Path("data")) or Path(data_dir).resolve() == repo_data:
             import config as _cfg
             cfg_dir = getattr(_cfg, "DATA_DIR", None)
             if cfg_dir:
