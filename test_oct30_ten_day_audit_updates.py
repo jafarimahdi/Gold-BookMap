@@ -91,8 +91,10 @@ def test_u01_retired_judges_union_and_notes_preserved(monkeypatch):
     tr = s2.TrendMetrics()
     of = _mk_of(microprice=4200.5, mid_price=4200.0, bid_ask_ratio=1.5)
     fp = s2.FootprintMetrics()
-    l3 = s2.Level3Events(order_book={"bids": [(4199.9, 20.0)], "asks": [(4200.1, 10.0)]},
-                         iceberg_levels={4199.5: 4})
+    # Balanced top-of-book (10 vs 10) keeps active l3_imbalance silent under both
+    # V6_4TEAMS_ENABLED=false (.env) and true, while iceberg count=2 wakes queue_pos note.
+    l3 = s2.Level3Events(order_book={"bids": [(4199.9, 10.0)], "asks": [(4200.1, 10.0)]},
+                         iceberg_levels={4199.5: 2})
     vp = s2.VolumeProfileMetrics(poc=4195.0, vwap=4199.5)
     mac = s2.MacroMetrics()
     nw = s2.NewsAndEvents()
@@ -118,8 +120,8 @@ def test_u01_retired_judges_union_and_notes_preserved(monkeypatch):
     assert "vwap_trend" in panel_t
 
 
-def test_u02_family_gate_shadow_default_and_v6_4teams_domain_partition():
-    """U-02 + U-04: FAMILY_GATE is shadow-only by default; V6_4TEAMS partitions real domains cleanly."""
+def test_u02_family_gate_shadow_default_and_v6_4teams_domain_partition(monkeypatch):
+    """U-02 + U-04: FAMILY_GATE is shadow-only by default; classical & V6_4TEAMS modes both work cleanly."""
     assert config.FAMILY_GATE_SHADOW_ENABLED is True
     assert config.FAMILY_GATE_LIVE_ENABLED is False
     assert config.LEGACY_GHOST_VOTES_ENABLED is False
@@ -139,21 +141,32 @@ def test_u02_family_gate_shadow_default_and_v6_4teams_domain_partition():
     mac = s2.MacroMetrics()
     nw = s2.NewsAndEvents()
 
-    # Fewer than 15 votes total, yet flow + whale + structure agree -> BUY (no votes[15:35] wipeout!)
-    _, direction, conf, notes = eng.aggregate(
-        4200.0, vol, tr, of, fp, l3, vp, mac, nw, regime="RANGE",
-    )
-    assert direction == "BUY"
-    assert conf >= 55.0
-    assert any("v6.0 Confluence BUY:" in n for n in notes)
+    # 1) Classical weighted mode (owner Windows .env V6_4TEAMS_ENABLED=false)
+    with monkeypatch.context() as mp:
+        mp.setattr(config, "V6_4TEAMS_ENABLED", False)
+        _, dir_cls, conf_cls, _ = eng.aggregate(
+            4200.0, vol, tr, of, fp, l3, vp, mac, nw, regime="RANGE",
+        )
+        assert dir_cls == "BUY"
+        assert conf_cls >= 55.0
 
-    # Opposing World (high-impact bearish news <=120m) triggers real v6.0 World veto -> NEUTRAL!
-    nw_opp = s2.NewsAndEvents(sentiment_score=-0.95, impact_level="HIGH", minutes_to_next_event=15.0)
-    _, dir_veto, _, notes_veto = eng.aggregate(
-        4200.0, vol, tr, of, fp, l3, vp, mac, nw_opp, regime="RANGE",
-    )
-    assert any("v6.0 World veto:" in n for n in notes_veto)
-    assert dir_veto == "NEUTRAL"
+    # 2) V6 4-Teams mode: fewer than 15 votes total, yet flow + whale + structure agree -> BUY
+    with monkeypatch.context() as mp:
+        mp.setattr(config, "V6_4TEAMS_ENABLED", True)
+        _, direction, conf, notes = eng.aggregate(
+            4200.0, vol, tr, of, fp, l3, vp, mac, nw, regime="RANGE",
+        )
+        assert direction == "BUY"
+        assert conf >= 55.0
+        assert any("v6.0 Confluence BUY:" in n for n in notes)
+
+        # Opposing World (high-impact bearish news <=120m) triggers real v6.0 World veto -> NEUTRAL!
+        nw_opp = s2.NewsAndEvents(sentiment_score=-0.95, impact_level="HIGH", minutes_to_next_event=15.0)
+        _, dir_veto, _, notes_veto = eng.aggregate(
+            4200.0, vol, tr, of, fp, l3, vp, mac, nw_opp, regime="RANGE",
+        )
+        assert any("v6.0 World veto:" in n for n in notes_veto)
+        assert dir_veto == "NEUTRAL"
 
     # Direct family_gate check on single-family vs 2-family panels
     fg_1 = judge_families.family_gate(
