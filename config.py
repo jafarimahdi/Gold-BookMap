@@ -410,11 +410,23 @@ def _refresh() -> None:
     g["L3_LARGE_ORDER_LOTS"] = _ffloat("L3_LARGE_ORDER_LOTS", 5.0)
     # 24u + C1/C2 owner decision (2026-10-29): retired directional judges (walls &
     # HTF POC remain active as structural map doors and PositionManager anchors).
-    g["RETIRED_JUDGES"] = set(
-        x.strip() for x in _fget(
-            "RETIRED_JUDGES",
-            "macro_yield,macro_dxy,macro_vix,vwap_zscore,spoof_invert_loose,"
-            "iceberg_legacy,l3_ofi_streak,delta_pressure,whale_walls,htf_poc").split(",") if x.strip())
+    # Even if an older local .env already defines RETIRED_JUDGES without whale_walls
+    # or htf_poc, union the mature clock cuts in unless RETIRED_JUDGES is blank/none
+    # or a judge is explicitly listed in UNRETIRE_JUDGES.
+    _retired_raw = _fget(
+        "RETIRED_JUDGES",
+        "macro_yield,macro_dxy,macro_vix,vwap_zscore,spoof_invert_loose,"
+        "iceberg_legacy,l3_ofi_streak,delta_pressure,whale_walls,htf_poc",
+    ).strip()
+    if _retired_raw.lower() in ("", "none", "0", "off"):
+        _retired_set = set()
+    else:
+        _retired_set = {x.strip() for x in _retired_raw.split(",") if x.strip()}
+        _unretire = {
+            x.strip() for x in _fget("UNRETIRE_JUDGES", "").split(",") if x.strip()
+        }
+        _retired_set |= ({"macro_dxy", "whale_walls", "htf_poc"} - _unretire)
+    g["RETIRED_JUDGES"] = _retired_set
     # 24u: the macro OPPOSITION BRAKE is separate from the macro VOTES. Retiring the
     # macro judges removes their votes; this keeps the brake. 0 disables it loudly.
     g["MACRO_BRAKE_ENABLED"] = _fget("MACRO_BRAKE_ENABLED", "1") == "1"

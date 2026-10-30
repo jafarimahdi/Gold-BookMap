@@ -420,8 +420,8 @@ def test_fix7_book_probe_cme_calibration_and_live_data_invariance(monkeypatch, t
     assert _dir_fingerprint(_REPO_ROOT / "logs") == before_logs
 
 
-def test_fix8_part_c_judges_c1_c2_cut_and_chop_deadbands():
-    """#9: C1 whale_walls & C2 htf_poc retired from directional voting while remaining map doors; L3 chop deadband active."""
+def test_fix8_part_c_judges_c1_c2_cut_and_chop_deadbands(monkeypatch):
+    """#9: C1 whale_walls & C2 htf_poc retired from directional voting (even with pre-Oct-29 .env RETIRED_JUDGES) while remaining map doors; chop deadbands active."""
     import judge_families
     import judge_panel as jp_mod
     import step2_market_analysis as s2
@@ -430,6 +430,43 @@ def test_fix8_part_c_judges_c1_c2_cut_and_chop_deadbands():
     assert "htf_poc" in config.RETIRED_JUDGES
     assert "whale_walls" in judge_families.RETIRED
     assert "htf_poc" in judge_families.RETIRED
+
+    # Simulate an older local .env that had RETIRED_JUDGES before C2 htf_poc matured:
+    try:
+        monkeypatch.setenv(
+            "RETIRED_JUDGES",
+            "macro_yield,macro_dxy,macro_vix,vwap_zscore,spoof_invert_loose,iceberg_legacy,l3_ofi_streak,delta_pressure,whale_walls",
+        )
+        monkeypatch.delenv("UNRETIRE_JUDGES", raising=False)
+        config._refresh()
+        assert "whale_walls" in config.RETIRED_JUDGES
+        assert "htf_poc" in config.RETIRED_JUDGES
+
+        # Explicit UNRETIRE_JUDGES still works if the owner intentionally re-enables one:
+        monkeypatch.setenv("UNRETIRE_JUDGES", "htf_poc")
+        config._refresh()
+        assert "htf_poc" not in config.RETIRED_JUDGES
+
+        # Verify clean code-level defaults independent of any owner .env weight overrides:
+        for k in (
+            "L3_IMB_DEADBAND",
+            "FOOTPRINT_DELTA_DEADBAND",
+            "VOLUME_ROC_MIN_PCT",
+            "SIGNAL_W_TREND",
+            "SIGNAL_W_L3_OFI",
+            "V6_VWAP_BAND_1SIG_WEIGHT",
+        ):
+            monkeypatch.delenv(k, raising=False)
+        config._refresh()
+        assert config.L3_IMB_DEADBAND == pytest.approx(0.12)
+        assert config.FOOTPRINT_DELTA_DEADBAND == pytest.approx(0.08)
+        assert config.VOLUME_ROC_MIN_PCT == pytest.approx(0.35)
+        assert config.SIGNAL_W_TREND == pytest.approx(1.0)
+        assert config.SIGNAL_W_L3_OFI == pytest.approx(0.8)
+        assert config.V6_VWAP_BAND_1SIG_WEIGHT == pytest.approx(0.8)
+    finally:
+        monkeypatch.undo()
+        config._refresh()
 
     # Panel parsers exclude retired C1 whale_walls and C2 htf_poc directional votes:
     notes = [
@@ -443,14 +480,6 @@ def test_fix8_part_c_judges_c1_c2_cut_and_chop_deadbands():
         assert "whale_walls" not in names
         assert "htf_poc" not in names
         assert names == ["l3_net_flow"]
-
-    # Multi-day-proven noise deadbands are live while 1-day speculative weight shifts stay untouched:
-    assert config.L3_IMB_DEADBAND == pytest.approx(0.12)
-    assert config.FOOTPRINT_DELTA_DEADBAND == pytest.approx(0.08)
-    assert config.VOLUME_ROC_MIN_PCT == pytest.approx(0.35)
-    assert config.SIGNAL_W_TREND == pytest.approx(1.0)
-    assert config.SIGNAL_W_L3_OFI == pytest.approx(0.8)
-    assert config.V6_VWAP_BAND_1SIG_WEIGHT == pytest.approx(0.8)
 
 
 def test_fix9_part_c_power_flat_lake_guard_and_shooting_class_floor(monkeypatch):

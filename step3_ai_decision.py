@@ -348,7 +348,7 @@ def _judge_report_card_block(snapshot=None):
             try:
                 from judge_families import RETIRED as _RETIRED_JUDGES
             except Exception:
-                _RETIRED_JUDGES = frozenset({"whale_walls", "macro_dxy"})
+                _RETIRED_JUDGES = frozenset({"whale_walls", "macro_dxy", "htf_poc"})
             judges = []
             for j in (card.get("judges") or []):
                 try:
