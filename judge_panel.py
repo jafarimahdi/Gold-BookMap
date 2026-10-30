@@ -92,9 +92,9 @@ def parse_judge_panel(notes: List[str]) -> List[Dict[str, Any]]:
             m = _re.search(pat, note)
             if not m:
                 continue
-            if judge in ("whale_walls", "whale_balanced", "macro_dxy"):
-                # gates:v1 + 2026-10-26 -- whale_walls/whale_balanced (C1 clock) and
-                # macro_dxy (5d DXY drift deleted from M3 scalper) no longer emit votes.
+            if judge in ("whale_walls", "whale_balanced", "macro_dxy", "htf_poc"):
+                # gates:v1 + C1/C2 owner decision -- whale_walls (C1), htf_poc (C2),
+                # and macro_dxy no longer emit directional votes (walls/htf_poc stay map doors).
                 continue
             d, w = 0.0, 0.0
             g = m.groups()

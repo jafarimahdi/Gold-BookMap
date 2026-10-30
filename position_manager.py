@@ -137,7 +137,7 @@ import json
 import logging
 import math
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -678,6 +678,48 @@ class PositionManager:
         local_time = str(getattr(config, "PM_DAILY_FLATTEN_LOCAL", "") or "").strip()
         cfg_time = str(getattr(config, "PM_DAILY_FLATTEN_UTC", "") or "").strip()
         now = now or datetime.now(timezone.utc)
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+        if cfg_time:
+            try:
+                hh, mm = (int(x) for x in cfg_time.split(":")[:2])
+                flatten_at_utc = now.astimezone(timezone.utc).replace(
+                    hour=hh, minute=mm, second=0, microsecond=0
+                )
+                if now.astimezone(timezone.utc) >= flatten_at_utc:
+                    return (f"daily flatten {cfg_time} UTC — closing before the "
+                            f"CFD break (a gap can jump over a stop)")
+            except ValueError:
+                return ""
+            return ""
+
+        # Pre-break protection: CME Gold / XAUUSD closes daily 17:00-18:00 America/New_York
+        # (21:00-22:00 UTC in EDT, including EU/US DST split week; 22:00-23:00 UTC in EST).
+        # Flatten PM_PRE_CME_BREAK_MINUTES (default 5m) BEFORE 17:00 NY so open positions
+        # never ride into a closed CFD break.
+        try:
+            pre_min = float(getattr(config, "PM_PRE_CME_BREAK_MINUTES", 5.0) or 0.0)
+        except (TypeError, ValueError):
+            pre_min = 0.0
+        if pre_min > 0.0 and now.astimezone(timezone.utc).weekday() in {0, 1, 2, 3, 4}:
+            try:
+                from session import cme_daily_break_utc_window
+                b_start, b_end = cme_daily_break_utc_window(now)
+                bh, bm = (int(x) for x in b_start.split(":")[:2])
+                eh, em = (int(x) for x in b_end.split(":")[:2])
+                u_now = now.astimezone(timezone.utc)
+                break_start_dt = u_now.replace(hour=bh, minute=bm, second=0, microsecond=0)
+                break_end_dt = u_now.replace(hour=eh, minute=em, second=0, microsecond=0)
+                pre_start_dt = break_start_dt - timedelta(minutes=pre_min)
+                if pre_start_dt <= u_now < break_end_dt:
+                    return (
+                        f"daily flatten pre-break ({pre_start_dt:%H:%M} UTC / "
+                        f"{pre_min:.0f}m before {b_start}-{b_end} UTC CME CFD break) — "
+                        f"closing before the CFD break (a gap can jump over a stop)"
+                    )
+            except Exception:
+                pass
+
         if local_time:
             try:
                 hh, mm = (int(x) for x in local_time.split(":")[:2])
@@ -697,16 +739,6 @@ class PositionManager:
                             f"({flatten_at.astimezone(timezone.utc):%H:%M} UTC today) — "
                             f"closing before the CFD break (a gap can jump over a stop)")
                 return ""
-        if not cfg_time:
-            return ""
-        try:
-            hh, mm = (int(x) for x in cfg_time.split(":")[:2])
-        except ValueError:
-            return ""
-        flatten_at = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
-        if now >= flatten_at:
-            return (f"daily flatten {cfg_time} UTC — closing before the "
-                    f"CFD break (a gap can jump over a stop)")
         return ""
 
     def _base_ctx(self, position, tick, info) -> dict:
@@ -984,6 +1016,15 @@ class PositionManager:
                 logger.error("PM: position query failed: %s", exc)
                 return
             if not positions:
+                flatten_reason = self._session_flatten_due()
+                if flatten_reason:
+                    _day_key = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                    if getattr(self, "_last_flat_receipt_day", "") != _day_key:
+                        self._last_flat_receipt_day = _day_key
+                        logger.info(
+                            "PM: %s (0 open bot positions; account already flat)",
+                            flatten_reason,
+                        )
                 self._prune_state(set())
                 return
             tick = self._mt5.symbol_info_tick(self.symbol)
@@ -1166,9 +1207,17 @@ class PositionManager:
         st["last_tp"] = float(cur_tp)
         st["last_volume"] = float(volume)
 
-        # ---- structural stops from the fresh snapshot ----------------------
+        # ---- structural + C3 wall stops from the fresh snapshot ------------
         s_sl, s_tp, _notes = compute_structural_stops(
             "BUY" if is_buy else "SELL", price, atr, snapshot)
+        w_sl, w_tp = None, None
+        if bool(getattr(config, "PM_C3_WALL_TRAIL_ENABLED", True)):
+            try:
+                from wall_brackets import compute_wall_brackets
+                w_sl, w_tp, _ = compute_wall_brackets(
+                    "BUY" if is_buy else "SELL", price, atr, snapshot, cfd_spread=spread)
+            except Exception:
+                w_sl, w_tp = None, None
 
         # ================= RULES: EXITS FIRST ================= #
         # 0) v4.2 NEWS — a HIGH-impact event is minutes away (flatten mode)
@@ -1269,8 +1318,12 @@ class PositionManager:
                 # candidates (BE / PROFIT_LOCK protect the remaining half)
 
         # ================= RULES: SL/TP UPDATES ================= #
-        if now - float(st.get("last_modify_ts", 0.0)) < \
-                config.PM_MODIFY_COOLDOWN_SECONDS:
+        eff_mod_cd = (
+            float(getattr(config, "PM_BURST_MODIFY_COOLDOWN_SECONDS", 20) or 20)
+            if st.get("is_a2_burst")
+            else float(getattr(config, "PM_MODIFY_COOLDOWN_SECONDS", 60) or 60)
+        )
+        if now - float(st.get("last_modify_ts", 0.0)) < eff_mod_cd:
             return                                   # respect the cooldown
 
         min_step = max(0.05 * atr, 2.0 * float(getattr(info, "point", 0.0) or 0.0))
@@ -1282,6 +1335,26 @@ class PositionManager:
             cands.append((s_sl, "ADOPT_TIGHTEN" if adopted else "TRAIL",
                           f"structural stop {s_sl:.2f} tighter than SL "
                           f"{cur_sl:.2f}"))
+        # C3 Wall Shelter + Early High-Water Trail + Quick +1.0pt Small-Fish BE:
+        # Proven across 1,179 shadow trades (t = -3.46) and flow_probe (93% >= +1.0pt in 6m).
+        if bool(getattr(config, "PM_C3_WALL_TRAIL_ENABLED", True)):
+            if w_sl is not None and w_sl * sign > cur_sl * sign + min_step:
+                cands.append((w_sl, "WALL_SHELTER",
+                              f"C3 live BookMap wall shelter {w_sl:.2f} tighter than SL {cur_sl:.2f}"))
+            c3_trigger_r = float(getattr(config, "PM_C3_EARLY_TRAIL_R", 0.50) or 0.50)
+            c3_trail_atr = float(getattr(config, "PM_C3_TRAIL_ATR", 0.50) or 0.50)
+            if initial_r > 0 and (best_gain / initial_r) >= c3_trigger_r and atr > 0:
+                c3_stop = entry + sign * best_gain - sign * (c3_trail_atr * atr)
+                if c3_stop * sign > cur_sl * sign + min_step:
+                    cands.append((c3_stop, "C3_EARLY_TRAIL",
+                                  f"C3 early trail (+{best_gain/initial_r:.2f}R >= {c3_trigger_r:.2f}R): "
+                                  f"HWM {best_gain:.2f}pts - {c3_trail_atr:.2f}xATR"))
+            quick_be_pts = float(getattr(config, "PM_BURST_QUICK_BE_PTS", 1.0) or 0.0)
+            if quick_be_pts > 0 and best_gain >= quick_be_pts:
+                q_be = entry + sign * max(0.05 * atr, spread, min_dist)
+                if q_be * sign > cur_sl * sign + min_step:
+                    cands.append((q_be, "QUICK_1PT_BE",
+                                  f"small-fish +{best_gain:.2f}pts (>= {quick_be_pts:.2f}pt) -> stop locked at break-even"))
         # v4.1: a move that lacks CVD support protects its gains earlier
         be_trigger = config.PM_BE_TRIGGER_R
         if config.PM_FLOW_ENABLE and flow_weak:
@@ -1385,10 +1458,19 @@ class PositionManager:
         if sl_candidate != cur_sl and abs(sl_candidate - cur_sl) < min_step:
             sl_ok = False                        # change too small to bother
 
-        # -- TP candidate (front-run fresh opposing structure) --
+        # -- TP candidate (front-run fresh opposing wall or structure) --
         tp_candidate = cur_tp
         tp_reason = ""
-        if s_tp > 0:
+        if (
+            bool(getattr(config, "PM_C3_WALL_TRAIL_ENABLED", True))
+            and w_tp is not None
+            and w_tp > 0
+            and ((w_tp * sign < cur_tp * sign) if cur_tp > 0 else True)
+            and (cur_tp <= 0 or abs(w_tp - cur_tp) >= max(0.10 * atr, min_step))
+        ):
+            tp_candidate = w_tp
+            tp_reason = f"C3 TP front-runs fresh opposing BookMap wall ({w_tp:.2f})"
+        elif s_tp > 0:
             closer = (s_tp * sign < cur_tp * sign) if cur_tp > 0 else True
             further = (s_tp * sign > cur_tp * sign) and st.get("be_done", False)
             big_enough = cur_tp <= 0 or abs(s_tp - cur_tp) >= 0.2 * atr

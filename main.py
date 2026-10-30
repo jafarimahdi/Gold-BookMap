@@ -1818,7 +1818,7 @@ def run_step4(decision, snapshot, *, execution_authorized: bool = False,
     elif mode == "python":
         # run_step4 only reaches this point after the caller's hard permit and
         # this independent strategy/execution gate both pass.
-        result = MT5Executor().execute(
+        result = _get_mt5_executor(MT5Executor).execute(
             decision, snapshot, execution_authorized=True)
     else:
         # config.py normalises invalid values to none, but keep this defensive
@@ -1834,6 +1834,22 @@ def run_step4(decision, snapshot, *, execution_authorized: bool = False,
     return result
 
 
+_CACHED_MT5_EXECUTOR = None
+
+
+def _get_mt5_executor(executor_cls):
+    """Reuse one MT5Executor instance across live loop cycles to retain server-clock offset."""
+    global _CACHED_MT5_EXECUTOR
+    cfg_magic = getattr(config, "MT5_MAGIC", 234000)
+    if (
+        _CACHED_MT5_EXECUTOR is None
+        or type(_CACHED_MT5_EXECUTOR) is not executor_cls
+        or getattr(_CACHED_MT5_EXECUTOR, "symbol", None) != config.MT5_SYMBOL
+        or getattr(_CACHED_MT5_EXECUTOR, "magic", 234000) != cfg_magic
+    ):
+        _CACHED_MT5_EXECUTOR = executor_cls()
+    return _CACHED_MT5_EXECUTOR
+    from step5_monitoring import TradeMonitor
 def run_step5():
     from step5_monitoring import TradeMonitor
     positions = TradeMonitor().single_pass()
@@ -1919,10 +1935,10 @@ def run_signal_bridge(snapshot, decision, *, allow_new_entries: bool = True) -> 
         try:
             from judge_families import RETIRED as _RETIRED_JUDGES
         except Exception:
-            _RETIRED_JUDGES = frozenset({"whale_walls", "macro_dxy"})
+            _RETIRED_JUDGES = frozenset({"whale_walls", "macro_dxy", "htf_poc"})
         _jv = [v for v in _jv
                if str(v.get("judge") or "") not in _RETIRED_JUDGES
-               and str(v.get("judge") or "") not in ("whale_walls", "macro_dxy")]
+               and str(v.get("judge") or "") not in ("whale_walls", "macro_dxy", "htf_poc")]
         _jb = [v for v in _jv if isinstance(v, dict) and float(v.get("dir") or 0) > 0]
         _js = [v for v in _jv if isinstance(v, dict) and float(v.get("dir") or 0) < 0]
         _jf = len(_jv) - len(_jb) - len(_js)
@@ -2782,13 +2798,19 @@ def run_pipeline(allow_new_entries: bool = True) -> None:
             sig_key = _outcome_signature(deal)
             if (id_key and id_key in logged_keys) or sig_key in logged_keys:
                 continue
+            pos_id = deal.get("position_id")
+            _comment = (
+                f"closed deal pos={pos_id}"
+                if pos_id not in (None, "", 0)
+                else "closed deal"
+            )
             log_trade_outcome(
-                order_id=deal_id or deal.get("position_id"),
+                order_id=deal_id or pos_id,
                 symbol=deal.get("symbol", config.MT5_SYMBOL),
                 side=deal.get("side", deal.get("type", "")),
                 pnl=deal.get("pnl", 0.0),
                 exit_price=deal.get("price", 0.0),
-                comment="closed deal")
+                comment=_comment)
             if id_key:
                 new_keys.add(id_key)
             new_keys.add(sig_key)

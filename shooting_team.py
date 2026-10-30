@@ -475,6 +475,32 @@ def plan_shot(signal_map: Dict[str, Any], power: Dict[str, Any],
                      plan_ttl=plan_ttl)
 
     direction = str(power.get("direction")).upper()
+    # Part C Brain #2: Classroom minimum-confidence & opposition guard against flat-lake tail waves.
+    # Only enforced when signal_confidence is explicitly supplied by the live pipeline and
+    # SHOOT_MIN_CLASS_CONFIDENCE / SHOOT_BLOCK_CLASS_OPPOSITION are configured on `config`.
+    sig_conf = _num(ctx.get("signal_confidence"))
+    min_class_conf = _cfg(config, "SHOOT_MIN_CLASS_CONFIDENCE", 0.0) if config is not None else 0.0
+    if sig_conf is not None and min_class_conf > 0 and sig_conf < min_class_conf:
+        _observe_passive_road_sample(signal_map, power, price, spread, ctx, config)
+        return _wait(
+            f"classroom confidence {sig_conf:.1f}% < {min_class_conf:.1f}% minimum floor (flat-lake tail-wave guard)",
+            price, power=power, context=ctx, config=config, atr=a, spread=sp, plan_ttl=plan_ttl,
+        )
+    sig_dir = str(ctx.get("signal_direction") or "").strip().upper()
+    block_opp = bool(getattr(config, "SHOOT_BLOCK_CLASS_OPPOSITION", False)) if config is not None else False
+    opp_min_conf = _cfg(config, "SHOOT_OPPOSITION_MIN_CONF", 25.0) if config is not None else 25.0
+    if (
+        block_opp
+        and sig_dir in {"BUY", "SELL"}
+        and ((direction == "UP" and sig_dir == "SELL") or (direction == "DOWN" and sig_dir == "BUY"))
+        and (sig_conf is None or sig_conf >= opp_min_conf)
+    ):
+        _observe_passive_road_sample(signal_map, power, price, spread, ctx, config)
+        return _wait(
+            f"classroom opposes POWER {direction} ({sig_dir} @ {sig_conf if sig_conf is not None else 0.0:.1f}%)",
+            price, power=power, context=ctx, config=config, atr=a, spread=sp, plan_ttl=plan_ttl,
+        )
+
     target_door = _nearest_door(signal_map or {}, direction, p)
     if not target_door:
         return _wait(f"no valid Scout door on the POWER v2 {direction} side", p,
@@ -609,6 +635,21 @@ def plan_shot(signal_map: Dict[str, Any], power: Dict[str, Any],
                             (queue_validation_reason or "UNKNOWN"),
     }
     shadow_candidates = {"passive_limit": passive_shadow}
+    if bool(getattr(config, "SHOOT_CLASS_SHADOW_LOG", True)) if config is not None else False:
+        shadow_floor = _cfg(config, "SHOOT_CLASS_SHADOW_CONF_FLOOR", 25.0)
+        shadow_opp = (
+            sig_dir in {"BUY", "SELL"}
+            and ((direction == "UP" and sig_dir == "SELL") or (direction == "DOWN" and sig_dir == "BUY"))
+            and (sig_conf is None or sig_conf >= opp_min_conf)
+        )
+        shadow_candidates["class_gate_shadow"] = {
+            "mode": "SHADOW_ONLY",
+            "would_block_low_conf": bool(sig_conf is not None and shadow_floor > 0 and sig_conf < shadow_floor),
+            "would_block_opposition": bool(shadow_opp),
+            "signal_direction": sig_dir or "NEUTRAL",
+            "signal_confidence": sig_conf,
+            "shadow_floor": shadow_floor,
+        }
     if not trigger:
         aggressive_reason = "no separately confirmed aggressive-entry trigger is wired"
     elif not trigger_reason:

@@ -42,6 +42,11 @@ def _isolate_live_data_and_logs(tmp_path, monkeypatch):
 
     monkeypatch.setattr(config, "DATA_DIR", iso_data)
     monkeypatch.setattr(config, "LOGS_DIR", iso_logs)
+    monkeypatch.setattr(config, "CME_DAILY_BREAK_AUTO", False, raising=False)
+
+    main_mod = sys.modules.get("main")
+    if main_mod is not None and hasattr(main_mod, "_CACHED_MT5_EXECUTOR"):
+        monkeypatch.setattr(main_mod, "_CACHED_MT5_EXECUTOR", None, raising=False)
 
     # Redirect any already-imported module bindings that do NOT dynamically
     # resolve config.DATA_DIR on every call (e.g. main / risk_manager constants).

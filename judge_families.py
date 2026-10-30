@@ -45,10 +45,10 @@ JUDGE_FAMILY = {
 # Between families, the operator sets the loudness. FROZEN on purpose (defect 4).
 FAMILY_WEIGHTS = {"TAPE": 1.2, "BOOK": 1.2, "HIDDEN": 1.0, "MAP": 0.8, "WORLD": 0.5}
 
-# Judges that no longer vote (they may still write note lines).
+# Judges that no longer vote (they may still write note lines; walls/htf_poc stay map doors).
 RETIRED = {"macro_yield", "macro_dxy", "macro_vix", "vwap_zscore",
            "spoof_invert_loose", "iceberg_legacy", "l3_ofi_streak",
-           "delta_pressure"}
+           "delta_pressure", "whale_walls", "htf_poc"}
 
 DEAD_ZONE = 0.15  # a family whose internal average is inside +-0.15 stays silent
 

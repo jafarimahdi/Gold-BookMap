@@ -456,6 +456,30 @@ class _BridgeTail:
                 ordered = ordered + [self.path]
             for src in ordered:
                 is_live_file = os.path.normcase(os.path.abspath(src)) == live_key
+                if not is_live_file:
+                    try:
+                        # Closed rotated chunk (e.g. yesterday's ticks_YYYYMMDD_HHMMSS.csv.gz):
+                        # skip decompression only when BOTH file mtime (last row written) AND
+                        # filename stamp sit well before cutoff_ts. Never stop mid-file once opened.
+                        st_mtime = os.path.getmtime(src)
+                        if st_mtime < (cutoff_ts - 3600.0):
+                            bn = os.path.basename(src)
+                            m_fn = re.match(r"^ticks_(\d{8})_(\d{6})\.csv(?:\.gz)?$", bn, re.I)
+                            if m_fn:
+                                fn_dt = datetime.strptime(
+                                    m_fn.group(1) + m_fn.group(2), "%Y%m%d%H%M%S"
+                                ).replace(tzinfo=timezone.utc)
+                                # Require BOTH closed mtime AND filename stamp (allowing +/-14h
+                                # local timezone offset) to predate cutoff_ts before skipping.
+                                if fn_dt.timestamp() < (cutoff_ts - 15 * 3600.0):
+                                    logger.info(
+                                        "BookmapBridge replay skip closed stale chunk source=%s "
+                                        "mtime_age_s=%.0f cutoff_age_s=%.0f",
+                                        bn, time.time() - st_mtime, time.time() - cutoff_ts,
+                                    )
+                                    continue
+                    except OSError:
+                        pass
                 source_started = time.monotonic()
                 source_replayed = replayed
                 source_skipped = skipped

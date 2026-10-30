@@ -56,15 +56,77 @@ def _trading_days() -> Set[int]:
     return days or {0, 1, 2, 3, 4}
 
 
+def _nth_sunday(year: int, month: int, n: int) -> datetime:
+    """Naive datetime of the n-th Sunday (1-indexed) of that month."""
+    first = datetime(year, month, 1)
+    offset = (6 - first.weekday()) % 7
+    return datetime(year, month, 1 + offset + 7 * (n - 1))
+
+
+def _us_eastern_offset_hours(utc_naive: datetime) -> int:
+    """UTC offset for America/New_York: -4 in EDT, -5 in EST.
+
+    US DST rule (since 2007): 2nd Sunday of March at 02:00 EST (07:00 UTC)
+    until 1st Sunday of November at 02:00 EDT (06:00 UTC).
+    """
+    start = _nth_sunday(utc_naive.year, 3, 2).replace(hour=7)
+    end = _nth_sunday(utc_naive.year, 11, 1).replace(hour=6)
+    return -4 if start <= utc_naive < end else -5
+
+
+def cme_daily_break_utc_window(now: Optional[datetime] = None) -> Tuple[str, str]:
+    """Return (start_hm_utc, end_hm_utc) for CME Globex / XAUUSD 17:00-18:00 NY break."""
+    n = _now(now)
+    if n.tzinfo is None:
+        n = n.replace(tzinfo=timezone.utc)
+    ny_off: Optional[int] = None
+    try:
+        from zoneinfo import ZoneInfo
+        off = n.astimezone(ZoneInfo("America/New_York")).utcoffset()
+        if off is not None:
+            ny_off = int(round(off.total_seconds() / 3600.0))
+    except Exception:
+        ny_off = None
+    if ny_off is None:
+        u_naive = n.astimezone(timezone.utc).replace(tzinfo=None)
+        ny_off = _us_eastern_offset_hours(u_naive)
+    # 17:00 NY in UTC: 17 - (-4) = 21:00 UTC (EDT), 17 - (-5) = 22:00 UTC (EST)
+    start_h = (17 - ny_off) % 24
+    end_h = (18 - ny_off) % 24
+    return f"{start_h:02d}:00", f"{end_h:02d}:00"
+
+
+def is_cme_daily_maintenance_break(now: Optional[datetime] = None) -> bool:
+    """True during the weekday 17:00-18:00 America/New_York CME Globex / CFD break."""
+    n = _now(now)
+    if n.tzinfo is None:
+        n = n.replace(tzinfo=timezone.utc)
+    else:
+        n = n.astimezone(timezone.utc)
+    if n.weekday() not in {0, 1, 2, 3, 4}:
+        return False
+    start_hm, end_hm = cme_daily_break_utc_window(n)
+    t = n.strftime("%H:%M")
+    if start_hm <= end_hm:
+        return start_hm <= t < end_hm
+    return t >= start_hm or t < end_hm
+
+
 def _in_daily_break(now: datetime) -> bool:
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    else:
+        now = now.astimezone(timezone.utc)
     start = str(config.DAILY_BREAK_START or "").strip()
     end = str(config.DAILY_BREAK_END or "").strip()
-    if not start or not end:
-        return False
-    t = now.strftime("%H:%M")
-    if start <= end:
-        return start <= t < end
-    return t >= start or t < end
+    if start and end:
+        t = now.strftime("%H:%M")
+        if start <= end:
+            return start <= t < end
+        return t >= start or t < end
+    if bool(getattr(config, "CME_DAILY_BREAK_AUTO", False)):
+        return is_cme_daily_maintenance_break(now)
+    return False
 
 
 def is_market_open(now: Optional[datetime] = None,
@@ -236,7 +298,12 @@ def describe_now(now: Optional[datetime] = None) -> str:
     if now.weekday() not in _trading_days():
         return f"WEEKEND/HOLIDAY ({_DAY_NAMES[now.weekday()]})"
     if _in_daily_break(now):
-        return f"DAILY BREAK ({config.DAILY_BREAK_START}-{config.DAILY_BREAK_END} UTC)"
+        start = str(config.DAILY_BREAK_START or "").strip()
+        end = str(config.DAILY_BREAK_END or "").strip()
+        if start and end:
+            return f"DAILY BREAK ({start}-{end} UTC)"
+        b_start, b_end = cme_daily_break_utc_window(now)
+        return f"DAILY BREAK ({b_start}-{b_end} UTC / 17:00-18:00 NY CME maintenance)"
     return "OPEN"
 
 

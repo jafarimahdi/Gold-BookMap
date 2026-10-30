@@ -276,10 +276,13 @@ def _analyze_decisions_csv(csv_path: Path, conf_threshold: float) -> Dict[str, A
     ai_above_conf_n = 0
     a2_fires_n = 0
     shoot_go_n = 0
+    shoot_go_episodes_n = 0
+    last_go_epoch: Optional[float] = None
     exec_authorized_n = 0
     executed_n = 0
 
     for r in rows:
+        ts = str(r.get("timestamp") or "").strip()
         sym = str(r.get("symbol") or "").strip()
         if sym:
             symbols[sym] += 1
@@ -355,14 +358,35 @@ def _analyze_decisions_csv(csv_path: Path, conf_threshold: float) -> Dict[str, A
             if ai_conf >= conf_threshold:
                 ai_above_conf_n += 1
 
-        if "[A2]" in rat or "[A2]" in rsn or dec_src.upper() == "A2":
+        if (
+            "[A2]" in rat
+            or "[A2]" in rsn
+            or "A2 burst" in rat
+            or "A2 burst" in rsn
+            or "A2 burst" in sh_rsn
+            or dec_src.upper() == "A2"
+        ):
             a2_fires_n += 1
 
         shoot_status[sh_st] += 1
         if sh_st == "GO":
             shoot_go_n += 1
-        elif sh_rsn:
-            shoot_reason[_normalize_veto_reason(sh_rsn)] += 1
+            row_ep: Optional[float] = None
+            if ts:
+                try:
+                    row_ep = datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+                except ValueError:
+                    row_ep = None
+            # Step 2 serves one M3 bar plan across ~3 consecutive 60s cycles;
+            # group served GO cycles within 190s into one distinct GO episode.
+            if last_go_epoch is None or row_ep is None or (row_ep - last_go_epoch) > 190.0:
+                shoot_go_episodes_n += 1
+            if row_ep is not None:
+                last_go_epoch = row_ep
+        else:
+            last_go_epoch = None
+            if sh_rsn:
+                shoot_reason[_normalize_veto_reason(sh_rsn)] += 1
 
         raw_subs = str(r.get("shooting_sub_checks") or "").strip()
         if raw_subs and sh_st != "GO":
@@ -393,7 +417,9 @@ def _analyze_decisions_csv(csv_path: Path, conf_threshold: float) -> Dict[str, A
 
     out["symbols"] = [k for k, _ in symbols.most_common(5)]
     out["a2_fires_in_csv"] = a2_fires_n
+    out["shooting_go_episodes"] = shoot_go_episodes_n
     out["executed_count"] = executed_n
+    effective_a2_or_go_eps = a2_fires_n if a2_fires_n > 0 else shoot_go_episodes_n
     out["funnel"] = {
         "total_cycles": n,
         "market_open": market_open_n,
@@ -406,7 +432,7 @@ def _analyze_decisions_csv(csv_path: Path, conf_threshold: float) -> Dict[str, A
         "step3_live_or_cached_or_carry": ai_reached_n,
         "step3_action_buy_sell": ai_buy_sell_n,
         "step3_buy_sell_ge_conf_threshold": ai_above_conf_n,
-        "a2_aggressive_fires": a2_fires_n,
+        "a2_aggressive_fires": effective_a2_or_go_eps,
         "shooting_status_go": shoot_go_n,
         "mt5_executed_in_csv": executed_n,
     }
@@ -694,9 +720,14 @@ def _analyze_state_hygiene(
         a2_cnt = _safe_int(a2s.get("count") if "count" in a2s else a2s.get("fires"), -1)
         if a2_date == day_str and a2_cnt >= 0 and dec_summary.get("exists"):
             csv_a2 = _safe_int(dec_summary.get("a2_fires_in_csv"), 0)
-            if abs(a2_cnt - csv_a2) > 2:
+            go_eps = _safe_int(dec_summary.get("shooting_go_episodes"), 0)
+            go_rows = _safe_int((dec_summary.get("funnel") or {}).get("shooting_status_go"), 0)
+            # Step 2 commits A2 burst fires once per M3 Shooting=GO episode without
+            # stamping literal '[A2]' into decisions_log.csv reason columns.
+            ref_cnt = csv_a2 if csv_a2 > 0 else go_eps
+            if abs(a2_cnt - ref_cnt) > 2 and not (go_eps <= a2_cnt <= go_rows):
                 drifts.append(
-                    f"a2_burst_count.json count={a2_cnt} on {a2_date} vs decisions CSV [A2] rows={csv_a2}"
+                    f"a2_burst_count.json count={a2_cnt} on {a2_date} vs decisions GO episodes={go_eps} (rows={go_rows}, [A2]={csv_a2})"
                 )
 
     # 5. gemini_keys_state.json (sanitized)
@@ -717,11 +748,26 @@ def _analyze_state_hygiene(
             "judges_count": len(jrc.get("judges") or {}) if isinstance(jrc.get("judges"), dict) else None,
         }
 
-    # 7. power_memory_book/power_<DATE>.json
-    pmb = data_dir / "power_memory_book" / f"power_{day_str}.json"
-    if not pmb.exists():
-        pmb = data_dir / f"power_{day_str}.json"
-    if pmb.exists():
+    # 7. power_v2_memory/power_<DATE>.jsonl (canonical) or legacy power_memory_book/power_<DATE>.json
+    day_compact = day_str.replace("-", "")
+    pmb_candidates = [
+        data_dir / "power_v2_memory" / f"power_{day_str}.jsonl",
+        data_dir / "power_v2_memory" / f"power_{day_compact}.jsonl",
+        data_dir / "power_memory_book" / f"power_{day_str}.json",
+        data_dir / f"power_{day_str}.json",
+    ]
+    pmb = next((c for c in pmb_candidates if c.exists()), None)
+    if pmb is not None and pmb.suffix == ".jsonl":
+        try:
+            jl_lines = [ln for ln in pmb.read_text(encoding="utf-8", errors="replace").splitlines() if ln.strip()]
+            states["power_memory_book_day"] = {
+                "file": f"{pmb.parent.name}/{pmb.name}",
+                "present": True,
+                "entries": len(jl_lines),
+            }
+        except OSError:
+            states["power_memory_book_day"] = {"file": pmb.name, "present": False}
+    elif pmb is not None:
         pjson = _read_json(pmb)
         states["power_memory_book_day"] = {
             "file": pmb.name,
@@ -729,7 +775,7 @@ def _analyze_state_hygiene(
             "keys": sorted(list(pjson.keys()))[:10] if isinstance(pjson, dict) else [],
         }
     else:
-        states["power_memory_book_day"] = {"file": f"power_{day_str}.json", "present": False}
+        states["power_memory_book_day"] = {"file": f"power_v2_memory/power_{day_str}.jsonl", "present": False}
 
     # 8. power_history_probe_latest.csv
     php = data_dir / "power_history_probe_latest.csv"

@@ -389,6 +389,38 @@ def classify_m5_regime(
         result["reason"] = "ADX_UNAVAILABLE"
         return result
     result["adx"] = round(adx, 2)
-    result["market_regime"], result["reason"] = _label_adx(
-        adx, trend_adx_min, range_adx_max)
+    regime_label, reason_label = _label_adx(adx, trend_adx_min, range_adx_max)
+    # Kaufman Efficiency Ratio (10-bar) flat-lake tail-wave guard:
+    # On flat-lake whipsaw days (trendiness ~0.27), 3-minute splashes briefly push
+    # Wilder ADX into 25..30 right at the top/bottom of a ping-pong wave even though
+    # net displacement is a tiny fraction of path length.
+    er_10 = None
+    if len(recent) >= 10:
+        c_tail = [float(b["close"]) for b in recent[-10:]]
+        path_len = sum(abs(c_tail[i] - c_tail[i - 1]) for i in range(1, len(c_tail)))
+        if path_len > 1e-9:
+            er_10 = round(abs(c_tail[-1] - c_tail[0]) / path_len, 4)
+        else:
+            er_10 = 0.0
+    result["efficiency_ratio_10"] = er_10
+    try:
+        import config as _cfg_mod
+        _fl_on = bool(getattr(_cfg_mod, "POWER_FLAT_LAKE_GUARD_ENABLED", False))
+        _fl_er_min = float(getattr(_cfg_mod, "POWER_FLAT_LAKE_ER_MIN", 0.22) or 0.0)
+    except Exception:
+        _fl_on = False
+        _fl_er_min = 0.22
+    _would_flag_flat_lake = bool(
+        _fl_er_min > 0
+        and regime_label == "TREND"
+        and adx < (trend_adx_min + 6.0)
+        and er_10 is not None
+        and er_10 < _fl_er_min
+    )
+    result["shadow_flat_lake"] = _would_flag_flat_lake
+    if _fl_on and _would_flag_flat_lake:
+        regime_label = "RANGE"
+        reason_label = "FLAT_LAKE_LOW_EFFICIENCY"
+    result["market_regime"] = regime_label
+    result["reason"] = reason_label
     return result

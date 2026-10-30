@@ -225,6 +225,9 @@ def _refresh() -> None:
     g["AI_KEY_COOLDOWN_MINUTES"] = _fint("AI_KEY_COOLDOWN_MINUTES", 20)
     g["GEMINI_REQUEST_TIMEOUT_MS"] = _fint("GEMINI_REQUEST_TIMEOUT_MS", 20000)
     g["AI_DECIDE_MAX_TOTAL_SECONDS"] = _ffloat("AI_DECIDE_MAX_TOTAL_SECONDS", 25.0)
+    g["AI_MODEL_SLICE_CAP_SECONDS"] = max(4.0, min(20.0, _ffloat("AI_MODEL_SLICE_CAP_SECONDS", 7.5)))
+    g["AI_MODEL_SLOW_STRIKES"] = max(1, _fint("AI_MODEL_SLOW_STRIKES", 2))
+    g["AI_MODEL_DEMOTE_SECONDS"] = max(60.0, _ffloat("AI_MODEL_DEMOTE_SECONDS", 900.0))
     g["AI_STANDING_PERMISSION_ENABLED"] = _fget("AI_STANDING_PERMISSION_ENABLED", "1") == "1"
     g["AI_ASYNC_REFRESH_ENABLED"] = _fget("AI_ASYNC_REFRESH_ENABLED", "1") == "1"
     g["AI_L3_OFI_DEPTH_NORM_ENABLED"] = _fget("AI_L3_OFI_DEPTH_NORM_ENABLED", "1") == "1"
@@ -250,8 +253,13 @@ def _refresh() -> None:
 
     # ---- v4 position manager ------------------------------------------------
     g["PM_ENABLE"] = _fget("PM_ENABLE", "1") == "1"
-    g["PM_BE_TRIGGER_R"] = _ffloat("PM_BE_TRIGGER_R", 1.0)
+    g["PM_BE_TRIGGER_R"] = _ffloat("PM_BE_TRIGGER_R", 0.5)
     g["PM_TRAIL_ENABLE"] = _fget("PM_TRAIL_ENABLE", "1") == "1"
+    g["PM_C3_WALL_TRAIL_ENABLED"] = _fget("PM_C3_WALL_TRAIL_ENABLED", "1") == "1"
+    g["PM_C3_EARLY_TRAIL_R"] = _ffloat("PM_C3_EARLY_TRAIL_R", 0.50)
+    g["PM_C3_TRAIL_ATR"] = _ffloat("PM_C3_TRAIL_ATR", 0.50)
+    g["PM_BURST_QUICK_BE_PTS"] = _ffloat("PM_BURST_QUICK_BE_PTS", 1.0)
+    g["PM_BURST_MODIFY_COOLDOWN_SECONDS"] = _fint("PM_BURST_MODIFY_COOLDOWN_SECONDS", 20)
     g["PM_FLIP_EXIT_SCORE"] = _ffloat("PM_FLIP_EXIT_SCORE", 55.0)
     g["PM_FLIP_REQUIRE_FLOW"] = _fget("PM_FLIP_REQUIRE_FLOW", "1") == "1"
     g["PM_DIVERGENCE_EXIT"] = _fget("PM_DIVERGENCE_EXIT", "1") == "1"
@@ -266,7 +274,7 @@ def _refresh() -> None:
     g["PM_ROUND_HUNT_BUFFER_ATR"] = _ffloat("PM_ROUND_HUNT_BUFFER_ATR", 0.12)
     g["PM_TP_MIN_ATR"] = _ffloat("PM_TP_MIN_ATR", 1.0)
     g["PM_TP_MAX_ATR"] = _ffloat("PM_TP_MAX_ATR", 4.0)
-    g["PM_MODIFY_COOLDOWN_SECONDS"] = _fint("PM_MODIFY_COOLDOWN_SECONDS", 180)
+    g["PM_MODIFY_COOLDOWN_SECONDS"] = _fint("PM_MODIFY_COOLDOWN_SECONDS", 60)
 
     g["PM_HTF_POC_ENABLE"] = _fget("PM_HTF_POC_ENABLE", "1") == "1"
     g["PM_FP_ZONES_ENABLE"] = _fget("PM_FP_ZONES_ENABLE", "1") == "1"
@@ -293,6 +301,7 @@ def _refresh() -> None:
     # still overrides it, for anyone who genuinely wants a fixed UTC time year-round.
     g["PM_DAILY_FLATTEN_LOCAL"] = _fget("PM_DAILY_FLATTEN_LOCAL", "23:30")
     g["PM_DAILY_FLATTEN_UTC"] = _fget("PM_DAILY_FLATTEN_UTC", "")
+    g["PM_PRE_CME_BREAK_MINUTES"] = max(0.0, min(60.0, _ffloat("PM_PRE_CME_BREAK_MINUTES", 5.0)))
     g["PM_ACTION_MAX_SPREAD_PCT"] = _ffloat("PM_ACTION_MAX_SPREAD_PCT", 0.05)
 
     g["PM_PROFIT_LOCK_ENABLE"] = _fget("PM_PROFIT_LOCK_ENABLE", "1") == "1"
@@ -341,11 +350,15 @@ def _refresh() -> None:
     g["SIGNAL_W_MICRO"] = _ffloat("SIGNAL_W_MICRO", 0.5)
     g["SIGNAL_W_ABSORB"] = _ffloat("SIGNAL_W_ABSORB", 0.5)
     g["SIGNAL_W_FOOTPRINT"] = _ffloat("SIGNAL_W_FOOTPRINT", 0.7)
+    g["FOOTPRINT_DELTA_DEADBAND"] = _ffloat("FOOTPRINT_DELTA_DEADBAND", 0.08)
     g["SIGNAL_W_L3_IMB"] = _ffloat("SIGNAL_W_L3_IMB", 0.6)
+    g["L3_IMB_DEADBAND"] = _ffloat("L3_IMB_DEADBAND", 0.12)
     g["SIGNAL_W_L3_OFI"] = _ffloat("SIGNAL_W_L3_OFI", 0.8)
     g["SIGNAL_W_L3_AGGR"] = _ffloat("SIGNAL_W_L3_AGGR", 0.8)
     g["SIGNAL_W_DIVERGENCE"] = _ffloat("SIGNAL_W_DIVERGENCE", 1.2)
     g["SIGNAL_W_VWAP"] = _ffloat("SIGNAL_W_VWAP", 1.0)
+    g["SIGNAL_W_VOLUME_ROC"] = _ffloat("SIGNAL_W_VOLUME_ROC", 0.4)
+    g["VOLUME_ROC_MIN_PCT"] = _ffloat("VOLUME_ROC_MIN_PCT", 0.35)
 
     g["NEWS_ENABLED"] = _fget("NEWS_ENABLED", "1") == "1"
     g["NEWS_CACHE_MINUTES"] = _fint("NEWS_CACHE_MINUTES", 15)
@@ -366,6 +379,18 @@ def _refresh() -> None:
     g["SHOOT_MIN_REWARD_USD"] = _ffloat("SHOOT_MIN_REWARD_USD", 0.0)
     # Shooting operates on explicit Power-v2 direction; force shares are never confidence.
     g["SHOOT_MIN_RR"] = _ffloat("SHOOT_MIN_RR", 1.2)
+    # Multi-Day Evidence Law (2026-10-29): 3-day test (Oct 27 river trend vs Oct 28-29
+    # flat lakes) showed Class NEUTRAL (<20) won 57%-65% when POWER spoke and ER_10<0.22
+    # preceded coil breakouts (56%-60% WR). Both default to SHADOW_ONLY (live=0) until
+    # multi-day post-C1/C2 shadow evidence proves net lift across both trend & chop.
+    g["SHOOT_MIN_CLASS_CONFIDENCE"] = _ffloat("SHOOT_MIN_CLASS_CONFIDENCE", 0.0)
+    g["SHOOT_BLOCK_CLASS_OPPOSITION"] = _fget("SHOOT_BLOCK_CLASS_OPPOSITION", "0") == "1"
+    g["SHOOT_OPPOSITION_MIN_CONF"] = _ffloat("SHOOT_OPPOSITION_MIN_CONF", 25.0)
+    g["SHOOT_CLASS_SHADOW_LOG"] = _fget("SHOOT_CLASS_SHADOW_LOG", "1") == "1"
+    g["SHOOT_CLASS_SHADOW_CONF_FLOOR"] = _ffloat("SHOOT_CLASS_SHADOW_CONF_FLOOR", 25.0)
+    g["POWER_FLAT_LAKE_GUARD_ENABLED"] = _fget("POWER_FLAT_LAKE_GUARD_ENABLED", "0") == "1"
+    g["POWER_FLAT_LAKE_ER_MIN"] = max(0.0, min(0.8, _ffloat("POWER_FLAT_LAKE_ER_MIN", 0.22)))
+    g["BOOK_PROBE_TILT"] = max(0.05, min(0.50, _ffloat("BOOK_PROBE_TILT", 0.12)))
     g["SHOOT_ROAD_RATIO"] = _ffloat("SHOOT_ROAD_RATIO", 6.0)  # retired by crowdv2:v1 (kept for .env compat; unread)
     g["SHOOT_QUEUE_MIN_FILL_PROB"] = _ffloat("SHOOT_QUEUE_MIN_FILL_PROB", 0.70)
     # crowdv2:v1 -- the Three Fair Questions (item 66; research file
@@ -383,13 +408,13 @@ def _refresh() -> None:
     # order is 9 lots, max 46. The whale threshold (total size at a price) is a
     # different measurement and must not be reused here.
     g["L3_LARGE_ORDER_LOTS"] = _ffloat("L3_LARGE_ORDER_LOTS", 5.0)
-    # 24u: the 8 retired judges. They still write their note lines (so the audit can
-    # keep grading them) but their vote is not counted. Blank the list to restore all.
+    # 24u + C1/C2 owner decision (2026-10-29): retired directional judges (walls &
+    # HTF POC remain active as structural map doors and PositionManager anchors).
     g["RETIRED_JUDGES"] = set(
         x.strip() for x in _fget(
             "RETIRED_JUDGES",
             "macro_yield,macro_dxy,macro_vix,vwap_zscore,spoof_invert_loose,"
-            "iceberg_legacy,l3_ofi_streak,delta_pressure").split(",") if x.strip())
+            "iceberg_legacy,l3_ofi_streak,delta_pressure,whale_walls,htf_poc").split(",") if x.strip())
     # 24u: the macro OPPOSITION BRAKE is separate from the macro VOTES. Retiring the
     # macro judges removes their votes; this keeps the brake. 0 disables it loudly.
     g["MACRO_BRAKE_ENABLED"] = _fget("MACRO_BRAKE_ENABLED", "1") == "1"
@@ -402,6 +427,7 @@ def _refresh() -> None:
     g["TRADING_DAYS"] = _fget("TRADING_DAYS", "0,1,2,3,4")
     g["DAILY_BREAK_START"] = _fget("DAILY_BREAK_START", "")
     g["DAILY_BREAK_END"] = _fget("DAILY_BREAK_END", "")
+    g["CME_DAILY_BREAK_AUTO"] = _fget("CME_DAILY_BREAK_AUTO", "1") == "1"
     g["STALE_DATA_SECONDS"] = _fint("STALE_DATA_SECONDS", 300)
     # Per-price BookMap depth expiry; previously the provider fallback existed
     # but this config key was never loaded from the owner's environment.
@@ -645,6 +671,9 @@ def _refresh() -> None:
     g["FLASH_CRASH_MIN_PTS"] = _ffloat("FLASH_CRASH_MIN_PTS", 12.0)
     g["FLASH_CRASH_MIN_PCT"] = _ffloat("FLASH_CRASH_MIN_PCT", 0.25)
     g["MT5_SERVER_TZ_OFFSET_HOURS"] = _fget("MT5_SERVER_TZ_OFFSET_HOURS", "auto")
+    g["MT5_SERVER_CLOCK_SKEW_TOLERANCE_SECONDS"] = max(
+        0.005, min(15.0, _ffloat("MT5_SERVER_CLOCK_SKEW_TOLERANCE_SECONDS", 5.0))
+    )
 
     # L6 Volatility Regime PM (adaptive giveback)
     g["PM_VOL_ADAPTIVE"] = _fget("PM_VOL_ADAPTIVE", "1") == "1"

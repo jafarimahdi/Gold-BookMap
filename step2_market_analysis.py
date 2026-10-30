@@ -3014,16 +3014,18 @@ class SignalEngine:
         # ---- 4) Footprint RESTORED v5.8.3 (user requested: has aggressive buyer/seller data) ----
         # Footprint delta imbalance per price level + dominant level strength
         try:
-            votes.append((footprint.delta_imbalance,
-                       float(getattr(config, "SIGNAL_W_FOOTPRINT", 0.7))))
-            notes.append(f"footprint delta {footprint.delta_imbalance:+.3f} dominant {footprint.dominant_level:.1f} strength {footprint.footprint_strength:.2f} -> {'BUY' if footprint.delta_imbalance>0 else 'SELL'}")
+            _fp_db = float(getattr(config, "FOOTPRINT_DELTA_DEADBAND", 0.08))
+            _fp_w = float(getattr(config, "SIGNAL_W_FOOTPRINT", 0.7))
+            if abs(float(footprint.delta_imbalance or 0.0)) >= _fp_db and _may_vote("footprint_delta"):
+                votes.append((footprint.delta_imbalance, _fp_w))
+                notes.append(f"footprint delta {footprint.delta_imbalance:+.3f} dominant {footprint.dominant_level:.1f} strength {footprint.footprint_strength:.2f} -> {'BUY' if footprint.delta_imbalance>0 else 'SELL'}")
             # Additional: footprint buying vs selling levels count
             buy_levels = len(footprint.buying_levels or [])
             sell_levels = len(footprint.selling_levels or [])
-            if buy_levels > sell_levels * 1.3:
+            if buy_levels > sell_levels * 1.3 and _may_vote("footprint_levels"):
                 votes.append((+1.0, 0.4))
                 notes.append(f"footprint buying levels {buy_levels} > selling {sell_levels} -> BUY")
-            elif sell_levels > buy_levels * 1.3:
+            elif sell_levels > buy_levels * 1.3 and _may_vote("footprint_levels"):
                 votes.append((-1.0, 0.4))
                 notes.append(f"footprint selling levels {sell_levels} > buying {buy_levels} -> SELL")
         except Exception as fe:
@@ -3032,11 +3034,12 @@ class SignalEngine:
         # ---- 5) LEVEL 3 order events -----------------------------------------
         # v5.2: Handle BookMap MBO types + whale detection
         # L3 Imbalance distance-weighted + aggressive vs limit ratio
+        _l3_db = float(getattr(config, "L3_IMB_DEADBAND", 0.12))
         try:
-            # Distance-weighted imbalance: closer levels count more
+            # Distance-weighted imbalance: closer levels count more; deadband calibrated
+            # to CME Gold near-touch p90 (~0.134, median noise ~0.048) so resting chop stays quiet.
             bids = level3.order_book.get("bids", []) or []
             asks = level3.order_book.get("asks", []) or []
-            # Weight by proximity: closer to price = higher weight
             bid_weighted = 0.0
             ask_weighted = 0.0
             for p,s in bids:
@@ -3052,12 +3055,14 @@ class SignalEngine:
             total_w = bid_weighted + ask_weighted
             if total_w>0:
                 imb_w = (bid_weighted - ask_weighted)/total_w
-                votes.append((np.clip(imb_w*2.0, -1.0, 1.0), float(getattr(config, "SIGNAL_W_L3_IMB", 0.8))))
-                notes.append(f"L3 distance-weighted imbalance {imb_w:+.3f} bid {bid_weighted:.0f} ask {ask_weighted:.0f} -> {'BUY' if imb_w>0 else 'SELL'}")
-            else:
+                if abs(imb_w) >= _l3_db and _may_vote("l3_imbalance"):
+                    votes.append((np.clip(imb_w*2.0, -1.0, 1.0), float(getattr(config, "SIGNAL_W_L3_IMB", 0.8))))
+                    notes.append(f"L3 distance-weighted imbalance {imb_w:+.3f} bid {bid_weighted:.0f} ask {ask_weighted:.0f} -> {'BUY' if imb_w>0 else 'SELL'}")
+            elif abs(float(level3.order_book_imbalance or 0.0)) >= _l3_db and _may_vote("l3_imbalance"):
                 votes.append((np.clip(level3.order_book_imbalance * 2.0, -1.0, 1.0), float(getattr(config, "SIGNAL_W_L3_IMB", 0.6))))
         except:
-            votes.append((np.clip(level3.order_book_imbalance * 2.0, -1.0, 1.0), float(getattr(config, "SIGNAL_W_L3_IMB", 0.6))))
+            if abs(float(level3.order_book_imbalance or 0.0)) >= _l3_db and _may_vote("l3_imbalance"):
+                votes.append((np.clip(level3.order_book_imbalance * 2.0, -1.0, 1.0), float(getattr(config, "SIGNAL_W_L3_IMB", 0.6))))
         # Aggressive vs limit ratio: if aggressive buys >> limit sells, strong momentum
         try:
             aggr_total = level3.aggressive_buys + level3.aggressive_sells
@@ -3163,15 +3168,17 @@ class SignalEngine:
                 # Regime boost: RANGE -> whale+iceberg 2x
                 reg_mult = range_boost if regime == "RANGE" else 1.0
                 if total_whale_bid > total_whale_ask * 1.2:
-                    # Find closest bid whale for note
+                    # Find closest bid whale for note (C1: retired from voting, kept for map/health)
                     closest = min(whale_bids, key=lambda x: x[2]) if whale_bids else (price,0,0)
                     w = whale_weight(closest[2]) * reg_mult
-                    votes.append((+1.0, w))
+                    if _may_vote("whale_walls"):
+                        votes.append((+1.0, w))
                     notes.append(f"L3 whale SUPPORT {len(whale_bids)} walls {total_whale_bid:.0f} lots closest {closest[0]:.1f} dist {closest[2]*100:.2f}% w {w:.1f} -> BUY")
                 elif total_whale_ask > total_whale_bid * 1.2:
                     closest = min(whale_asks, key=lambda x: x[2]) if whale_asks else (price,0,0)
                     w = whale_weight(closest[2]) * reg_mult
-                    votes.append((-1.0, w))
+                    if _may_vote("whale_walls"):
+                        votes.append((-1.0, w))
                     notes.append(f"L3 whale RESISTANCE {len(whale_asks)} walls {total_whale_ask:.0f} lots closest {closest[0]:.1f} dist {closest[2]*100:.2f}% w {w:.1f} -> SELL")
                 else:
                     notes.append(f"L3 whales balanced bid {total_whale_bid:.0f} ask {total_whale_ask:.0f} (no vote)")
@@ -3474,16 +3481,17 @@ class SignalEngine:
                         notes.append(f"v6.0 VWAP -1σ {band_1l:.1f} price {price:.1f} -> BUY w{w*0.6:.1f}")
         except Exception as ve:
             notes.append(f"v6.0 VWAP bands error: {ve}")
-        # Volume confirmation: high volume + price up = bullish
+        # Volume confirmation: high volume + price up = bullish (deadband >= 35%)
         try:
             vol_roc = float(getattr(volume_profile, "volume_rate_of_change", 0.0) or 0.0)
-            if vol_roc > 0.2:  # volume rising 20%
-                # If price rising with volume = bullish confirmation
+            vol_roc_min = float(getattr(config, "VOLUME_ROC_MIN_PCT", 0.35))
+            vol_roc_w = float(getattr(config, "SIGNAL_W_VOLUME_ROC", 0.4))
+            if vol_roc > vol_roc_min and _may_vote("volume_roc"):
                 if recent_closes is not None and len(recent_closes)>=2 and recent_closes[-1] > recent_closes[-2]:
-                    votes.append((+1.0, 0.4))
+                    votes.append((+1.0, vol_roc_w))
                     notes.append(f"volume RoC +{vol_roc*100:.0f}% with price up -> bullish confirmation")
                 elif recent_closes is not None and len(recent_closes)>=2 and recent_closes[-1] < recent_closes[-2]:
-                    votes.append((-1.0, 0.4))
+                    votes.append((-1.0, vol_roc_w))
                     notes.append(f"volume RoC +{vol_roc*100:.0f}% with price down -> bearish confirmation")
         except:
             pass
@@ -3550,27 +3558,33 @@ class SignalEngine:
                     dist_h1 = (price - h1_poc) / (volatility.atr or price*0.002) if price else 0
                     if abs(dist_h1) <= 1.0:  # within 1 ATR of H1 POC
                         if price > h1_poc:
-                            votes.append((+1.0, htf_w_h1))
+                            if _may_vote("htf_poc"):
+                                votes.append((+1.0, htf_w_h1))
                             notes.append(f"HTF H1 POC {h1_poc:.1f} below price {price:.1f} (dist {dist_h1:+.2f} ATR) w {htf_w_h1:.1f} -> BUY magnet")
                         else:
-                            votes.append((-1.0, htf_w_h1))
+                            if _may_vote("htf_poc"):
+                                votes.append((-1.0, htf_w_h1))
                             notes.append(f"HTF H1 POC {h1_poc:.1f} above price {price:.1f} (dist {dist_h1:+.2f} ATR) w {htf_w_h1:.1f} -> SELL magnet")
                     else:
                         # Price far from H1 POC -> mean reversion toward it
                         if price > h1_poc and dist_h1 > 2.0:
-                            votes.append((-1.0, htf_w_h1_far))
+                            if _may_vote("htf_poc"):
+                                votes.append((-1.0, htf_w_h1_far))
                             notes.append(f"HTF H1 POC {h1_poc:.1f} far below price {price:.1f} ({dist_h1:.1f} ATR) w {htf_w_h1_far:.1f} -> mean reversion SELL")
                         elif price < h1_poc and dist_h1 < -2.0:
-                            votes.append((+1.0, htf_w_h1_far))
+                            if _may_vote("htf_poc"):
+                                votes.append((+1.0, htf_w_h1_far))
                             notes.append(f"HTF H1 POC {h1_poc:.1f} far above price {price:.1f} ({dist_h1:.1f} ATR) w {htf_w_h1_far:.1f} -> mean reversion BUY")
                 if h4_poc:
                     dist_h4 = (price - h4_poc) / (volatility.atr or price*0.002) if price else 0
                     if abs(dist_h4) <= 1.5:
                         if price > h4_poc:
-                            votes.append((+1.0, htf_w_h4))
+                            if _may_vote("htf_poc"):
+                                votes.append((+1.0, htf_w_h4))
                             notes.append(f"HTF H4 POC {h4_poc:.1f} below price {price:.1f} (dist {dist_h4:+.2f} ATR) w {htf_w_h4:.1f} -> strong BUY magnet (H4)")
                         else:
-                            votes.append((-1.0, htf_w_h4))
+                            if _may_vote("htf_poc"):
+                                votes.append((-1.0, htf_w_h4))
                             notes.append(f"HTF H4 POC {h4_poc:.1f} above price {price:.1f} (dist {dist_h4:+.2f} ATR) w {htf_w_h4:.1f} -> strong SELL magnet (H4)")
         except Exception as he:
             notes.append(f"HTF POC vote error: {he}")
@@ -4007,9 +4021,9 @@ def parse_judge_panel(notes: List[str]) -> List[Dict[str, Any]]:
             m = _re.search(pat, note)
             if not m:
                 continue
-            if judge in ("whale_walls", "whale_balanced", "macro_dxy"):
-                # Retired judges: whale_walls/whale_balanced (C1 clock) and macro_dxy
-                # (deleted 5d DXY drift for M3 scalper) no longer emit panel votes.
+            if judge in ("whale_walls", "whale_balanced", "macro_dxy", "htf_poc"):
+                # Retired judges: whale_walls/whale_balanced (C1), htf_poc (C2), and macro_dxy
+                # no longer emit panel votes (walls and htf_poc stay map doors/anchors).
                 continue
             d, w = 0.0, 0.0
             g = m.groups()
@@ -5830,6 +5844,7 @@ def analyze_market(market_data: Dict[str, Any],
         _shot_context = {
             "bid": _raw_bid,
             "regime": _regime_v2.get("market_regime", "UNKNOWN"),
+            "signal_direction": direction,
             "signal_confidence": confidence,
             "signal_strength": strength,
             "ai_model": "NOT_RUN_STEP3",

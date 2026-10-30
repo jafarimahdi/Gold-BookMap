@@ -308,6 +308,22 @@ def run(args, lines):
     say(f" THE BOOK SPY'S DAY (in-session leans, judged against the tape):")
     if not eps:
         say("   (the book spy never leaned hard enough today - honest zero)")
+        if rates:
+            p90_val = rates[min(int(0.90 * len(rates)), len(rates) - 1)]
+            if 0.05 <= p90_val < args.tilt:
+                rel_tilt = max(0.08, round(p90_val, 3))
+                rel_all = episodes(buckets, dead_frac=args.dead_frac, fast=args.fast,
+                                   tilt=rel_tilt, hold=args.hold)
+                rel_eps = [e for e in rel_all if in_session(e["start"], session)]
+                rel_warns = sum(1 for r in warn_moments(fish, rel_eps, args.warn_before)
+                                if r["status"] == "WARNED")
+                say(f"   [CME thick-book companion @ p90={rel_tilt:.3f} (< {args.tilt:.2f} fixed yardstick):"
+                    f" {len(rel_eps)} in-session lean(s), {rel_warns}/{len(fish)} fish warned early]")
+    elif abs(args.tilt - 0.25) > 1e-6:
+        leg_all = episodes(buckets, dead_frac=args.dead_frac, fast=args.fast,
+                           tilt=0.25, hold=args.hold)
+        leg_eps = [e for e in leg_all if in_session(e["start"], session)]
+        say(f"   [CME thick-book calibrated @ tilt={args.tilt:.2f} (vs legacy 0.25 print-spy yardstick: {len(leg_eps)} lean(s))]")
     times = [dt for dt, _p in trades]
     prices = [p for _dt, p in trades]
     for e in eps:
@@ -363,7 +379,12 @@ def main():
     ap.add_argument("--date", default=datetime.now().strftime("%Y-%m-%d"))
     ap.add_argument("--bucket", type=int, default=10)
     ap.add_argument("--fast", type=int, default=3)
-    ap.add_argument("--tilt", type=float, default=0.25)
+    _default_tilt = 0.12
+    try:
+        _default_tilt = max(0.05, min(0.50, float(os.environ.get("BOOK_PROBE_TILT", "0.12") or 0.12)))
+    except Exception:
+        _default_tilt = 0.12
+    ap.add_argument("--tilt", type=float, default=_default_tilt)
     ap.add_argument("--hold", type=int, default=6)
     ap.add_argument("--dead-frac", type=float, default=0.20)
     ap.add_argument("--touch-ticks", type=int, default=10)

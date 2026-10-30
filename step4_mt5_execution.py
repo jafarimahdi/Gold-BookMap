@@ -22,11 +22,13 @@ MT5 calls are guarded: without the SDK this module safely reports PENDING.
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import time
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 try:
@@ -58,6 +60,74 @@ def _explicit_mt5_tz_offset_seconds(config_mod: Any = None) -> Optional[float]:
     return None
 
 
+def _server_skew_tolerance_seconds(config_mod: Any = None) -> float:
+    """Bounded sub-minute laptop-vs-broker NTP clock skew tolerance (default 5.0s)."""
+    cfg = config_mod if config_mod is not None else config
+    try:
+        raw = getattr(cfg, "MT5_SERVER_CLOCK_SKEW_TOLERANCE_SECONDS", 5.0)
+        if isinstance(raw, bool):
+            return 5.0
+        val = float(raw)
+        if math.isfinite(val):
+            return max(0.005, min(15.0, val))
+    except (TypeError, ValueError, OverflowError):
+        pass
+    return 5.0
+
+
+_PERSISTED_OFFSET_MEMO: Dict[str, float] = {}
+
+
+def _mt5_offset_file(config_mod: Any = None) -> Optional[Path]:
+    cfg = config_mod if config_mod is not None else config
+    dd = getattr(cfg, "DATA_DIR", None)
+    if dd is None:
+        return None
+    try:
+        return Path(dd) / "mt5_server_offset.json"
+    except Exception:
+        return None
+
+
+def persist_mt5_server_offset(offset_seconds: float, config_mod: Any = None) -> None:
+    """Persist calibrated broker server UTC offset for evening deal reconciliation."""
+    if not math.isfinite(offset_seconds) or offset_seconds <= 0.0:
+        return
+    p = _mt5_offset_file(config_mod)
+    if p is None:
+        return
+    key = str(p)
+    if _PERSISTED_OFFSET_MEMO.get(key) == float(offset_seconds) and p.exists():
+        return
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "offset_seconds": int(round(offset_seconds)),
+            "offset_hours": round(offset_seconds / 3600.0, 2),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        p.write_text(json.dumps(payload), encoding="utf-8", newline="\n")
+        _PERSISTED_OFFSET_MEMO[key] = float(offset_seconds)
+    except OSError:
+        pass
+
+
+def load_persisted_mt5_server_offset_seconds(config_mod: Any = None) -> Optional[float]:
+    """Read last calibrated broker server offset (e.g. +10800s GMT+3) for historical deals."""
+    p = _mt5_offset_file(config_mod)
+    if p is None or not p.exists():
+        return None
+    try:
+        data = json.loads(p.read_text(encoding="utf-8", errors="replace"))
+        if isinstance(data, dict):
+            sec = float(data.get("offset_seconds", 0.0) or 0.0)
+            if math.isfinite(sec) and 3600.0 <= sec <= 14.0 * 3600.0:
+                return sec
+    except Exception:
+        pass
+    return None
+
+
 def resolve_mt5_quote_age(
     quote_epoch: float,
     now_epoch: float,
@@ -74,19 +144,25 @@ def resolve_mt5_quote_age(
     ``now_epoch - quote_epoch`` is ``~ -10,800s`` and fails closed as 'future-dated'.
 
     Safety invariants:
-    - Windows ``datetime.now()`` sub-millisecond rounding (``-0.005s <= age < 0``) clamps to ``0.0``.
-    - Small bogus future timestamps (e.g. ``now + 1s``) have no integer timezone match and
-      still return ``< 0`` ('future-dated').
-    - Auto-detection only calibrates positive broker server offsets ``k * 3600s``
-      (``1 <= k <= 14``) when the initial tick is genuinely live
-      (``0 <= implied_age <= min(max_age, 60.0)``), then locks ``cached_offset_s`` on the
-      caller so a later 1-hour-stale tick stays ``3,600s`` stale instead of shifting ``k``.
+    - Uncalibrated UTC ticks (``k == 0``) only clamp sub-millisecond Windows rounding
+      (``-0.005s <= raw_age < 0`` -> ``0.0``), so bogus future ticks (e.g. ``now + 1s``)
+      still fail closed as 'future-dated'.
+    - Positive broker trade-server offsets (``1 <= k <= 14`` or explicit non-zero offset)
+      absorb normal laptop-vs-broker NTP skew up to ``MT5_SERVER_CLOCK_SKEW_TOLERANCE_SECONDS``
+      (default ``5.0s``) so fast-ticking sub-second quotes never false-defer when the
+      laptop's Windows clock lags the Equinix trade server by ``0.3s–1.8s``.
+    - Once calibrated, ``cached_offset_s`` stays locked on the caller so a 1-hour-stale
+      tick stays ``3,600s`` stale instead of shifting ``k``.
     """
+    skew_tol = _server_skew_tolerance_seconds(config_mod)
     explicit = _explicit_mt5_tz_offset_seconds(config_mod)
     if explicit is not None:
         age = (now_epoch + explicit) - quote_epoch
-        if -0.005 <= age < 0.0:
+        tol = skew_tol if abs(explicit) >= 1800.0 else 0.005
+        if -tol <= age < 0.0:
             age = 0.0
+        if explicit > 0.0 and 0.0 <= age <= max_age:
+            persist_mt5_server_offset(explicit, config_mod=config_mod)
         return age, explicit
 
     raw_age = now_epoch - quote_epoch
@@ -99,7 +175,7 @@ def resolve_mt5_quote_age(
     if raw_age < -0.005:
         if cached_offset_s is not None and cached_offset_s > 0.0:
             age = (now_epoch + cached_offset_s) - quote_epoch
-            if -0.005 <= age < 0.0:
+            if -skew_tol <= age < 0.0:
                 age = 0.0
             # Keep cached_offset_s locked for the session so a 1-hour-stale tick
             # stays 3,600s stale instead of snapping down to (k - 1) * 3600s.
@@ -109,13 +185,14 @@ def resolve_mt5_quote_age(
         if 1 <= k <= 14:
             cand_offset = k * 3600.0
             implied_age = (now_epoch + cand_offset) - quote_epoch
-            if -0.005 <= implied_age < 0.0:
+            if -skew_tol <= implied_age < 0.0:
                 implied_age = 0.0
             if 0.0 <= implied_age <= min(max_age, 60.0):
                 logger.info(
                     "MT5 broker server clock offset detected: +%ds (UTC+%d)",
                     int(cand_offset), int(k),
                 )
+                persist_mt5_server_offset(cand_offset, config_mod=config_mod)
                 return implied_age, cand_offset
 
     return raw_age, cached_offset_s
@@ -144,17 +221,25 @@ def resolve_mt5_deal_epoch_utc(
             if math.isfinite(q_ep) and q_ep > now_epoch + 1800.0:
                 k = round((q_ep - now_epoch) / 3600.0)
                 if 1 <= k <= 14 and abs((now_epoch + k * 3600.0) - q_ep) <= 900.0:
-                    return deal_epoch - (k * 3600.0)
+                    off = k * 3600.0
+                    persist_mt5_server_offset(off, config_mod=config_mod)
+                    return deal_epoch - off
         except (TypeError, ValueError, OverflowError):
             pass
 
-    # Fallback when deal itself is stamped >=55m ahead of UTC on a GMT+1..+14 server
-    if deal_epoch > now_epoch + 3300.0:
+    # Fallback when deal itself is still ahead of current UTC on a GMT+1..+14 server
+    if deal_epoch > now_epoch + 1800.0:
         k = round((deal_epoch - now_epoch) / 3600.0)
         if 1 <= k <= 14:
             cand_utc = deal_epoch - (k * 3600.0)
-            if cand_utc <= now_epoch + 5.0:
+            if cand_utc <= now_epoch + 15.0:
                 return cand_utc
+
+    # Historical deal from earlier in the day (when deal_epoch <= now_epoch):
+    # use persisted session offset calibrated from live MT5 ticks.
+    persisted = load_persisted_mt5_server_offset_seconds(config_mod)
+    if persisted is not None and deal_epoch - persisted <= now_epoch + 15.0:
+        return deal_epoch - persisted
     return deal_epoch
 
 
@@ -907,6 +992,20 @@ class MT5Executor:
                     f"A2 burst fixed bracket: TP {tp:.2f} ({a2_tp_pts:.2f} pts), "
                     f"SL {sl:.2f} ({a2_sl_pts:.2f} pts)"
                 ]
+                # C3 Wall-Aware Burst Cap: if a trusted opposing BookMap wall sits closer
+                # than the fixed burst target and still clears spread/min-reward, front-run
+                # the wall instead of aiming blindly through resting liquidity.
+                if bool(getattr(config, "PM_C3_WALL_TRAIL_ENABLED", True)):
+                    from wall_brackets import compute_wall_brackets
+                    _wsl, _wtp, _wnotes = compute_wall_brackets(
+                        action, price, atr, snapshot, cfd_spread=cfd_tick_spread)
+                    if _wtp is not None:
+                        _wtp_n = self._normalize_price(_wtp, info)
+                        _wall_closer = (_wtp_n < tp and _wtp_n > price) if is_buy else (_wtp_n > tp and _wtp_n < price)
+                        _min_burst_rew = max(cfd_tick_spread * 3.0, 0.55 * a2_sl_pts)
+                        if _wall_closer and abs(_wtp_n - price) >= _min_burst_rew:
+                            tp = _wtp_n
+                            struct_notes.append(f"C3 opposing-wall TP cap -> {tp:.2f}")
             except Exception:
                 logger.exception("A2 burst bracket failed - falling back to wall brackets")
                 sl, tp = None, None

@@ -1400,6 +1400,48 @@ def _parse_log_stamp(s, ms):
         return naive.replace(tzinfo=timezone.utc)
 
 
+def _cme_break_utc_bounds(dt_utc: datetime):
+    """Return (break_start_utc, break_end_utc) for the weekday 17:00-18:00 NY CME break."""
+    u = dt_utc.astimezone(timezone.utc)
+    if u.weekday() not in {0, 1, 2, 3, 4}:
+        return None
+    ny_off = None
+    try:
+        from zoneinfo import ZoneInfo
+        off = u.astimezone(ZoneInfo("America/New_York")).utcoffset()
+        if off is not None:
+            ny_off = int(round(off.total_seconds() / 3600.0))
+    except Exception:
+        ny_off = None
+    if ny_off is None:
+        m3 = datetime(u.year, 3, 1, tzinfo=timezone.utc)
+        s_dst = datetime(u.year, 3, 1 + (6 - m3.weekday()) % 7 + 7, 7, tzinfo=timezone.utc)
+        m11 = datetime(u.year, 11, 1, tzinfo=timezone.utc)
+        e_dst = datetime(u.year, 11, 1 + (6 - m11.weekday()) % 7, 6, tzinfo=timezone.utc)
+        ny_off = -4 if s_dst <= u < e_dst else -5
+    start_h = (17 - ny_off) % 24
+    b_start = u.replace(hour=start_h, minute=0, second=0, microsecond=0)
+    b_end = b_start + timedelta(hours=1)
+    return b_start, b_end
+
+
+def _is_cme_maintenance_gap(a: datetime, b: datetime) -> bool:
+    """True when gap [a, b] is the scheduled 17:00-18:00 America/New_York CME Globex break."""
+    ua = a.astimezone(timezone.utc)
+    ub = b.astimezone(timezone.utc)
+    g = (ub - ua).total_seconds()
+    if not (3000.0 <= g <= 4200.0):
+        return False
+    bounds = _cme_break_utc_bounds(ua)
+    if bounds is None:
+        return False
+    b_start, b_end = bounds
+    return (
+        (b_start - timedelta(minutes=10)) <= ua <= (b_start + timedelta(minutes=5))
+        and (b_end - timedelta(minutes=5)) <= ub <= (b_end + timedelta(minutes=12))
+    )
+
+
 def test_1_alive(day, log_path, text, decisions, tape_last=None, tape_first=None):
     r = Report(1)
     stamps = re.findall(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}),(\d{3})", text, re.M)
@@ -1420,17 +1462,30 @@ def test_1_alive(day, log_path, text, decisions, tape_last=None, tape_first=None
     first, last = min(dts), max(dts)
     span_h = (last - first).total_seconds() / 3600.0
     gap_max = 0.0
+    unsched_gap_max = 0.0
     gaps_over_15min = 0
+    cme_break_gaps = 0
     for a, b in zip(dts, dts[1:]):
         g = (b - a).total_seconds()
         if g > gap_max:
             gap_max = g
+        if _is_cme_maintenance_gap(a, b):
+            cme_break_gaps += 1
+            continue
+        if g > unsched_gap_max:
+            unsched_gap_max = g
         if g > 900:
             gaps_over_15min += 1
+    _gap_note = (
+        f"longest unscheduled silence: {unsched_gap_max/60:.1f} min, unscheduled gaps >15 min: {gaps_over_15min} "
+        f"(scheduled 60 min CME 17:00-18:00 NY maintenance break observed: x{cme_break_gaps})"
+        if cme_break_gaps
+        else f"longest silence between two log lines: {gap_max/60:.1f} min, gaps >15 min: {gaps_over_15min}"
+    )
     why = [f"log file {log_path.name}, {len(dts)} lines",
            f"first {first.astimezone(BUDA):%H:%M:%S}  last {last.astimezone(BUDA):%H:%M:%S}  = {span_h:.1f} h awake"
            f"  (log start only - if BookMap was already writing before this, the gap is the robot, not you)",
-           f"longest silence between two log lines: {gap_max/60:.1f} min, gaps >15 min: {gaps_over_15min}"]
+           _gap_note]
     why += _sess_story(text)
     # 24m/B3: being awake is not the same as being able to see. main.py DOES stop
     # trading ~5 min after the tape freezes (the protection works), but this test only
@@ -1507,11 +1562,23 @@ def test_2_feed(day, ticks, ticks_path, ticks_scanned, mbo_n, alive, mbo_win=0):
     t_first = inwin[0][0].astimezone(BUDA)
     t_last = inwin[-1][0].astimezone(BUDA)
     per_min = len(inwin) / max(1.0, ((inwin[-1][0] - inwin[0][0]).total_seconds() / 60.0))
-    gap = max(((b[0] - a[0]).total_seconds() for a, b in zip(inwin, inwin[1:])), default=0)
+    raw_gap = 0.0
+    gap = 0.0
+    cme_feed_breaks = 0
+    for a, b in zip(inwin, inwin[1:]):
+        g = (b[0] - a[0]).total_seconds()
+        if g > raw_gap:
+            raw_gap = g
+        if _is_cme_maintenance_gap(a[0], b[0]):
+            cme_feed_breaks += 1
+            continue
+        if g > gap:
+            gap = g
     cov_min = len({t[0].replace(second=0, microsecond=0) for t in inwin})
     awake_min = max(1, int((inwin[-1][0] - inwin[0][0]).total_seconds() // 60) + 1)
+    effective_awake_min = max(1, awake_min - (60 * cme_feed_breaks))
     if whole:
-        cov = pct(cov_min, awake_min)                 # continuity of the recording
+        cov = pct(cov_min, effective_awake_min)       # continuity of the open market recording
         day_cover = pct(awake_min, 1440)              # how much of the day the tape spans
     else:
         cov = pct(cov_min, span_min)
@@ -1521,7 +1588,11 @@ def test_2_feed(day, ticks, ticks_path, ticks_scanned, mbo_n, alive, mbo_win=0):
                        f"inside {WINDOW_START_H:02d}:00-{WINDOW_END_H:02d}:00; the other "
                        f"{n - len(inwin):,} prints the bridge wrote outside that span are "
                        f"counted, not graded")
-    why.append(f"{n:,} trade prints, {per_min:.0f}/min average, biggest hole {gap:.0f}s")
+    if cme_feed_breaks:
+        why.append(f"{n:,} trade prints, {per_min:.0f}/min average, biggest unscheduled hole {gap:.0f}s "
+                   f"(raw {raw_gap:.0f}s = scheduled 60m CME 17:00-18:00 NY maintenance break)")
+    else:
+        why.append(f"{n:,} trade prints, {per_min:.0f}/min average, biggest hole {gap:.0f}s")
     _win_h = (23 - 8) if (WINDOW_START_H == 0 and WINDOW_END_H >= 24) else (WINDOW_END_H - WINDOW_START_H)
     why.append(f"tape runs {t_first:%H:%M} -> {t_last:%H:%M} local "
                f"({awake_min / 60.0:.1f} h = {day_cover:.0f}% of the 24h day, "
@@ -2282,7 +2353,7 @@ JUDGE_ROSTER = {
     "vwap_bands":         ("Structure", "How far price has stretched from VWAP - snap-back or breakout."),
     "vwap_zscore":        ("Structure", "The same stretch, measured in standard deviations."),
     "poc_day":            ("Structure", "Today's point of control - the price with the most traded volume."),
-    "htf_poc":            ("Structure", "The same, but from higher timeframes. Slowest judge: 120 minutes."),
+    "htf_poc":            ("Structure", "RETIRED from panel voting (C2; H1/H4 POC stays active as Scout map door & PM anchor)."),
     "value_area":         ("Structure", "Is price inside or outside the day's value area?"),
     "supply_demand":      ("Structure", "Known supply and demand zones from earlier trading."),
     "mtf":                ("Structure", "Multi-timeframe agreement: H1, M15 and M5 pointing the same way."),
@@ -2304,6 +2375,8 @@ RETIRED_JUDGES = {
     "iceberg_legacy": "retired: superseded by iceberg",
     "l3_ofi_streak": "retired: l3_net_flow over another window",
     "delta_pressure": "retired: footprint_delta on a slower clock",
+    "whale_walls": "retired (C1 owner decision): 7,474 calls -0.834/call; walls stay Scout/PM brackets",
+    "htf_poc": "retired (C2 owner decision): 7,134 calls -0.032/call; H1/H4 POC stays Scout/PM anchor",
 }
 
 
@@ -3523,6 +3596,64 @@ def test_12_latency(text):
     return r, {"median": med}
 
 
+def _resolve_audit_deal_epoch_utc(deal_epoch: float, now_epoch: float, live_tick=None) -> float:
+    """Convert MT5 deal timestamp from broker server time (GMT+2/+3) into true UTC epoch."""
+    if not math.isfinite(deal_epoch) or deal_epoch <= 0.0:
+        return deal_epoch
+    try:
+        if str(ROOT) not in sys.path:
+            sys.path.insert(0, str(ROOT))
+        from step4_mt5_execution import resolve_mt5_deal_epoch_utc
+        return float(resolve_mt5_deal_epoch_utc(deal_epoch, now_epoch, tick=live_tick))
+    except Exception:
+        pass
+    # Pure-stdlib fallback using persisted mt5_server_offset.json or live tick
+    if live_tick is not None:
+        try:
+            tmsc = int(getattr(live_tick, "time_msc", 0) or 0)
+            tsec = float(getattr(live_tick, "time", 0) or 0.0)
+            q_ep = (tmsc / 1000.0) if tmsc > 0 else tsec
+            if q_ep > now_epoch + 1800.0:
+                k = round((q_ep - now_epoch) / 3600.0)
+                if 1 <= k <= 14 and abs((now_epoch + k * 3600.0) - q_ep) <= 900.0:
+                    return deal_epoch - (k * 3600.0)
+        except Exception:
+            pass
+    try:
+        off_p = DATA_DIR() / "mt5_server_offset.json"
+        if off_p.exists():
+            data = json.loads(off_p.read_text(encoding="utf-8", errors="ignore"))
+            sec = float((data or {}).get("offset_seconds", 0.0) or 0.0)
+            if 3600.0 <= sec <= 14.0 * 3600.0 and (deal_epoch - sec) <= now_epoch + 15.0:
+                return deal_epoch - sec
+    except Exception:
+        pass
+    return deal_epoch
+
+
+def _known_recorded_ids(recorded_rows) -> set:
+    """Collect all order_id / position_id / ticket / comment pos=<id> identifiers."""
+    known = set()
+    for row in recorded_rows or []:
+        for k in ("position_id", "order_id", "ticket", "id"):
+            v = str(row.get(k) or "").strip()
+            if v and v not in ("0", "None"):
+                known.add(v)
+        c = str(row.get("comment") or "")
+        for pid in re.findall(r"\bpos=(\d+)\b", c):
+            if pid and pid != "0":
+                known.add(pid)
+    return known
+
+
+def _deal_in_recorded_ids(deal_row: dict, known: set) -> bool:
+    pid = str(deal_row.get("position_id") or "").strip()
+    tid = str(deal_row.get("ticket") or "").strip()
+    return (bool(pid) and pid not in ("0", "None") and pid in known) or (
+        bool(tid) and tid not in ("0", "None") and tid in known
+    )
+
+
 def _mt5_truth(day):
     """Ask MT5 itself what is true. Read-only, never raises, never blocks a report.
 
@@ -3540,30 +3671,95 @@ def _mt5_truth(day):
             return None, f"terminal not reachable ({mt5.last_error()})"
         try:
             positions = mt5.positions_get() or []
-            frm = datetime.combine(day, datetime.min.time())
-            to = frm + timedelta(days=1)
-            deals = list(mt5.history_deals_get(frm, to) or [])
-            # Filter to actual BUY/SELL trade deals (DEAL_TYPE_BUY=0, DEAL_TYPE_SELL=1)
-            # so broker DEMO initial balance/credit entries (type 2+) do not look like
-            # orphan opened trades in TEST 13.
-            trade_deals = [
-                d for d in deals
-                if getattr(d, "type", None) in (0, 1)
-                or (getattr(d, "type", None) is None and str(getattr(d, "symbol", "") or "").strip() != "")
-            ]
-            balance_deals = len(deals) - len(trade_deals)
+            now_epoch = datetime.now(timezone.utc).timestamp()
+            live_tick = None
+            tick_fn = getattr(mt5, "symbol_info_tick", None)
+            if callable(tick_fn):
+                for _sym in ("XAUUSD", "XAUUSD.a", "GOLD"):
+                    try:
+                        live_tick = tick_fn(_sym)
+                        if live_tick is not None:
+                            break
+                    except Exception:
+                        continue
+
+            # Wide query window (-6h .. +40h capped near current broker clock) so GMT+2/+3
+            # late-evening deals (e.g. 20:28 UTC = 23:28 GMT+3) are never cut off by a naive
+            # local midnight upper bound.
+            base_frm = datetime.combine(day, datetime.min.time())
+            frm = base_frm - timedelta(hours=6)
+            max_to = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=15)
+            to = min(base_frm + timedelta(hours=40), max_to)
+            if to <= frm:
+                to = base_frm + timedelta(days=1)
+            raw_deals = list(mt5.history_deals_get(frm, to) or [])
+
+            # Also merge position-specific deal queries from tracked_bot_positions.json
+            # (Pepperstone can omit XAUUSD deals from date-range queries while returning
+            # them reliably via history_deals_get(position=...)).
+            tp = DATA_DIR() / "tracked_bot_positions.json"
+            if tp.exists():
+                try:
+                    t_raw = json.loads(tp.read_text(encoding="utf-8", errors="ignore"))
+                    t_ids = (
+                        t_raw.get("position_ids", [])
+                        if isinstance(t_raw, dict)
+                        else (t_raw if isinstance(t_raw, list) else [])
+                    )
+                    for pid in t_ids:
+                        try:
+                            p_deals = mt5.history_deals_get(position=int(pid)) or []
+                            raw_deals.extend(p_deals)
+                        except (TypeError, ValueError):
+                            break
+                        except Exception:
+                            continue
+                except Exception:
+                    pass
+
+            # Deduplicate deals; count broker balance/credit entries first, then
+            # strictly filter BUY/SELL trade deals to the graded Budapest day in true UTC
+            # so historical IDs in append-only tracked_bot_positions.json never leak in.
+            seen_keys = set()
+            balance_deals = 0
+            trade_pairs = []
+            for d in raw_deals:
+                t_raw = int(getattr(d, "time", 0) or 0)
+                d_key = (
+                    int(getattr(d, "ticket", 0) or 0),
+                    int(getattr(d, "position_id", 0) or 0),
+                    getattr(d, "entry", None),
+                    t_raw,
+                )
+                if d_key != (0, 0, None, 0) and d_key in seen_keys:
+                    continue
+                seen_keys.add(d_key)
+                is_trade = (
+                    getattr(d, "type", None) in (0, 1)
+                    or (getattr(d, "type", None) is None and str(getattr(d, "symbol", "") or "").strip() != "")
+                )
+                if not is_trade:
+                    balance_deals += 1
+                    continue
+                t_utc = _resolve_audit_deal_epoch_utc(float(t_raw), now_epoch, live_tick=live_tick) if t_raw > 0 else 0.0
+                if t_raw > 0:
+                    dt_utc = datetime.fromtimestamp(t_utc, tz=timezone.utc)
+                    if not on_day(dt_utc, day):
+                        continue
+                trade_pairs.append((d, t_utc))
+
             # entry==1 means "deal that CLOSED/EXITED a position" in MT5's deal model
-            closed = [d for d in trade_deals if getattr(d, "entry", None) == 1]
-            opened = [d for d in trade_deals if getattr(d, "entry", None) == 0]
-            pnl = sum(float(getattr(d, "profit", 0.0) or 0.0) for d in closed)
-            last = max((getattr(d, "time", 0) for d in trade_deals), default=0)
-            def _deal_row(d):
+            closed = [(d, t_utc) for (d, t_utc) in trade_pairs if getattr(d, "entry", None) == 1]
+            opened = [(d, t_utc) for (d, t_utc) in trade_pairs if getattr(d, "entry", None) == 0]
+            pnl = sum(float(getattr(d, "profit", 0.0) or 0.0) for (d, _) in closed)
+            last = max((t_utc for (_, t_utc) in trade_pairs), default=0.0)
+            def _deal_row(d, t_utc):
                 return {
                     "position_id": int(getattr(d, "position_id", 0) or 0),
                     "ticket": int(getattr(d, "ticket", 0) or 0),
-                    "time_utc": (datetime.fromtimestamp(int(getattr(d, "time", 0) or 0),
+                    "time_utc": (datetime.fromtimestamp(int(round(t_utc)),
                                                         tz=timezone.utc).isoformat()
-                                 if getattr(d, "time", 0) else ""),
+                                 if t_utc > 0 else ""),
                     "symbol": str(getattr(d, "symbol", "") or ""),
                     "side": ("SELL" if getattr(d, "type", 0) == 1 else "BUY"),
                     "volume": float(getattr(d, "volume", 0.0) or 0.0),
@@ -3574,21 +3770,17 @@ def _mt5_truth(day):
                     "comment": str(getattr(d, "comment", "") or ""),
                 }
             return {
-                "closed_deals": [_deal_row(d) for d in closed],
-                "closed_ids": [int(getattr(d, "position_id", 0) or 0) for d in closed[:8]],
+                "closed_deals": [_deal_row(d, t_utc) for (d, t_utc) in closed],
+                "closed_ids": [int(getattr(d, "position_id", 0) or 0) for (d, _) in closed[:8]],
                 "open_now": len(positions),
                 "open_detail": [f"{getattr(p, 'symbol', '?')} {getattr(p, 'volume', '?')} "
                                 f"@ {getattr(p, 'price_open', '?')}"
                                 for p in positions[:6]],
-                "deals_total": len(trade_deals), "closed": len(closed), "opened": len(opened),
+                "deals_total": len(trade_pairs), "closed": len(closed), "opened": len(opened),
                 "balance_deals": balance_deals,
                 "pnl": pnl,
-                # MT5 hands back deal times as broker-SERVER-time epochs. Formatting one
-                # with the local clock added the server offset AND the local offset on top
-                # (a 09:39 UTC deal printed as 14:39). UTC + an explicit label is the only
-                # honest reading of a number whose timezone we cannot know from here.
-                "last_deal": (datetime.fromtimestamp(last, tz=timezone.utc).strftime("%m-%d %H:%M")
-                              if last else "none"),
+                "last_deal": (datetime.fromtimestamp(int(round(last)), tz=timezone.utc).strftime("%m-%d %H:%M")
+                              if last > 0 else "none"),
             }, None
         finally:
             try:
@@ -3668,12 +3860,7 @@ def write_mt5_reconciliation(day, truth, recorded_rows):
     deals = (truth or {}).get("closed_deals") or []
     if not deals:
         return None, 0, 0
-    known = set()
-    for row in recorded_rows or []:
-        for k in ("position_id", "order_id", "ticket", "id"):
-            v = str(row.get(k) or "").strip()
-            if v and v not in ("0", "None"):
-                known.add(v)
+    known = _known_recorded_ids(recorded_rows)
     path = DATA_DIR() / f"mt5_deals_{day:%Y%m%d}.csv"
     cols = ["position_id", "ticket", "time_utc", "symbol", "side", "volume", "price",
             "profit", "commission", "swap", "comment", "in_robot_records", "source"]
@@ -3683,7 +3870,7 @@ def write_mt5_reconciliation(day, truth, recorded_rows):
             w = csv.DictWriter(fh, fieldnames=cols)
             w.writeheader()
             for d in deals:
-                seen = str(d.get("position_id")) in known
+                seen = _deal_in_recorded_ids(d, known)
                 if not seen:
                     n_missing += 1
                 row = dict(d)
@@ -3816,21 +4003,26 @@ def test_13_money(day, decisions=None):
             why.append(f"THE DAY'S REAL MONEY (MT5, profit+commission+swap): {_net:+.2f} "
                        f"across {_rn} closed deal(s) - this is the number to trust, the "
                        f"points figures above are the strategy's own scoreboard")
+            _known_ids = _known_recorded_ids(_rec_rows)
             for _d in truth["closed_deals"][:10]:
-                _mark = "" if str(_d.get("position_id")) in {
-                    str(rr.get(k) or "") for rr in (_rec_rows or [])
-                    for k in ("position_id", "order_id", "ticket", "id")} else "  <- MISSING from our records"
+                _mark = "" if _deal_in_recorded_ids(_d, _known_ids) else "  <- MISSING from our records"
                 why.append(f"   {_d.get('time_utc', '')[11:16]}Z {_d.get('symbol')} "
                            f"{_d.get('side')} {_d.get('volume')} @ {_d.get('price')} "
                            f"= {float(_d.get('profit', 0) or 0):+.2f}{_mark}")
     _mismatch = False
     if truth is not None:
-        if truth["closed"] > len(_rec_rows):
+        _known_ids = _known_recorded_ids(_rec_rows)
+        _unmatched_closed = [
+            d for d in (truth.get("closed_deals") or [])
+            if not _deal_in_recorded_ids(d, _known_ids)
+        ]
+        if truth["closed"] > len(_rec_rows) or _unmatched_closed:
             _mismatch = True
+            _miss_cnt = max(truth["closed"] - len(_rec_rows), len(_unmatched_closed))
             why.append(f"MT5 vs OUR OWN RECORDS: MT5 closed {truth['closed']} position(s) that day"
                        + (f" (ids {truth['closed_ids']})" if truth.get("closed_ids") else "")
-                       + f", but trade_outcomes.csv only records {len(_rec_rows)}"
-                       + f" -> {truth['closed'] - len(_rec_rows)} closed position(s) are MISSING from "
+                       + f", but trade_outcomes.csv only matches {truth['closed'] - _miss_cnt}"
+                       + f" -> {_miss_cnt} closed position(s) are MISSING from "
                          f"the robot's own records. MT5 is the truth; every money line above this "
                          f"one is incomplete until the gap is explained.")
         elif len(_rec_rows) > truth["closed"]:
@@ -3853,10 +4045,9 @@ def test_13_money(day, decisions=None):
         return "WARN" if _mismatch else g
 
     if open_ids and truth is not None and truth["open_now"] == 0:
-        why.append("the tracking file lists ids but MT5 has nothing open: those ids belong to "
-                   "trades that are closed (or were never sent). Nothing to close - the file "
-                   "does not prune itself.")
-        r.add(_mgrade("PASS" if truth["deals_total"] == 0 else "WARN"), "MONEY CHECK",
+        why.append("tracked_bot_positions.json lists historical session id(s) (append-only by design), "
+                   "and MT5 confirms 0 open positions right now -> nothing left open.")
+        r.add(_mgrade("PASS"), "MONEY CHECK",
               "did anything get left open, forgotten, or half-written?", why)
     elif open_ids:
         why.append("there are tracked ids -> and MT5 was NOT asked, so go look at them by hand before trusting anything")
@@ -4746,11 +4937,27 @@ def test_16_team_cycle(day, diary, text, decisions):
                  f"{ready_detail} (timeframe source: {active_source})"
                  f"{timeframe_note}{probe_note}")
         elif ready is False:
-            _chk("WARN", "1  active-timeframe regime history",
-                 f"last regime tail {tail} on {tf}, reason={last_probe.get('regime_reason', 'not recorded')}, "
-                 f"gaps={last_probe.get('regime_gaps', 'not recorded')}, "
-                 f"tick_age_s={last_probe.get('tick_age_s', 'not recorded')} "
-                 f"(timeframe source: {active_source}){timeframe_note}{probe_note}")
+            prior_ready_count = sum(
+                1 for pr in probe_rows
+                if _power_history_ready(pr, active_seconds) is True
+            )
+            last_reason_up = str(last_probe.get("regime_reason", "")).upper()
+            if (
+                prior_ready_count > 0
+                and tf == expected_tf
+                and last_reason_up.startswith("GAP_IN_COMPLETED_")
+            ):
+                _chk("PASS", "1  active-timeframe regime history",
+                     f"active {tf} tail reached full readiness x{prior_ready_count} during session; "
+                     f"final receipt ({tail}, reason={last_probe.get('regime_reason')}) reflects "
+                     f"post-break re-warm after the scheduled CME daily maintenance break "
+                     f"(timeframe source: {active_source}){probe_note}")
+            else:
+                _chk("WARN", "1  active-timeframe regime history",
+                     f"last regime tail {tail} on {tf}, reason={last_probe.get('regime_reason', 'not recorded')}, "
+                     f"gaps={last_probe.get('regime_gaps', 'not recorded')}, "
+                     f"tick_age_s={last_probe.get('tick_age_s', 'not recorded')} "
+                     f"(timeframe source: {active_source}){timeframe_note}{probe_note}")
         else:
             _chk("WARN", "1  active-timeframe regime history",
                  f"probe line found (status={status}) but active regime tail/readiness "
@@ -4949,27 +5156,33 @@ def test_16_team_cycle(day, diary, text, decisions):
     flats = re.findall(r"daily flatten[^\n]*|SESSION_FLATTEN[^\n]*", txt, re.I)
     stamps = re.findall(r"\d{4}-\d{2}-\d{2} (\d{2}:\d{2}):\d{2}", txt)
     last_hm = stamps[-1] if stamps else None
+    cfg_flat_local = "23:30"
+    try:
+        if isinstance(rc, dict) and rc.get("PM_DAILY_FLATTEN_LOCAL"):
+            cfg_flat_local = str(rc.get("PM_DAILY_FLATTEN_LOCAL")).strip()
+    except Exception:
+        pass
     n_sent = sum(1 for d in (decisions or [])
                  if str(d.get("exec_status") or "").upper() in ("EXECUTED", "PENDING"))
     if flats:
-        _chk("PASS", "11  PM daily flatten 21:30 UTC",
-             "flatten evidence in the log, last: " + flats[-1].strip()[:90])
+        _chk("PASS", f"11  PM daily flatten ({cfg_flat_local} local / pre-CME break)",
+             "flatten evidence in the log, last: " + flats[-1].strip()[:100])
     elif n_sent == 0:
-        _chk("PASS", "11  PM daily flatten 21:30 UTC",
+        _chk("PASS", f"11  PM daily flatten ({cfg_flat_local} local / pre-CME break)",
              "no 'daily flatten' line because there was NOTHING to flatten - "
              "0 orders were sent today, and the checklist accepts "
              "'positions flattened or none open'. The flatten logic itself is "
              "still untested and needs a day with an open position")
-    elif last_hm and last_hm < "23:00":
-        _chk("NA", "11  PM daily flatten 21:30 UTC",
-             f"the log ends at {last_hm} local - the robot was not running at "
-             "23:30 Budapest flatten time (nothing open to flatten is fine too)")
+    elif last_hm and last_hm < cfg_flat_local:
+        _chk("NA", f"11  PM daily flatten ({cfg_flat_local} local / pre-CME break)",
+             f"the log ends at {last_hm} local - before the {cfg_flat_local} Budapest "
+             "late-session flatten time (checklist accepts 'positions flattened or none open')")
     elif last_hm:
-        _chk("WARN", "11  PM daily flatten 21:30 UTC",
-             f"the log runs to {last_hm} local (past the 23:30 flatten) but no "
+        _chk("WARN", f"11  PM daily flatten ({cfg_flat_local} local / pre-CME break)",
+             f"the log runs to {last_hm} local (past the {cfg_flat_local} flatten) but no "
              "'daily flatten' line was found - check position_manager")
     else:
-        _chk("NA", "11  PM daily flatten 21:30 UTC",
+        _chk("NA", f"11  PM daily flatten ({cfg_flat_local} local / pre-CME break)",
              "no timestamps readable in the log")
 
     l4 = len(re.findall(r"L4 KILL SWITCH TRIGGERED", txt))

@@ -442,17 +442,25 @@ class AIDecisionEngine:
 
     @classmethod
     def _record_model_slow_or_overloaded(cls, model: str, reason: str) -> None:
-        max_strikes = max(1, int(getattr(config, "AI_MODEL_SLOW_STRIKES", 3) or 3))
+        max_strikes = max(1, int(getattr(config, "AI_MODEL_SLOW_STRIKES", 2) or 2))
         demote_s = max(60.0, float(getattr(config, "AI_MODEL_DEMOTE_SECONDS", 900.0) or 900.0))
+        now_mono = time.monotonic()
+        was_demoted = float(cls._MODEL_DEMOTED_UNTIL.get(model, 0.0) or 0.0) > now_mono
         strikes = int(cls._MODEL_SLOW_STRIKES.get(model, 0) or 0) + 1
         cls._MODEL_SLOW_STRIKES[model] = strikes
         if strikes >= max_strikes:
-            cls._MODEL_DEMOTED_UNTIL[model] = time.monotonic() + demote_s
-            logger.warning(
-                "STEP 3: demoting slow/congested model %s to fallback tail for %.0fm "
-                "after %d consecutive %s events.",
-                model, demote_s / 60.0, strikes, reason,
-            )
+            cls._MODEL_DEMOTED_UNTIL[model] = now_mono + demote_s
+            if not was_demoted:
+                logger.warning(
+                    "STEP 3: demoting slow/congested model %s to fallback tail for %.0fm "
+                    "after %d consecutive %s events.",
+                    model, demote_s / 60.0, strikes, reason,
+                )
+            else:
+                logger.debug(
+                    "STEP 3: refreshing demotion on model %s for %.0fm (strikes=%d, reason=%s).",
+                    model, demote_s / 60.0, strikes, reason,
+                )
 
     @classmethod
     def _record_model_success(cls, model: str) -> None:
@@ -939,7 +947,7 @@ class AIDecisionEngine:
             raw_models = list(getattr(config, "GEMINI_MODELS", None) or [self.model])
         avail_models = [m for m in raw_models if m not in self._UNAVAILABLE_MODELS] or list(raw_models)
         models = self._order_models_by_health(avail_models)
-        exhausted = _exhausted_keys()
+        exhausted = set(_exhausted_keys())
         active_keys = [k for k in self.api_keys if _key_id(k) not in exhausted]
         total_candidates = len(models) * max(1, len(active_keys))
         last_error = ""
@@ -952,10 +960,11 @@ class AIDecisionEngine:
         saw_non_timeout_error = False
         if len(models) >= 3 and budget_s >= 18.0:
             # Ensure 3-model cascade (3.8-flash -> 3.6-flash -> 3.5-flash-lite)
-            # leaves ~5s+ for the ultra-fast lite model instead of starving it at 0s.
-            per_attempt_cap_s = max(8.0, min(10.0, budget_s * 0.40))
+            # leaves ~10s for the ultra-fast lite model on urgent synchronous GO cycles.
+            cfg_slice = float(getattr(config, "AI_MODEL_SLICE_CAP_SECONDS", 7.5) or 7.5)
+            per_attempt_cap_s = max(4.0, min(cfg_slice, budget_s * 0.40))
         elif budget_s >= 10.0 and total_candidates > 1:
-            per_attempt_cap_s = max(8.0, min(14.0, budget_s * 0.55))
+            per_attempt_cap_s = max(6.0, min(14.0, budget_s * 0.55))
         else:
             per_attempt_cap_s = budget_s
         self._active_deadline_monotonic = deadline_monotonic
@@ -966,6 +975,7 @@ class AIDecisionEngine:
                     break
                 tried_model = model
                 is_last_model = (model_idx == len(models) - 1)
+                quota_hits_this_model = 0
                 for key_index, key in enumerate(self.api_keys, 1):
                     if _key_id(key) in exhausted:
                         continue
@@ -974,9 +984,8 @@ class AIDecisionEngine:
                         budget_exhausted = True
                         break
                     # Give the final model in the cascade the full remaining budget
-                    # when only one healthy key is in play, instead of slicing at 10s
-                    # with no model left behind it.
-                    if is_last_model and len(active_keys) <= 1:
+                    # rather than slicing with no fallback model left behind it.
+                    if is_last_model:
                         attempt_budget_s = remaining_s
                     else:
                         attempt_budget_s = min(remaining_s, per_attempt_cap_s)
@@ -1062,7 +1071,19 @@ class AIDecisionEngine:
                         saw_non_timeout_error = True
                         last_error = str(exc)[:300]
                         if self._is_quota_error(exc):
+                            quota_hits_this_model += 1
+                            if quota_hits_this_model >= 2 and not is_last_model:
+                                # Model-level RPM quota is saturated across multiple keys;
+                                # preserve remaining keys for fallback models (3.6-flash / 3.5-flash-lite).
+                                self._record_model_slow_or_overloaded(model, "model-rpm-quota")
+                                logger.warning(
+                                    "STEP 3: model %s hit RPM quota on %d keys (latest key #%d); "
+                                    "failing over to next model while keeping remaining keys available.",
+                                    model, quota_hits_this_model, key_index,
+                                )
+                                break
                             _mark_exhausted(key)
+                            exhausted.add(_key_id(key))
                             logger.warning("STEP 3: key #%d rate-limited (skipping "
                                            "for %d min on later cycles); trying the "
                                            "next key immediately.",
