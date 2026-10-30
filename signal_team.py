@@ -131,8 +131,8 @@ class Level:
 
     __slots__ = ("price", "side", "first_seen", "last_seen", "cycles_seen",
                  "missing", "size_now", "size_first", "size_max", "sources",
-                 "refills", "spoofed", "attacked", "big_player", "outlier_x",
-                 "samples")
+                 "refills", "spoofed", "spoofed_at", "attacked", "big_player",
+                 "outlier_x", "samples")
 
     def __init__(self, price: float, side: str, size: float, now: float):
         self.price = price
@@ -147,6 +147,7 @@ class Level:
         self.sources: List[str] = []
         self.refills = 0
         self.spoofed = False
+        self.spoofed_at = 0.0
         self.attacked = 0
         self.big_player = False
         self.outlier_x = 0.0
@@ -359,24 +360,37 @@ class LevelBook:
         #
         # One deliberate difference: the judge counts ANY event over the threshold,
         # including CANCEL. A cancelled order is not a wall - it is the opposite of
-        # one - so the scout counts only orders being PLACED.
-        for ev in (getattr(level3, "order_events", None) or [])[-500:]:
+        # one - so the scout counts only orders that are STILL LIVE (not later
+        # cancelled/filled in the event batch and not contradicted by a populated book).
+        recent_evs = list((getattr(level3, "order_events", None) or [])[-500:])
+        dead_oids = set()
+        for _ev in recent_evs:
+            try:
+                _oid = str(_ev.get("order_id") or _ev.get("id") or _ev.get("orderId") or "").strip()
+                _et = str(_ev.get("type", "") or "").upper()
+                if _oid and _oid not in ("-1", "0", "None", "null"):
+                    if any(k in _et for k in ("CANCEL", "DELETE", "REMOVE", "FILL", "TRADE", "EXEC")):
+                        dead_oids.add(_oid)
+            except Exception:
+                continue
+        ob_bids = {round(_f(r[0]), 2): _f(r[1]) for r in (ob.get("bids") or []) if len(r) >= 2}
+        ob_asks = {round(_f(r[0]), 2): _f(r[1]) for r in (ob.get("asks") or []) if len(r) >= 2}
+        min_ob_bid = min(ob_bids) if ob_bids else None
+        max_ob_ask = max(ob_asks) if ob_asks else None
+        for ev in recent_evs:
             try:
                 ev_price = _f(ev.get("price"))
                 ev_size = _f(ev.get("size"))
                 ev_type = str(ev.get("type", "") or "").upper()
                 ev_side = str(ev.get("side", "") or "").upper()
+                ev_oid = str(ev.get("order_id") or ev.get("id") or ev.get("orderId") or "").strip()
             except Exception:
                 continue
             if ev_size < whale_thr or ev_price <= 0:
                 continue
-            # Reject only what REMOVES size. Everything else means "an order of this
-            # size exists at this price", which is exactly what a door is.
-            # Seen live 2026-09-25 22:59: the judge reported 3 walls / 33 lots while
-            # the map said "no door in range". The feed writes BID_NEW / ASK_NEW /
-            # CANCEL / REPLACE, and REPLACE is 22% of the file - a modified order is
-            # still a resting order, but the old "must contain NEW" filter binned it.
-            if any(k in ev_type for k in ("CANCEL", "DELETE", "REMOVE")):
+            if ev_oid and ev_oid in dead_oids:
+                continue
+            if any(k in ev_type for k in ("CANCEL", "DELETE", "REMOVE", "FILL", "TRADE", "EXEC")):
                 continue
             if "BID" in ev_type or ev_side in ("BUY", "BID", "B"):
                 side = "bid"
@@ -384,6 +398,19 @@ class LevelBook:
                 side = "ask"
             else:
                 side = "bid" if ev_price < price else "ask"
+            p_r = round(ev_price, 2)
+            # If the live book snapshot covers this side's price band, verify the order
+            # is still resting in the book rather than resurrecting a vanished wall.
+            if side == "bid" and min_ob_bid is not None and p_r >= min_ob_bid:
+                cur_sz = ob_bids.get(p_r, 0.0)
+                if cur_sz < whale_thr * 0.5:
+                    continue
+                ev_size = cur_sz
+            elif side == "ask" and max_ob_ask is not None and p_r <= max_ob_ask:
+                cur_sz = ob_asks.get(p_r, 0.0)
+                if cur_sz < whale_thr * 0.5:
+                    continue
+                ev_size = cur_sz
             lv = touch(ev_price, side, ev_size)
             if lv and "event" not in lv.sources:
                 lv.sources.append("event")
@@ -403,21 +430,40 @@ class LevelBook:
             if "iceberg" not in lv.sources:
                 lv.sources.append("iceberg")
 
-        # spoof_invert: a known liar is BANNED, not penalised
+        # spoof_invert: a known liar is BANNED, not penalised (with 10-min clean rehab)
         banned = 0
-        for p in (spoof_levels or {}):
-            lv = self.levels.get(round(_f(p), 2))
-            if lv is not None and not lv.spoofed:
-                lv.spoofed = True
-                banned += 1
+        spoof_px_now = {round(_f(p), 2) for p in (spoof_levels or {})}
+        for p_sp in spoof_px_now:
+            lv = self.levels.get(p_sp)
+            if lv is not None:
+                lv.spoofed_at = now
+                if not lv.spoofed:
+                    lv.spoofed = True
+                    banned += 1
+        for lv in self.levels.values():
+            if lv.spoofed and lv.price not in spoof_px_now:
+                sp_at = getattr(lv, "spoofed_at", 0.0) or 0.0
+                if (now - sp_at) >= 600.0 and lv.size_now >= whale_thr and lv.cycles_seen >= 3:
+                    lv.spoofed = False
 
         # --- DESCRIBERS ------------------------------------------------------
-        # absorption: a wall being eaten while price does not move. The detector
-        # is global, not per price, so it is attributed to the nearest level on the
-        # side being eaten - an approximation, and labelled as one.
+        # absorption: a wall being eaten while price does not move. Use per-side
+        # rolling counts when available; fallback to signed absorption_net (+ = bid
+        # wall holding, - = ask wall holding).
+        bid_abs = int(_f(getattr(order_flow, "bid_absorbed", 0)))
+        ask_abs = int(_f(getattr(order_flow, "ask_absorbed", 0)))
         abs_net = int(_f(getattr(order_flow, "absorption_net", 0)))
-        if abs_net:
-            side_eaten = "bid" if abs_net < 0 else "ask"
+        if bid_abs > 0 or ask_abs > 0:
+            for side_eaten, cnt in (("bid", bid_abs), ("ask", ask_abs)):
+                if cnt <= 0:
+                    continue
+                cands = [lv for lv in self.levels.values()
+                         if lv.side == side_eaten and not lv.spoofed]
+                if cands:
+                    nearest = min(cands, key=lambda l: abs(l.price - price))
+                    nearest.attacked += cnt
+        elif abs_net:
+            side_eaten = "bid" if abs_net > 0 else "ask"
             cands = [lv for lv in self.levels.values()
                      if lv.side == side_eaten and not lv.spoofed]
             if cands:
@@ -508,8 +554,11 @@ class LevelBook:
             resistance *= 0.45
         elif lv.burn_word == "melting":
             resistance *= 0.75
-        if lv.size_now > 0 and any(s in ("poc_day", "htf_poc", "vwap", "supply", "demand")
-                                   for s in lv.sources):
+        if lv.size_now > 0 and any(
+            s in ("poc_day", "htf_poc", "vwap", "supply", "demand",
+                  "cme_settlement", "onh", "onl", "ibh", "ibl")
+            for s in lv.sources
+        ):
             resistance = min(1.0, resistance + 0.12)
 
         return {
@@ -560,7 +609,13 @@ class LevelBook:
         # they are absolutely worth knowing, because when price returns to them it often
         # reacts again. Keeping them in a separate list is the honest way to say
         # "important, but not the same kind of thing as a wall".
-        usable = [r for r in rows if not r["too_close"] and r["size"] > 0]
+        usable_all = [r for r in rows if not r["too_close"] and r["size"] > 0]
+        # Prefer non-collapsing walls over melting-fast walls when solid targets exist.
+        above_solid = [r for r in usable_all if r["above"] and r.get("burn_word") != "melting-fast"]
+        below_solid = [r for r in usable_all if (not r["above"]) and r.get("burn_word") != "melting-fast"]
+        above_pool = above_solid if above_solid else [r for r in usable_all if r["above"]]
+        below_pool = below_solid if below_solid else [r for r in usable_all if not r["above"]]
+        usable = above_pool + below_pool
         # Memory doors are NOT subject to the profit filter. That filter asks "is this
         # far enough away to be worth trading" - the wrong question for a starred place,
         # whose job is to say WHERE TO WATCH, not where to trade. The POC and the VWAP
@@ -570,10 +625,8 @@ class LevelBook:
         memory = [r for r in rows if r["size"] <= 0]
         memory.sort(key=lambda r: r["dist_atr"])
         memory = memory[:REPORT_PER_SIDE * 2]
-        above = sorted([r for r in usable if r["above"]],
-                       key=lambda r: -r["attraction"])[:REPORT_PER_SIDE]
-        below = sorted([r for r in usable if not r["above"]],
-                       key=lambda r: -r["attraction"])[:REPORT_PER_SIDE]
+        above = sorted(above_pool, key=lambda r: -r["attraction"])[:REPORT_PER_SIDE]
+        below = sorted(below_pool, key=lambda r: -r["attraction"])[:REPORT_PER_SIDE]
 
         # context from the six describers - FACTS, never a direction
         ctx = {
@@ -707,19 +760,32 @@ class LevelBook:
         }
 
     def shelter_behind(self, price: float, going_up: bool) -> Optional[Dict[str, Any]]:
-        """Who has our back? The nearest solid level on the OPPOSITE side.
+        """Who has our back? The nearest solid NON-SPOOFED level on the OPPOSITE side.
 
-        Going up, that is the biggest level just below us: if price is shoved back we
-        bump into it and stop. That is where the stop-loss belongs, and it is also
-        where a tired move can rest and wait for help.
+        Going up, that is the biggest trusted level just below us: if price is shoved
+        back we bump into it and stop. Per Holy Book Ch.1 §6, a spoofed wall is a trap,
+        never a shelter; routine 1-4 lot market-maker quotes are skipped when a real
+        wall exists behind us.
         """
-        side = [(p, s) for p, s in (self.last_ladder or [])
-                if (p < price if going_up else p > price)]
+        thr = _f(getattr(self.cfg, "L3_WHALE_THRESHOLD", 10.0), 10.0) \
+            if self.cfg is not None else 10.0
+        min_shelter = max(min(thr * 0.6, 15.0), 6.0)
+        side = []
+        for p, s in (self.last_ladder or []):
+            if not (p < price if going_up else p > price) or s <= 0:
+                continue
+            lv = self.levels.get(round(p, 2))
+            if lv is not None and (lv.spoofed or lv.burn_word == "melting-fast"):
+                continue
+            side.append((p, s))
         if not side:
             return None
-        near = sorted(side, key=lambda x: abs(x[0] - price))[:8]
-        if not near:
+        solid = [(p, s) for p, s in side if s >= min_shelter]
+        if not solid:
+            solid = [(p, s) for p, s in side if s >= 5.0]
+        if not solid:
             return None
+        near = sorted(solid, key=lambda x: abs(x[0] - price))[:8]
         best = max(near, key=lambda x: x[1])
         return {"price": best[0], "size": round(best[1], 1),
                 "distance": round(abs(best[0] - price), 2)}

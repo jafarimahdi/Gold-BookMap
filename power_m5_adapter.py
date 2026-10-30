@@ -179,8 +179,8 @@ def build_m5_inputs(
     if volumes and len(volumes) >= min_trades:
         idx = min(len(volumes) - 1, max(0, math.ceil(0.98 * len(volumes)) - 1))
         median = volumes[len(volumes) // 2]
-        big_cutoff = max(float(min_big_print_size), volumes[idx])
-        if big_cutoff > median:
+        if volumes[idx] > median:
+            big_cutoff = max(float(min_big_print_size), volumes[idx])
             big = [(volume, side) for _, volume, side in current if volume >= big_cutoff]
             big_count = len(big)
             big_total = sum(volume for volume, _ in big)
@@ -189,16 +189,26 @@ def build_m5_inputs(
                 big_volume_share = big_total / total_current_volume
                 big_quality = current_quality
 
-    # Breadth: average signed imbalance at each instrument-tick price bin.
+    # Breadth: sqrt(volume)-weighted signed imbalance across instrument-tick bins
+    # so 1-lot edge prints cannot overpower active traded price levels while still
+    # measuring price-ladder breadth rather than duplicating raw footprint_delta.
     by_level: Dict[int, List[float]] = {}
     for price, volume, side in current:
         level = int(round(price / step))
         totals = by_level.setdefault(level, [0.0, 0.0])
         totals[0 if side > 0 else 1] += volume
-    level_imbalances = [((buy - sell) / (buy + sell))
-                        for buy, sell in by_level.values() if buy + sell > 0]
-    breadth = (sum(level_imbalances) / len(level_imbalances)
-               if level_imbalances else 0.0)
+    level_imbalances = []
+    level_weights = []
+    for buy, sell in by_level.values():
+        tot_bin = buy + sell
+        if tot_bin > 0:
+            level_imbalances.append((buy - sell) / tot_bin)
+            level_weights.append(math.sqrt(tot_bin))
+    w_sum = sum(level_weights)
+    breadth = (
+        sum(imb * w for imb, w in zip(level_imbalances, level_weights)) / w_sum
+        if w_sum > 0 else 0.0
+    )
     breadth_quality = current_quality if len(level_imbalances) >= 2 else 0.0
 
     # Latest timestamp among timestamped rows, including rows outside the window,

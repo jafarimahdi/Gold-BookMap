@@ -45,10 +45,13 @@ JUDGE_FAMILY = {
 # Between families, the operator sets the loudness. FROZEN on purpose (defect 4).
 FAMILY_WEIGHTS = {"TAPE": 1.2, "BOOK": 1.2, "HIDDEN": 1.0, "MAP": 0.8, "WORLD": 0.5}
 
-# Judges that no longer vote (they may still write note lines; walls/htf_poc stay map doors).
+# Judges that no longer vote (they still write note lines for nightly grading;
+# whale_walls, htf_poc, poc_day, supply_demand stay Scout map/memory doors;
+# microprice & queue_pos stay sub-second execution / Shooting fill-prob metrics).
 RETIRED = {"macro_yield", "macro_dxy", "macro_vix", "vwap_zscore",
            "spoof_invert_loose", "iceberg_legacy", "l3_ofi_streak",
-           "delta_pressure", "whale_walls", "htf_poc"}
+           "delta_pressure", "whale_walls", "htf_poc",
+           "poc_day", "supply_demand", "microprice", "queue_pos"}
 
 DEAD_ZONE = 0.15  # a family whose internal average is inside +-0.15 stays silent
 
@@ -61,19 +64,49 @@ def _f(x, d=0.0):
         return d
 
 
+def _row_dir(row: Dict[str, Any]) -> float:
+    raw = row.get("dir")
+    if raw is not None and raw != "":
+        v = _f(raw, 0.0)
+        if v != 0.0:
+            return 1.0 if v > 0 else -1.0
+    s = str(row.get("direction") or row.get("vote") or "").strip().upper()
+    if s in ("BUY", "UP", "+1", "1"):
+        return 1.0
+    if s in ("SELL", "DOWN", "-1"):
+        return -1.0
+    return 0.0
+
+
 def family_gate(judge_panel: List[Dict[str, Any]],
-                config: Any = None) -> Dict[str, Any]:
+                config: Any = None,
+                *,
+                min_families: int = 2,
+                retired: Any = None) -> Dict[str, Any]:
     """Compute old (head-count) and new (family) gate side by side.
 
-    judge_panel: [{"judge": name, "dir": -1/0/+1, "weight": w}, ...]
+    Supports both legacy `family_gate(panel, config)` and directional
+    `family_gate(panel, direction_str, min_families=2, retired=...)`.
     """
+    target_dir = ""
+    if isinstance(config, str):
+        target_dir = config.strip().upper()
+    retired_set = set(RETIRED)
+    if retired is not None:
+        try:
+            retired_set |= {str(x) for x in retired if x}
+        except Exception:
+            pass
+
     families: Dict[str, Dict[str, float]] = {}
     for row in judge_panel or []:
-        name = str(row.get("judge") or "")
-        if name in RETIRED or name not in JUDGE_FAMILY:
+        if not isinstance(row, dict):
             continue
-        d = _f(row.get("dir"))
-        w = _f(row.get("weight"))
+        name = str(row.get("judge") or "")
+        if name in retired_set or name not in JUDGE_FAMILY:
+            continue
+        d = _row_dir(row)
+        w = _f(row.get("weight"), 0.5)
         if w <= 0 or d == 0:
             continue
         fam = JUDGE_FAMILY[name]
@@ -99,9 +132,20 @@ def family_gate(judge_panel: List[Dict[str, Any]],
         new_dir = "BUY" if up_w > down_w else ("SELL" if down_w > up_w else "NEUTRAL")
         new_conf = 100.0 * max(up_w, down_w) / total_w
 
+    eff_dir = target_dir if target_dir in ("BUY", "SELL") else new_dir
+    if eff_dir == "BUY":
+        agree_fams = sorted(f for f, v in speaking.items() if v > 0)
+    elif eff_dir == "SELL":
+        agree_fams = sorted(f for f, v in speaking.items() if v < 0)
+    else:
+        agree_fams = []
+    min_req = max(1, int(min_families or 2))
+    gate_ok = True if eff_dir not in ("BUY", "SELL") else (len(agree_fams) >= min_req)
+
     # old gate: head-count over the same active panel (for comparison only)
-    votes_d = [_f(r.get("dir")) for r in (judge_panel or [])
-               if str(r.get("judge") or "") not in RETIRED
+    votes_d = [_row_dir(r) for r in (judge_panel or [])
+               if isinstance(r, dict)
+               and str(r.get("judge") or "") not in retired_set
                and str(r.get("judge") or "") in JUDGE_FAMILY]
     active = [d for d in votes_d if d != 0]
     if active:
@@ -111,6 +155,10 @@ def family_gate(judge_panel: List[Dict[str, Any]],
         old_conf = 0.0
 
     return {
+        "ok": gate_ok,
+        "agree_families": agree_fams,
+        "agree_count": len(agree_fams),
+        "min_families": min_req,
         "old": {"direction": new_dir if active else "NEUTRAL",
                 "confidence": round(old_conf, 1)},
         "new": {"direction": new_dir, "confidence": round(new_conf, 1)},

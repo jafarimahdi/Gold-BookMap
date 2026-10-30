@@ -390,6 +390,27 @@ def _refresh() -> None:
     g["SHOOT_CLASS_SHADOW_CONF_FLOOR"] = _ffloat("SHOOT_CLASS_SHADOW_CONF_FLOOR", 25.0)
     g["POWER_FLAT_LAKE_GUARD_ENABLED"] = _fget("POWER_FLAT_LAKE_GUARD_ENABLED", "0") == "1"
     g["POWER_FLAT_LAKE_ER_MIN"] = max(0.0, min(0.8, _ffloat("POWER_FLAT_LAKE_ER_MIN", 0.22)))
+    # 2026-10-30 Manager's Audit (10-day backtest, Law #5 shadow-first defaults):
+    # - Variance Ratio VR(q=4) diagnostic + opt-in mean-reversion gate (live=0)
+    # - Stale POWER wave streak guard (6+ cycles = 19%-31% WR; live=0 shadow-first)
+    # - Climax-agreement guard & A2 neutral-panel handoff (live=0 shadow-first)
+    # - Effective MT5 CFD spread floor in Step-2 Shooting cost_check (0.35 pts)
+    # - A2 solid front-wall minimum clearance (1.50 pts)
+    # - POWER big-print institutional floor (5.0 lots) & near-touch L3 OFI window
+    g["POWER_VR_GUARD_ENABLED"] = _fget("POWER_VR_GUARD_ENABLED", "0") == "1"
+    g["POWER_VR_MIN"] = max(0.2, min(2.0, _ffloat("POWER_VR_MIN", 0.80)))
+    g["POWER_MIN_BIG_PRINT_LOTS"] = max(1.0, _ffloat("POWER_MIN_BIG_PRINT_LOTS", 5.0))
+    g["SHOOT_MAX_POWER_STREAK_CYCLES"] = max(0, _fint("SHOOT_MAX_POWER_STREAK_CYCLES", 0))
+    g["SHOOT_SHADOW_STREAK_MAX_CYCLES"] = max(1, _fint("SHOOT_SHADOW_STREAK_MAX_CYCLES", 5))
+    g["SHOOT_BLOCK_CLIMAX_AGREEMENT"] = _fget("SHOOT_BLOCK_CLIMAX_AGREEMENT", "0") == "1"
+    g["SHOOT_EFFECTIVE_CFD_SPREAD_PTS"] = max(0.0, _ffloat("SHOOT_EFFECTIVE_CFD_SPREAD_PTS", 0.35))
+    g["A2_MIN_CLEAR_WALL_PTS"] = max(0.0, _ffloat("A2_MIN_CLEAR_WALL_PTS", 1.50))
+    g["A2_ALLOW_NEUTRAL_PANEL"] = _fget("A2_ALLOW_NEUTRAL_PANEL", "0") == "1"
+    g["LEGACY_GHOST_VOTES_ENABLED"] = _fget("LEGACY_GHOST_VOTES_ENABLED", "0") == "1"
+    g["FAMILY_GATE_SHADOW_ENABLED"] = _fget("FAMILY_GATE_SHADOW_ENABLED", "1") == "1"
+    g["FAMILY_GATE_LIVE_ENABLED"] = _fget("FAMILY_GATE_LIVE_ENABLED", "0") == "1"
+    g["L3_NEAR_TOUCH_USD"] = max(0.5, _ffloat("L3_NEAR_TOUCH_USD", 2.50))
+    g["QUEUE_FLOW_WINDOW_SECONDS"] = max(5.0, _ffloat("QUEUE_FLOW_WINDOW_SECONDS", 30.0))
     g["BOOK_PROBE_TILT"] = max(0.05, min(0.50, _ffloat("BOOK_PROBE_TILT", 0.12)))
     g["SHOOT_ROAD_RATIO"] = _ffloat("SHOOT_ROAD_RATIO", 6.0)  # retired by crowdv2:v1 (kept for .env compat; unread)
     g["SHOOT_QUEUE_MIN_FILL_PROB"] = _ffloat("SHOOT_QUEUE_MIN_FILL_PROB", 0.70)
@@ -408,15 +429,22 @@ def _refresh() -> None:
     # order is 9 lots, max 46. The whale threshold (total size at a price) is a
     # different measurement and must not be reused here.
     g["L3_LARGE_ORDER_LOTS"] = _ffloat("L3_LARGE_ORDER_LOTS", 5.0)
-    # 24u + C1/C2 owner decision (2026-10-29): retired directional judges (walls &
-    # HTF POC remain active as structural map doors and PositionManager anchors).
-    # Even if an older local .env already defines RETIRED_JUDGES without whale_walls
-    # or htf_poc, union the mature clock cuts in unless RETIRED_JUDGES is blank/none
-    # or a judge is explicitly listed in UNRETIRE_JUDGES.
+    # 24u + C1/C2 + 2026-10-30 10-day all-regime demotions:
+    # - poc_day (-6,983.3 pts/10d: -2,833.9 Trend, -3,184.0 Lake) -> Scout map door
+    # - supply_demand (-2,556.6 pts/10d: 4/4 Trend neg, 5/5 Lake neg) -> Scout memory door
+    # - microprice (-754.0 pts/10d: 8/10d neg) -> sub-sec execution metric, not 15m voter
+    # - queue_pos (-234.5 pts: execution fill-prob in Shooting, not 15m voter)
+    # Union the full canonical retired set into non-empty .env RETIRED_JUDGES unless
+    # explicitly overridden via UNRETIRE_JUDGES or RETIRED_JUDGES=none/0/off.
+    _canonical_retired = {
+        "macro_yield", "macro_dxy", "macro_vix", "vwap_zscore",
+        "spoof_invert_loose", "iceberg_legacy", "l3_ofi_streak",
+        "delta_pressure", "whale_walls", "htf_poc",
+        "poc_day", "supply_demand", "microprice", "queue_pos",
+    }
     _retired_raw = _fget(
         "RETIRED_JUDGES",
-        "macro_yield,macro_dxy,macro_vix,vwap_zscore,spoof_invert_loose,"
-        "iceberg_legacy,l3_ofi_streak,delta_pressure,whale_walls,htf_poc",
+        ",".join(sorted(_canonical_retired)),
     ).strip()
     if _retired_raw.lower() in ("", "none", "0", "off"):
         _retired_set = set()
@@ -425,7 +453,8 @@ def _refresh() -> None:
         _unretire = {
             x.strip() for x in _fget("UNRETIRE_JUDGES", "").split(",") if x.strip()
         }
-        _retired_set |= ({"macro_dxy", "whale_walls", "htf_poc"} - _unretire)
+        _retired_set |= (_canonical_retired - _unretire)
+        _retired_set -= _unretire
     g["RETIRED_JUDGES"] = _retired_set
     # 24u: the macro OPPOSITION BRAKE is separate from the macro VOTES. Retiring the
     # macro judges removes their votes; this keeps the brake. 0 disables it loudly.

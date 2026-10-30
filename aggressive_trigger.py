@@ -483,7 +483,15 @@ def a2_eval(power: Any, order_flow: Any, panel_direction: Any, now: datetime,
         return out
 
     panel = EYES.panel_agrees(now, direction, window_s=(win_s or 300.0))
+    allow_neutral_panel = bool(
+        str(_cfg(config, "A2_ALLOW_NEUTRAL_PANEL", 0)).strip().lower() in ("1", "true")
+    )
+    if panel is None and allow_neutral_panel and str(panel_direction or "NEUTRAL").strip().upper() == "NEUTRAL":
+        panel = {"direction": "NEUTRAL_OPT_IN", "age_s": 0.0}
     out["panel"] = panel
+    out["shadow_neutral_panel_would_pass"] = bool(
+        panel is None and str(panel_direction or "NEUTRAL").strip().upper() == "NEUTRAL"
+    )
     if panel is None:
         out["reason"] = f"eye 2 (panel {direction}) not seen within {win_s:.0f}s"
         return out
@@ -611,6 +619,11 @@ def a2_v1_gate(v1: Any, power: Any, order_flow: Any, panel_direction: Any,
     count = a2_fire_count(now, config=config)
     panel = (EYES.panel_agrees(now, direction, window_s=(win_s or 300.0))
              if direction in ("UP", "DOWN") else None)
+    allow_neutral_panel = bool(
+        str(_cfg(config, "A2_ALLOW_NEUTRAL_PANEL", 0)).strip().lower() in ("1", "true")
+    )
+    if panel is None and allow_neutral_panel and str(panel_direction or "NEUTRAL").strip().upper() == "NEUTRAL":
+        panel = {"direction": "NEUTRAL_OPT_IN", "age_s": 0.0}
     why = None
     if lean is None:
         why = "eye 1 (CVD lean) not confirmed"

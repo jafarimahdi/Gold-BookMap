@@ -1936,9 +1936,19 @@ def run_signal_bridge(snapshot, decision, *, allow_new_entries: bool = True) -> 
             from judge_families import RETIRED as _RETIRED_JUDGES
         except Exception:
             _RETIRED_JUDGES = frozenset({"whale_walls", "macro_dxy", "htf_poc"})
+        try:
+            import config as _cfg_j
+            _CFG_RET = frozenset(getattr(_cfg_j, "RETIRED_JUDGES", ()) or ())
+        except Exception:
+            _CFG_RET = frozenset()
+        _ALL_RET = (
+            frozenset(_RETIRED_JUDGES)
+            | _CFG_RET
+            | frozenset({"whale_walls", "macro_dxy", "htf_poc"})
+        )
         _jv = [v for v in _jv
-               if str(v.get("judge") or "") not in _RETIRED_JUDGES
-               and str(v.get("judge") or "") not in ("whale_walls", "macro_dxy", "htf_poc")]
+               if not isinstance(v, dict)
+               or str(v.get("judge") or "") not in _ALL_RET]
         _jb = [v for v in _jv if isinstance(v, dict) and float(v.get("dir") or 0) > 0]
         _js = [v for v in _jv if isinstance(v, dict) and float(v.get("dir") or 0) < 0]
         _jf = len(_jv) - len(_jb) - len(_js)

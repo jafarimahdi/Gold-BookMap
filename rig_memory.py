@@ -57,29 +57,29 @@ TODAYS = TODAY.isoformat()
 D1D = (TODAY - timedelta(days=2)).isoformat()
 D2D = (TODAY - timedelta(days=1)).isoformat()
 
-# hand-computed fixtures:
-#   htf_poc:     day1 (80.0% of 40) + day2 (60.0% of 60) -> 100 scored, 68.0% hit,
-#                20.0 + 34.0 = +54.0 pts -> +0.54/call  [STRONG]
-#   whale_walls: day1 (40.0% of 50) + day2 (44.0% of 50) -> 100 scored, 42.0% hit,
-#                -25.0 + -11.0 = -36.0 pts -> -0.36/call [WEAK]
-#   l3_net_flow: only 10 scored calls in the window -> below the 20 floor, excluded
+# hand-computed fixtures (active non-retired judges):
+#   vwap_bands:      day1 (80.0% of 40) + day2 (60.0% of 60) -> 100 scored, 68.0% hit,
+#                    20.0 + 34.0 = +54.0 pts -> +0.54/call  [STRONG]
+#   footprint_delta: day1 (40.0% of 50) + day2 (44.0% of 50) -> 100 scored, 42.0% hit,
+#                    -25.0 + -11.0 = -36.0 pts -> -0.36/call [WEAK]
+#   l3_net_flow:     only 10 scored calls in the window -> below the 20 floor, excluded
 DAY1_ROWS = [
-    ["htf_poc", 100, 50.0, 60, 40, 0, 80.0, 40, 20.0, 0.5, 90.0, 0.7, 0.8],
-    ["whale_walls", 100, 50.0, 50, 50, 0, 40.0, 50, -25.0, -0.5, 60.0, 1.4, 1.0],
+    ["vwap_bands", 100, 50.0, 60, 40, 0, 80.0, 40, 20.0, 0.5, 90.0, 0.8, 0.9],
+    ["footprint_delta", 100, 50.0, 50, 50, 0, 40.0, 50, -25.0, -0.5, 60.0, 1.0, 0.8],
     ["l3_net_flow", 100, 50.0, 50, 50, 0, 50.0, 10, -2.0, -0.2, 55.0, 1.5, 1.2],
 ]
 DAY2_ROWS = [
-    ["htf_poc", 90, 45.0, 50, 40, 0, 60.0, 60, 34.0, 0.567, 88.0, 0.7, 0.9],
-    ["whale_walls", 90, 45.0, 45, 45, 0, 44.0, 50, -11.0, -0.22, 58.0, 1.4, 1.0],
+    ["vwap_bands", 90, 45.0, 50, 40, 0, 60.0, 60, 34.0, 0.567, 88.0, 0.8, 0.9],
+    ["footprint_delta", 90, 45.0, 45, 45, 0, 44.0, 50, -11.0, -0.22, 58.0, 1.0, 0.8],
 ]
-TODAY_POISON = [["htf_poc", 1, 100.0, 1, 0, 0, 100.0, 100, 999.0, 9.99, 100.0, 0.7, 9.9]]
+TODAY_POISON = [["vwap_bands", 1, 100.0, 1, 0, 0, 100.0, 100, 999.0, 9.99, 100.0, 0.8, 9.9]]
 
 EXPECTED_BLOCK = (
     "JUDGE REPORT CARDS (each judge's real track record over 2 graded "
     f"day(s) {D1D}..{D2D}, scored on its own clock by the nightly audit; weigh "
     "the panel votes accordingly):\n"
-    "- htf_poc: 68% right, +0.54 pts/call, 100 scored calls [STRONG]\n"
-    "- whale_walls: 42% right, -0.36 pts/call, 100 scored calls [WEAK]\n"
+    "- vwap_bands: 68% right, +0.54 pts/call, 100 scored calls [STRONG]\n"
+    "- footprint_delta: 42% right, -0.36 pts/call, 100 scored calls [WEAK]\n"
     "(tag rule: STRONG = pts/call>0 and hit>=55%; WEAK = pts/call<-0.25 or hit<40%; else MIXED)\n\n"
 )
 
@@ -165,14 +165,14 @@ def d1_builder_math():
     expect(TODAYS not in card["source_days"], "today leaked into the card!")
     expect(card["window_days"] == 2, f"window_days {card['window_days']}")
     names = [j["judge"] for j in card["judges"]]
-    expect(names == ["htf_poc", "whale_walls"], f"judges/order {names}")
+    expect(names == ["vwap_bands", "footprint_delta"], f"judges/order {names}")
     h, w = card["judges"]
     expect(h["scored"] == 100 and abs(h["hit_pct"] - 68.0) < 0.05
            and abs(h["net_pts"] - 54.0) < 0.05 and abs(h["pts_per_call"] - 0.54) < 0.005,
-           f"htf_poc numbers {h}")
+           f"vwap_bands numbers {h}")
     expect(w["scored"] == 100 and abs(w["hit_pct"] - 42.0) < 0.05
            and abs(w["net_pts"] + 36.0) < 0.05 and abs(w["pts_per_call"] + 0.36) < 0.005,
-           f"whale_walls numbers {w}")
+           f"footprint_delta numbers {w}")
     expect(h["votes"] == 190 and w["votes"] == 190, f"votes sums {h['votes']} {w['votes']}")
 
 

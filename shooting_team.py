@@ -500,6 +500,27 @@ def plan_shot(signal_map: Dict[str, Any], power: Dict[str, Any],
             f"classroom opposes POWER {direction} ({sig_dir} @ {sig_conf if sig_conf is not None else 0.0:.1f}%)",
             price, power=power, context=ctx, config=config, atr=a, spread=sp, plan_ttl=plan_ttl,
         )
+    # 2026-10-30 10-day audit (Law #5 opt-in live=0, shadow-tracked below):
+    # Stale POWER wave streak guard (streak >= 6 cycles had 19%-31% WR across 6 days)
+    # and Climax-Agreement guard (Class AGREES >= 35% lost on 6/6 days).
+    power_streak = int(_num(ctx.get("power_streak_cycles", power.get("power_streak_cycles", power.get("streak_cycles")))) or 1)
+    max_streak_live = int(_cfg(config, "SHOOT_MAX_POWER_STREAK_CYCLES", 0) or 0) if config is not None else 0
+    if max_streak_live > 0 and power_streak > max_streak_live:
+        _observe_passive_road_sample(signal_map, power, price, spread, ctx, config)
+        return _wait(
+            f"POWER streak age {power_streak} cycles > {max_streak_live} fresh-wave cap",
+            price, power=power, context=ctx, config=config, atr=a, spread=sp, plan_ttl=plan_ttl,
+        )
+    block_climax = bool(getattr(config, "SHOOT_BLOCK_CLIMAX_AGREEMENT", False)) if config is not None else False
+    class_agrees_dir = (
+        (direction == "UP" and sig_dir == "BUY") or (direction == "DOWN" and sig_dir == "SELL")
+    )
+    if block_climax and class_agrees_dir and sig_conf is not None and sig_conf >= 35.0:
+        _observe_passive_road_sample(signal_map, power, price, spread, ctx, config)
+        return _wait(
+            f"classroom climax-agreement guard ({sig_dir} @ {sig_conf:.1f}% >= 35%)",
+            price, power=power, context=ctx, config=config, atr=a, spread=sp, plan_ttl=plan_ttl,
+        )
 
     target_door = _nearest_door(signal_map or {}, direction, p)
     if not target_door:
@@ -562,10 +583,23 @@ def plan_shot(signal_map: Dict[str, Any], power: Dict[str, Any],
     aggressive = _geometry(aggressive_entry, direction, target_door, aggressive_shelter, a, sp, config)
     if ctx.get("a2_burst") is True:
         # A2 burst bracket: measured fixed geometry (anatomy 3-day: p90 heat
-        # ~1.6, targets +1.4..+2.0 by 9-12 min). Never wall-based for bursts.
+        # ~1.6, targets +1.4..+2.0 by 9-12 min). Never wall-based for bursts,
+        # UNLESS a solid non-melting Scout front door stands closer than A2_MIN_CLEAR_WALL_PTS.
         _a2_sl = _num(_cfg(config, "A2_BURST_SL_PTS", 1.8))
         _a2_tp = _num(_cfg(config, "A2_BURST_TP_PTS", 1.8))
-        if _a2_sl and _a2_sl > 0 and _a2_tp and _a2_tp > 0:
+        _a2_wall_min = _num(_cfg(config, "A2_MIN_CLEAR_WALL_PTS", 0.0)) or 0.0
+        _door_dist = abs(target_px - aggressive_entry) if target_px is not None else math.inf
+        _door_solid = str(target_door.get("burn_word") or "") != "melting-fast"
+        if _a2_wall_min > 0 and _door_solid and _door_dist < _a2_wall_min:
+            aggressive = {
+                **aggressive,
+                "eligible": False,
+                "reason": (
+                    f"A2 burst blocked: solid front door at {target_px:.2f} is only "
+                    f"{_door_dist:.2f} pts ahead (< {_a2_wall_min:.2f} pts room)"
+                ),
+            }
+        elif _a2_sl and _a2_sl > 0 and _a2_tp and _a2_tp > 0:
             _a2_stop = aggressive_entry - _a2_sl if is_buy else aggressive_entry + _a2_sl
             _a2_target = aggressive_entry + _a2_tp if is_buy else aggressive_entry - _a2_tp
             aggressive = {**aggressive, "eligible": True, "reason": None,
@@ -575,11 +609,12 @@ def plan_shot(signal_map: Dict[str, Any], power: Dict[str, Any],
     min_rr = (_cfg(config, "A2_MIN_RR", 1.0) if ctx.get("a2_burst") is True
               else _cfg(config, "SHOOT_MIN_RR", 1.2))
     min_reward_usd = _cfg(config, "SHOOT_MIN_REWARD_USD", 0.0)
+    eff_sp = max(sp, _cfg(config, "SHOOT_EFFECTIVE_CFD_SPREAD_PTS", 0.0) if config is not None else 0.0)
 
     def cost_check(plan: Dict[str, Any]) -> Optional[str]:
         if not plan.get("eligible"):
             return str(plan.get("reason") or "invalid plan geometry")
-        if plan["reward"] <= sp * 3.0:
+        if plan["reward"] <= eff_sp * 3.0:
             return "reward does not exceed three times the spread"
         if plan["rr"] < min_rr:
             return f"R:R {plan['rr']:.2f} is below {min_rr:.2f}"
@@ -649,6 +684,15 @@ def plan_shot(signal_map: Dict[str, Any], power: Dict[str, Any],
             "signal_direction": sig_dir or "NEUTRAL",
             "signal_confidence": sig_conf,
             "shadow_floor": shadow_floor,
+        }
+        shadow_streak_cap = int(_cfg(config, "SHOOT_SHADOW_STREAK_MAX_CYCLES", 5) or 5)
+        shadow_climax = bool(class_agrees_dir and sig_conf is not None and sig_conf >= 35.0)
+        shadow_candidates["fresh_wave_shadow"] = {
+            "mode": "SHADOW_ONLY",
+            "power_streak_cycles": power_streak,
+            "would_block_stale_streak": bool(power_streak > shadow_streak_cap),
+            "would_block_climax_agreement": shadow_climax,
+            "fresh_non_climax_candidate": bool(power_streak <= shadow_streak_cap and not shadow_climax),
         }
     if not trigger:
         aggressive_reason = "no separately confirmed aggressive-entry trigger is wired"

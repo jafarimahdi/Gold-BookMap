@@ -346,9 +346,10 @@ def _judge_report_card_block(snapshot=None):
             except Exception:
                 age = 10 ** 6
             try:
-                from judge_families import RETIRED as _RETIRED_JUDGES
+                from judge_families import RETIRED as _JF_RETIRED
             except Exception:
-                _RETIRED_JUDGES = frozenset({"whale_walls", "macro_dxy", "htf_poc"})
+                _JF_RETIRED = frozenset({"whale_walls", "macro_dxy", "htf_poc"})
+            _RETIRED_JUDGES = set(_JF_RETIRED) | set(getattr(config, "RETIRED_JUDGES", ()) or ())
             judges = []
             for j in (card.get("judges") or []):
                 try:

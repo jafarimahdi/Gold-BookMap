@@ -151,12 +151,35 @@ def run_power_v2(
     tf_label = f"M{max(1, int(bar_seconds) // 60)}"  # fusionv1
     # Exclude a trade stamped exactly at the next bar boundary.
     evaluation_end = bar_end - timedelta(microseconds=1)
+    try:
+        import config as _cfg_mod
+        _is_micro = str(symbol or "").strip().upper().startswith("MGC")
+        _min_big_lots = (
+            2.0 if _is_micro
+            else float(getattr(_cfg_mod, "POWER_MIN_BIG_PRINT_LOTS", 5.0) or 5.0)
+        )
+    except Exception:
+        _min_big_lots = 2.0 if str(symbol or "").strip().upper().startswith("MGC") else 5.0
     built = build_m5_inputs(
         tick_data or [], now=evaluation_end, tick_size=tick_size,
+        min_big_print_size=_min_big_lots,
         bar_seconds=bar_seconds)  # fusionv1
+    raw_pre_gain = {
+        k: round(float(v.get("value", 0.0)), 4)
+        for k, v in (built.get("judges") or {}).items()
+        if isinstance(v, Mapping) and isinstance(v.get("value"), (int, float))
+    }
     # VOICE FIX (2026-10-15): calibrate the tick judges' vote magnitudes so
     # fish-sized force is audible to POWER's (unchanged) activity gate.
     built["judges"] = _apply_voice_gain(built["judges"])
+    sat_judges = [
+        k for k, v in (built.get("judges") or {}).items()
+        if isinstance(v, Mapping) and isinstance(v.get("value"), (int, float))
+        and abs(float(v["value"])) >= 0.999
+    ]
+    built["diagnostics"]["pre_voice_gain_values"] = raw_pre_gain
+    built["diagnostics"]["voice_gain_saturated_judges"] = sat_judges
+    built["diagnostics"]["voice_gain_saturated_count"] = len(sat_judges)
     context = dict(built["context"])
     context["market_regime"] = str(market_regime or "UNKNOWN").upper()
     context["breakout_confirmed"] = bool(breakout_confirmed)

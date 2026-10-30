@@ -403,13 +403,33 @@ def classify_m5_regime(
         else:
             er_10 = 0.0
     result["efficiency_ratio_10"] = er_10
+    # Lo & MacKinlay (1988) Variance Ratio VR(q=4) diagnostic:
+    # VR(4) = Var(r_4) / (4 * Var(r_1)); VR < 0.80 indicates mean-reverting ping-pong
+    # even when Wilder ADX smoothing temporarily stays >= 25. Default SHADOW_ONLY (=0).
+    vr_4 = None
+    if len(recent) >= 16:
+        closes_vr = [float(b["close"]) for b in recent[-20:]]
+        r1 = [closes_vr[i] - closes_vr[i - 1] for i in range(1, len(closes_vr))]
+        r4 = [closes_vr[i] - closes_vr[i - 4] for i in range(4, len(closes_vr))]
+        if len(r1) >= 8 and len(r4) >= 5:
+            m1 = sum(r1) / len(r1)
+            m4 = sum(r4) / len(r4)
+            v1 = sum((x - m1) ** 2 for x in r1) / max(len(r1) - 1, 1)
+            v4 = sum((x - m4) ** 2 for x in r4) / max(len(r4) - 1, 1)
+            if v1 > 1e-9:
+                vr_4 = round(v4 / (4.0 * v1), 4)
+    result["variance_ratio_4"] = vr_4
     try:
         import config as _cfg_mod
         _fl_on = bool(getattr(_cfg_mod, "POWER_FLAT_LAKE_GUARD_ENABLED", False))
         _fl_er_min = float(getattr(_cfg_mod, "POWER_FLAT_LAKE_ER_MIN", 0.22) or 0.0)
+        _vr_on = bool(getattr(_cfg_mod, "POWER_VR_GUARD_ENABLED", False))
+        _vr_min = float(getattr(_cfg_mod, "POWER_VR_MIN", 0.80) or 0.80)
     except Exception:
         _fl_on = False
         _fl_er_min = 0.22
+        _vr_on = False
+        _vr_min = 0.80
     _would_flag_flat_lake = bool(
         _fl_er_min > 0
         and regime_label == "TREND"
@@ -417,10 +437,20 @@ def classify_m5_regime(
         and er_10 is not None
         and er_10 < _fl_er_min
     )
+    _would_flag_vr_chop = bool(
+        _vr_min > 0
+        and regime_label == "TREND"
+        and vr_4 is not None
+        and vr_4 < _vr_min
+    )
     result["shadow_flat_lake"] = _would_flag_flat_lake
+    result["shadow_vr_mean_reverting"] = _would_flag_vr_chop
     if _fl_on and _would_flag_flat_lake:
         regime_label = "RANGE"
         reason_label = "FLAT_LAKE_LOW_EFFICIENCY"
+    elif _vr_on and _would_flag_vr_chop:
+        regime_label = "RANGE"
+        reason_label = "VARIANCE_RATIO_MEAN_REVERTING"
     result["market_regime"] = regime_label
     result["reason"] = reason_label
     return result

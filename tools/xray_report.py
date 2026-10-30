@@ -959,6 +959,11 @@ def _collect_artifact_specs(root: Path, day_str: str) -> List[Tuple[str, Path, s
     day_audit_path = d / f"day_audit_{day_str}.txt"
     if not day_audit_path.exists() and (root / f"day_report_{day_str}.txt").exists():
         day_audit_path = root / f"day_report_{day_str}.txt"
+    pmb_path = d / "power_v2_memory" / f"power_{day_str}.jsonl"
+    if not pmb_path.exists() and (d / "power_v2_memory" / f"power_{compact}.jsonl").exists():
+        pmb_path = d / "power_v2_memory" / f"power_{compact}.jsonl"
+    elif not pmb_path.exists() and (d / f"power_{day_str}.jsonl").exists():
+        pmb_path = d / f"power_{day_str}.jsonl"
 
     return [
         (f"evening_test_gate_{day_str}.txt", d / f"evening_test_gate_{day_str}.txt", "txt", 0),
@@ -978,6 +983,7 @@ def _collect_artifact_specs(root: Path, day_str: str) -> List[Tuple[str, Path, s
         (f"shadow_replay_{day_str}.txt", d / f"shadow_replay_{day_str}.txt", "txt", 0),
         (f"shadow_replay_{day_str}.csv", d / f"shadow_replay_{day_str}.csv", "csv", 0),
         (f"power_report_card_{day_str}.txt", d / f"power_report_card_{day_str}.txt", "txt", 0),
+        (f"power_{day_str}.jsonl", pmb_path, "jsonl", 2500),
         (f"council_shadow_{day_str}.txt", d / f"council_shadow_{day_str}.txt", "txt", 0),
         (f"tf_study_{day_str}.txt", d / f"tf_study_{day_str}.txt", "txt", 0),
         (f"tf_lens_{day_str}.txt", d / f"tf_lens_{day_str}.txt", "txt", 0),
