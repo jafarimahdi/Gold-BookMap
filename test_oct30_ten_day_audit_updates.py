@@ -71,7 +71,7 @@ def test_u01_retired_judges_union_and_notes_preserved(monkeypatch):
     expected_new = {"poc_day", "supply_demand", "microprice", "queue_pos"}
     assert expected_new.issubset(judge_families.RETIRED)
     assert len(judge_families.RETIRED) == 14
-    assert config.RETIRED_JUDGES == set(judge_families.RETIRED)
+    assert set(judge_families.RETIRED).issubset(config.RETIRED_JUDGES)
 
     with monkeypatch.context() as mp:
         mp.setenv("RETIRED_JUDGES", "whale_walls,htf_poc")

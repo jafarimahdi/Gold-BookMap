@@ -936,15 +936,29 @@ def _analyze_judges_csv(judge_csv_path: Path) -> Dict[str, Any]:
     except Exception:
         return {"exists": True, "count": 0, "top": [], "bottom": []}
 
-    active = [x for x in rows if x["votes"] > 0]
+    _retired_set: set = set()
+    try:
+        import config as _cfg
+        _retired_set = set(getattr(_cfg, "RETIRED_JUDGES", None) or ())
+    except Exception:
+        _retired_set = set()
+
+    active = [x for x in rows if x["votes"] > 0 and x["judge"] not in _retired_set]
+    retired_bench = sorted(
+        [x for x in rows if x["votes"] > 0 and x["judge"] in _retired_set],
+        key=lambda x: x["net_pts"],
+        reverse=True,
+    )
     active_sorted = sorted(active, key=lambda x: x["net_pts"], reverse=True)
     return {
         "exists": True,
         "count": len(rows),
         "active_count": len(active),
-        "silent_count": len(rows) - len(active),
+        "retired_count": len(retired_bench),
+        "silent_count": len(rows) - len(active) - len(retired_bench),
         "top": active_sorted[:5],
         "bottom": list(reversed(active_sorted[-5:])) if active_sorted else [],
+        "retired_bench": retired_bench,
     }
 
 
@@ -1434,7 +1448,9 @@ def build_xray(root: Path, day_str: str, include_vault: bool = True) -> Tuple[st
     if judge_summary["exists"]:
         L.append(
             f"  Judge Panel Summary : total={judge_summary['count']} "
-            f"(active={judge_summary.get('active_count', 0)}, silent={judge_summary.get('silent_count', 0)})"
+            f"(active={judge_summary.get('active_count', 0)}, "
+            f"retired_bench={judge_summary.get('retired_count', 0)}, "
+            f"silent={judge_summary.get('silent_count', 0)})"
         )
         if judge_summary["top"]:
             L.append("    Top 5 Active Judges    : " + ", ".join(
@@ -1443,6 +1459,10 @@ def build_xray(root: Path, day_str: str, include_vault: bool = True) -> Tuple[st
         if judge_summary["bottom"]:
             L.append("    Bottom 5 Active Judges : " + ", ".join(
                 f"{j['judge']}({j['net_pts']:+.1f}pts, {j['votes']}v, {j['right_pct']}%)" for j in judge_summary["bottom"]
+            ))
+        if judge_summary.get("retired_bench"):
+            L.append("    Retired Bench (Shadow) : " + ", ".join(
+                f"{j['judge']}({j['net_pts']:+.1f}pts, {j['votes']}v, {j['right_pct']}%)" for j in judge_summary["retired_bench"]
             ))
     if shadow_txt:
         L.append("  Desk 3 Shadow Replay:")

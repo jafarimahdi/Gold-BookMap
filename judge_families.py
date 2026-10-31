@@ -38,6 +38,7 @@ JUDGE_FAMILY = {
     # MAP — where price is
     "vwap_bands": "MAP", "htf_poc": "MAP", "vwap_trend": "MAP",
     "supply_demand": "MAP", "poc_day": "MAP", "value_area": "MAP", "mtf": "MAP",
+    "trend_macd": "MAP", "sma20": "MAP",
     # WORLD — outside opinion
     "news_sentiment": "WORLD", "macro_risk": "WORLD",
 }

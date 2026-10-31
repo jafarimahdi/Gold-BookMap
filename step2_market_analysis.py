@@ -1576,9 +1576,78 @@ class FootprintBuilder:
             return "SELL"
         return "BUY"
 
-    def build_footprint(self, tick_data: List[Dict]) -> FootprintMetrics:
+    @staticmethod
+    def _tick_epoch(raw_ts: Any) -> Optional[float]:
+        if raw_ts is None:
+            return None
+        if isinstance(raw_ts, (int, float)):
+            return float(raw_ts) if raw_ts > 0 else None
+        if isinstance(raw_ts, datetime):
+            dt_obj = raw_ts if raw_ts.tzinfo else raw_ts.replace(tzinfo=timezone.utc)
+            return dt_obj.timestamp()
+        if isinstance(raw_ts, str):
+            s = raw_ts.strip()
+            if not s:
+                return None
+            try:
+                dt_obj = datetime.fromisoformat(s.replace("Z", "+00:00"))
+                if dt_obj.tzinfo is None:
+                    dt_obj = dt_obj.replace(tzinfo=timezone.utc)
+                return dt_obj.timestamp()
+            except ValueError:
+                return None
+        return None
+
+    def build_footprint(
+        self,
+        tick_data: List[Dict],
+        window_seconds: Optional[float] = None,
+    ) -> FootprintMetrics:
         self.price_levels.clear()
-        for tick in tick_data:
+        active_ticks: Sequence[Dict] = tick_data or []
+        if window_seconds is None:
+            try:
+                window_seconds = float(
+                    getattr(config, "ORDER_FLOW_WINDOW_SECONDS", 0)
+                    or getattr(config, "POWER_BAR_SECONDS", 180)
+                    or 180.0
+                )
+            except Exception:
+                window_seconds = 180.0
+        if window_seconds and window_seconds > 0 and len(active_ticks) > 1:
+            last_ep = self._tick_epoch(
+                active_ticks[-1].get("timestamp", active_ticks[-1].get("time"))
+            )
+            first_ep = self._tick_epoch(
+                active_ticks[0].get("timestamp", active_ticks[0].get("time"))
+            )
+            if last_ep is not None and first_ep is not None:
+                cutoff_ep = last_ep - float(window_seconds)
+                if last_ep >= first_ep and first_ep < cutoff_ep:
+                    idx = len(active_ticks) - 1
+                    while idx > 0:
+                        ep = self._tick_epoch(
+                            active_ticks[idx - 1].get(
+                                "timestamp", active_ticks[idx - 1].get("time")
+                            )
+                        )
+                        if ep is not None and ep < cutoff_ep:
+                            break
+                        idx -= 1
+                    active_ticks = active_ticks[idx:]
+                elif last_ep < first_ep:
+                    eps = [
+                        self._tick_epoch(t.get("timestamp", t.get("time")))
+                        for t in active_ticks
+                    ]
+                    valid_eps = [ep for ep in eps if ep is not None]
+                    if valid_eps:
+                        cut = max(valid_eps) - float(window_seconds)
+                        active_ticks = [
+                            t for t, ep in zip(active_ticks, eps)
+                            if ep is None or ep >= cut
+                        ]
+        for tick in active_ticks:
             # M1: use is_direct flag from BookMap if present
             is_direct = bool(tick.get("is_direct", tick.get("is_bookmap_direct", False)))
             side = tick.get("side", "BUY")
@@ -4477,12 +4546,13 @@ _BOOK_STATE_PATH = None
 
 
 def _book_state_file():
-    global _BOOK_STATE_PATH
-    if _BOOK_STATE_PATH is None:
-        from pathlib import Path
-        _BOOK_STATE_PATH = Path(__file__).resolve().parent / "data" / \
-            "last_book_state.json"
-    return _BOOK_STATE_PATH
+    if _BOOK_STATE_PATH is not None:
+        return _BOOK_STATE_PATH
+    from pathlib import Path
+    data_dir = getattr(config, "DATA_DIR", None)
+    if data_dir is not None:
+        return Path(data_dir) / "last_book_state.json"
+    return Path(__file__).resolve().parent / "data" / "last_book_state.json"
 
 
 def _get_persistent_l2() -> OrderBookDepthAnalyzer:
@@ -5222,24 +5292,37 @@ def _detect_divergence(close: np.ndarray, cvd: float, lookback: int = 15,
     if len(close) < lookback:
         return 0.0
 
-    # Try time-weighted from tick_data if available
+    # Try time-weighted from tick_data if available (scan full 2*lookback minute
+    # window from newest tick instead of a fixed [-1000:] slice that held <6 min
+    # on 200-1,200 print/min CME Gold days and fell through to stale 3h CVD).
+    saw_timestamped_ticks = False
     try:
         if tick_data and len(tick_data) >= 10:
-            # Bucket ticks by minute (M1) using timestamp
             from collections import defaultdict
             minute_deltas = defaultdict(float)
-            for t in tick_data[-1000:]:  # last 1000 ticks for performance
+            newest_ep = FootprintBuilder._tick_epoch(
+                tick_data[-1].get("timestamp", tick_data[-1].get("time"))
+            )
+            cutoff_ep = (
+                newest_ep - float((2 * lookback + 2) * 60)
+                if newest_ep is not None else None
+            )
+            for idx in range(len(tick_data) - 1, -1, -1):
+                t = tick_data[idx]
                 raw_ts = t.get("timestamp") or t.get("time")
                 if not raw_ts:
                     continue
+                ep = FootprintBuilder._tick_epoch(raw_ts)
+                if ep is None:
+                    continue
+                if cutoff_ep is not None and ep < cutoff_ep:
+                    break
+                saw_timestamped_ticks = True
                 try:
-                    dt = datetime.fromisoformat(str(raw_ts).replace("Z", "+00:00"))
-                    if dt.tzinfo is None:
-                        dt = dt.replace(tzinfo=timezone.utc)
+                    dt = datetime.fromtimestamp(ep, tz=timezone.utc)
                     minute_key = dt.replace(second=0, microsecond=0)
                     vol = float(t.get("volume", 0) or 0)
                     side = str(t.get("side", "BUY")).upper()
-                    # Weight by size for divergence too (bounce filter)
                     if vol < 2:
                         w_vol = vol * 0.3
                     elif vol < 5:
@@ -5248,38 +5331,37 @@ def _detect_divergence(close: np.ndarray, cvd: float, lookback: int = 15,
                         w_vol = vol * 1.5
                     else:
                         w_vol = vol
-                    if side in ("BUY","B","BID","1"):
+                    if side in ("BUY", "B", "BID", "1"):
                         minute_deltas[minute_key] += w_vol
                     else:
                         minute_deltas[minute_key] -= w_vol
-                except:
+                except Exception:
                     continue
-            # Sort minutes
             sorted_minutes = sorted(minute_deltas.items())
             if len(sorted_minutes) >= lookback:
-                # Last 15 bars delta
                 last_15 = [d for _, d in sorted_minutes[-lookback:]]
-                prev_15 = [d for _, d in sorted_minutes[-2*lookback:-lookback]] if len(sorted_minutes) >= 2*lookback else []
+                prev_15 = (
+                    [d for _, d in sorted_minutes[-2 * lookback:-lookback]]
+                    if len(sorted_minutes) >= 2 * lookback else []
+                )
                 cvd_15 = sum(last_15)
                 cvd_15_prev = sum(prev_15) if prev_15 else 0.0
-                price_roc = close[-1] / close[-lookback] - 1.0 if close[-lookback]!=0 else 0.0
-                
-                # Volume-weighted strength
+                price_roc = (
+                    close[-1] / close[-lookback] - 1.0
+                    if close[-lookback] != 0 else 0.0
+                )
                 vol_weight = min(1.2, abs(cvd_15) / 100.0) if abs(cvd_15) > 0 else 1.0
-                
-                # Bullish: price falling but CVD rising (buyers absorbing)
                 if price_roc < -0.001 and cvd_15 > 0 and cvd_15 > cvd_15_prev:
                     return float(+1.0 * vol_weight)
-                # Bearish: price rising but CVD falling (sellers absorbing)
                 if price_roc > 0.001 and cvd_15 < 0 and cvd_15 < cvd_15_prev:
                     return float(-1.0 * vol_weight)
-                # Also check absolute divergence: price down but CVD up
                 if price_roc < -0.002 and cvd_15 > 50:
                     return float(+1.0 * vol_weight)
                 if price_roc > 0.002 and cvd_15 < -50:
                     return float(-1.0 * vol_weight)
-    except Exception as e:
-        # Fallback to old logic
+            if saw_timestamped_ticks:
+                return 0.0
+    except Exception:
         pass
 
     # Fallback: old cumulative logic if no tick_data

@@ -252,7 +252,15 @@ class _BridgeTail:
                 else:
                     side = ""  # genuinely unknown; do not fabricate BUY flow
                 is_direct = False
-            st.ticks.append({"price": price, "volume": size, "side": side, "ts": dt, "is_direct": is_direct, "operation": operation})
+            st.ticks.append({
+                "price": price,
+                "volume": size,
+                "side": side,
+                "ts": dt,
+                "ts_iso": dt.isoformat(),
+                "is_direct": is_direct,
+                "operation": operation,
+            })
             st.last_dt = dt
 
         elif event == "Bid":
@@ -458,26 +466,23 @@ class _BridgeTail:
                 is_live_file = os.path.normcase(os.path.abspath(src)) == live_key
                 if not is_live_file:
                     try:
-                        # Closed rotated chunk (e.g. yesterday's ticks_YYYYMMDD_HHMMSS.csv.gz):
-                        # skip decompression only when BOTH file mtime (last row written) AND
-                        # filename stamp sit well before cutoff_ts. Never stop mid-file once opened.
+                        # Closed rotated chunk (e.g. yesterday's or earlier session's
+                        # ticks_YYYYMMDD_HHMMSS.csv.gz): once closed & archived, no new
+                        # rows are ever appended, so st_mtime (true UTC epoch on NTFS/POSIX)
+                        # bounds the latest row inside the chunk. Skip decompression when
+                        # st_mtime sits >=10m before cutoff_ts.
                         st_mtime = os.path.getmtime(src)
-                        if st_mtime < (cutoff_ts - 3600.0):
-                            bn = os.path.basename(src)
-                            m_fn = re.match(r"^ticks_(\d{8})_(\d{6})\.csv(?:\.gz)?$", bn, re.I)
-                            if m_fn:
-                                fn_dt = datetime.strptime(
-                                    m_fn.group(1) + m_fn.group(2), "%Y%m%d%H%M%S"
-                                ).replace(tzinfo=timezone.utc)
-                                # Require BOTH closed mtime AND filename stamp (allowing +/-14h
-                                # local timezone offset) to predate cutoff_ts before skipping.
-                                if fn_dt.timestamp() < (cutoff_ts - 15 * 3600.0):
-                                    logger.info(
-                                        "BookmapBridge replay skip closed stale chunk source=%s "
-                                        "mtime_age_s=%.0f cutoff_age_s=%.0f",
-                                        bn, time.time() - st_mtime, time.time() - cutoff_ts,
-                                    )
-                                    continue
+                        bn = os.path.basename(src)
+                        if (
+                            st_mtime < (cutoff_ts - 600.0)
+                            and re.match(r"^ticks_\d{8}_\d{6}\.csv(?:\.gz)?$", bn, re.I)
+                        ):
+                            logger.info(
+                                "BookmapBridge replay skip closed stale chunk source=%s "
+                                "mtime_age_s=%.0f cutoff_age_s=%.0f",
+                                bn, time.time() - st_mtime, time.time() - cutoff_ts,
+                            )
+                            continue
                     except OSError:
                         pass
                 source_started = time.monotonic()
@@ -1327,12 +1332,12 @@ class BookmapBridgeProvider(BaseProvider):
             {"price": t["price"], "volume": t["volume"], "side": t["side"],
              "is_direct": bool(t.get("is_direct", False)),
              "is_bookmap_direct": bool(t.get("is_direct", False)),
-             "timestamp": t["ts"].isoformat(),
+             "timestamp": t.get("ts_iso") or t["ts"].isoformat(),
              "operation": t.get("operation", "")}
             for t in ticks
         ]
         self._trades = [
-            {"timestamp": t["ts"].isoformat(), "price": t["price"],
+            {"timestamp": t.get("ts_iso") or t["ts"].isoformat(), "price": t["price"],
              "volume": t["volume"]} for t in ticks
         ]
         self.order_events = order_events

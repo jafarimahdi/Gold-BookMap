@@ -85,6 +85,12 @@ def parse_judge_panel(notes: List[str]) -> List[Dict[str, Any]]:
     import re as _re
     out: List[Dict[str, Any]] = []
     seen_idx: Dict[str, int] = {}
+    _retired: set = set()
+    try:
+        import config as _cfg
+        _retired = set(getattr(_cfg, "RETIRED_JUDGES", None) or ())
+    except Exception:
+        _retired = set()
     for note in notes or []:
         if not isinstance(note, str) or len(note) > 400:
             continue
@@ -208,8 +214,15 @@ def parse_judge_panel(notes: List[str]) -> List[Dict[str, Any]]:
                 prev["raw"] = f"{prev['raw'][:70]} | {note[:70]} [{tag}]"[:160]
             else:
                 seen_idx[judge] = len(out)
-                out.append({"judge": judge, "dir": float(d), "weight": weight_val,
-                            "raw": note[:160]})
+                entry: Dict[str, Any] = {
+                    "judge": judge,
+                    "dir": float(d),
+                    "weight": weight_val,
+                    "raw": note[:160],
+                }
+                if judge in _retired:
+                    entry["retired"] = True
+                out.append(entry)
             break
     return out
 

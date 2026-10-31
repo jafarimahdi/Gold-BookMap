@@ -111,12 +111,24 @@ def main(argv=None):
             if phrase in n:
                 hits[(phrase, judge, kind)] += 1
 
+    _retired_set: set = set()
+    try:
+        import config as _cfg
+        _retired_set = set(getattr(_cfg, "RETIRED_JUDGES", None) or ())
+    except Exception:
+        _retired_set = set()
+
     print(f"\n{'phrase the robot wrote':<42}{'judge':<20}{'meaning':<22}{'count':>7}")
     print("-" * 96)
     for phrase, judge, kind in PROBES:
         c = hits.get((phrase, judge, kind), 0)
         mark = "" if c else "   <-- NEVER"
-        print(f"{phrase:<42}{judge:<20}{kind:<22}{c:>7}{mark}")
+        disp_kind = (
+            f"{kind} (retired)"
+            if (judge in _retired_set and kind == "VOTE")
+            else kind
+        )
+        print(f"{phrase:<42}{judge:<20}{disp_kind:<22}{c:>7}{mark}")
 
     print("\n" + "=" * 96)
     print("DIAGNOSIS PER SILENT JUDGE")

@@ -1494,11 +1494,21 @@ def test_1_alive(day, log_path, text, decisions, tape_last=None, tape_first=None
     # survive the tape as well.
     blind_h = 0.0
     if tape_last is not None:
-        blind_s = (last - tape_last).total_seconds()
+        raw_blind_s = max(0.0, (last - tape_last).total_seconds())
+        closed_after_tape_s = 0.0
+        if raw_blind_s > 0:
+            t0_u = tape_last.astimezone(timezone.utc) if tape_last.tzinfo else tape_last.replace(tzinfo=timezone.utc)
+            t1_u = last.astimezone(timezone.utc) if last.tzinfo else last.replace(tzinfo=timezone.utc)
+            closed_after_tape_s = _closed_cme_overlap_seconds(t0_u, t1_u)
+        blind_s = max(0.0, raw_blind_s - closed_after_tape_s)
         blind_h = max(0.0, blind_s / 3600.0)
+        closed_note = (
+            f" (excl. {closed_after_tape_s/3600.0:.1f} h scheduled CME Globex close/break)"
+            if closed_after_tape_s >= 300 else ""
+        )
         why.append(f"tape cross-check: last log line {last.astimezone(BUDA):%H:%M}, "
                    f"last price print {tape_last.astimezone(BUDA):%H:%M} "
-                   f"-> {blind_h:.1f} h awake with no feed")
+                   f"-> {blind_h:.1f} h awake with no feed{closed_note}")
         if blind_h >= 0.5:
             why.append(f"THE ROBOT WAS ALIVE AND BLIND for {blind_h:.1f} h: it kept logging, "
                        f"but BookMap stopped handing it prices. It correctly refuses to trade "
@@ -2137,6 +2147,7 @@ def test_8_teams(diary):
     team = defaultdict(lambda: {"c": 0, "w": 0})
     judge = defaultdict(lambda: {"c": 0, "w": 0})
     shapes = Counter()
+    retired_set = _retired_judge_set()
     for o in diary:
         for src, blob in (("teams", o.get("team_scores") or o.get("teams")),
                           ("judges", o.get("judges") or o.get("judge_votes"))):
@@ -2144,6 +2155,8 @@ def test_8_teams(diary):
                 continue
             shapes[type(blob).__name__] += 1
             for k, v in _score_items(blob):
+                if src == "judges" and k in retired_set:
+                    continue
                 if abs(v) < 0.05:
                     continue
                 (team if src == "teams" else judge)[k]["c" if v > 0 else "w"] += 1
@@ -2225,9 +2238,12 @@ def _sb_row(name, kind, n, hit, pts_list, weight=None, note=""):
 
 
 def build_scoreboard(ai_rec):
-    """One ranked list: the 33 judges and the AI, graded the same way."""
+    """One ranked list: active voting judges and the AI, graded the same way."""
     rows, thin = [], []
+    retired_set = _retired_judge_set()
     for j, st in JUDGE_SCORES.items():
+        if j in retired_set:
+            continue
         r = _sb_row(j, "judge", st["n"], st["hit"], st["pts"], st["w"])
         (rows if st["n"] >= 3 else thin).append(r)
     veto = ai_rec.get("veto") or []
@@ -2384,12 +2400,49 @@ RETIRED_JUDGES = {
 }
 
 
+def _retired_judge_set() -> set:
+    out = set(RETIRED_JUDGES.keys())
+    try:
+        env_raw = str(ENV.get("RETIRED_JUDGES") or "").strip()
+        if env_raw:
+            out.update(t.strip() for t in env_raw.split(",") if t.strip())
+    except Exception:
+        pass
+    try:
+        import config as _cfg
+        out.update(getattr(_cfg, "RETIRED_JUDGES", None) or ())
+    except Exception:
+        pass
+    return out
+
+
+def _closed_cme_overlap_seconds(u0: datetime, u1: datetime) -> float:
+    """Count seconds inside [u0, u1] (UTC-aware) where CME Globex is closed (break or weekend)."""
+    if u1 <= u0:
+        return 0.0
+    try:
+        import session as _sess
+    except Exception:
+        return 0.0
+    closed = 0.0
+    cur = u0.replace(second=0, microsecond=0)
+    step = timedelta(minutes=1)
+    while cur < u1:
+        nxt = min(u1, cur + step)
+        mid = cur + (nxt - cur) / 2
+        if _sess.is_cme_weekend_closed(mid) or _sess.is_cme_daily_maintenance_break(mid):
+            closed += (nxt - cur).total_seconds()
+        cur = nxt
+    return closed
+
+
 def panel_roster():
     """(rows, n_active). One row per decider, ending with the AI."""
     _order = {"Footprint": 0, "Order book": 1, "Hidden size": 2,
               "Structure": 3, "Macro": 4, "?": 5}
     names = sorted(set(JUDGE_DEFAULT_W) | set(JUDGE_HORIZON) | set(JUDGE_ROSTER),
                    key=lambda n: (_order.get(JUDGE_ROSTER.get(n, ("?", ""))[0], 5), n))
+    retired = _retired_judge_set()
     rows = []
     active = 0
     for n in names:
@@ -2397,15 +2450,15 @@ def panel_roster():
         w = JUDGE_DEFAULT_W.get(n)
         h = JUDGE_HORIZON.get(n)
         mins = (h[0] * 5) if h else None
-        on = not (w is not None and float(w) == 0.0)
+        on = (not (w is not None and float(w) == 0.0)) and (n not in retired)
         if on:
             active += 1
-        rows.append({"name": n, "group": grp, "desc": desc, "w": w,
-                     "mins": mins, "on": on, "kind": "judge"})
+        rows.append({"name": n, "group": grp, "desc": desc, "w": (0.0 if n in retired else w),
+                     "mins": mins, "on": on, "retired": (n in retired), "kind": "judge"})
     rows.append({"name": "THE AI (Gemini)", "group": "Referee",
                  "desc": "Asked only when the panel's signal is strong enough. Today it is a "
                          "GATE, not a vote: whatever it says is final, and it can refuse a "
-                         "trade all 33 judges wanted.",
+                         "trade all active judges wanted.",
                  "w": None, "mins": None, "on": True, "kind": "ai"})
     return rows, active
 
@@ -2598,7 +2651,8 @@ def _panel_scoreboard_html(sb_rows, sb_thin, ai_rec):
         w = f"{r['w']:.2f}" if r["w"] is not None else "&mdash;"
         clock = f"{r['mins']} min" if r["mins"] else "&mdash;"
         if not r["on"]:
-            state, light, why = "off", "&#9679;", "switched off (weight 0.00)"
+            state, light = "off", "&#9679;"
+            why = "retired (shadow-only, weight 0.00)" if r.get("retired") else "switched off (weight 0.00)"
         elif not is_graded:
             state, light = "none", "&#9679;"
             why = (f"only {s['n']} scored call(s) - too few to grade"
@@ -3309,13 +3363,19 @@ def test_9_judges(day, diary, ticks, candles):
             "agree": _st["agree"], "agree_tot": _st["agree_tot"],
         }
 
+    retired_set = _retired_judge_set()
+    active_rows = [row for row in rows if row[0] not in retired_set]
+    retired_rows = [row for row in rows if row[0] in retired_set]
+    lead_rows = active_rows if active_rows else rows
+
     say(f"        {used}/{len(recs)} diary records had a judge panel "
         f"({', '.join(f'{k}:{v}' for k, v in srcs.items())}) | "
+        f"active graded: {len(active_rows)}, retired bench: {len(retired_rows)} | "
         f"scoring: each judge gets its own clock (footprint 3 M5 bars, L3 3-6, "
         f"iceberg/whale 6, VWAP/structure 12, macro 24)")
     say(f"        {'JUDGE':<20}{'VOTES':>6}{'PART%':>7}{'BUY/SELL/Q':>12}"
         f"{'RIGHT%':>8}{'n':>6}{'PTS':>9}{'AVG':>7}{'AGR_ENS':>8}  SUGG_WEIGHT")
-    for j, st, acc, pts, avg in rows:
+    for j, st, acc, pts, avg in active_rows:
         part = pct(st["votes"], used)
         agree = pct(st["agree"], st["agree_tot"])
         cur_w = statistics.median(st["w"]) if st["w"] else JUDGE_DEFAULT_W.get(j, 0.5)
@@ -3325,12 +3385,22 @@ def test_9_judges(day, diary, ticks, candles):
         split = f"{st['buy']}/{st['sell']}/{st['quiet']}"
         say(f"        {j:<20}{st['votes']:>6}{part:>6.0f}%{split:>12}"
             f"{acc:>7.1f}%{st['q_tot']:>6}{pts:>+9.1f}{avg:>+7.2f}{agree:>7.0f}%   {cur_w:.1f} -> {sugg:.2f}")
+    if retired_rows:
+        say("        --- RETIRED BENCH (Not Voting — Shadow-Watched Only under Law #5) ---")
+        for j, st, acc, pts, avg in retired_rows:
+            part = pct(st["votes"], used)
+            agree = pct(st["agree"], st["agree_tot"])
+            cur_w = statistics.median(st["w"]) if st["w"] else JUDGE_DEFAULT_W.get(j, 0.5)
+            st["sugg"] = (0.0, 0.0)
+            split = f"{st['buy']}/{st['sell']}/{st['quiet']}"
+            say(f"        {j:<20}{st['votes']:>6}{part:>6.0f}%{split:>12}"
+                f"{acc:>7.1f}%{st['q_tot']:>6}{pts:>+9.1f}{avg:>+7.2f}{agree:>7.0f}%   retired (0.00)")
 
     if thin:
         say("        too few calls to grade (needs 3 scored calls), listed so nobody goes missing:")
         say("          " + ", ".join(f"{j} ({st['votes']} vote(s), {st['q_tot']} scored)"
                                       for j, st in sorted(thin, key=lambda kv: -kv[1]["votes"])))
-    quiet = [j for j, st in stats.items() if pct(st["votes"], used) < 5.0]
+    quiet = [j for j, st in stats.items() if j not in retired_set and pct(st["votes"], used) < 5.0]
     if quiet:
         say("        barely spoke (<5% of snapshots): " + ", ".join(quiet[:10]))
     foot = stats.get("footprint_delta")
@@ -3338,18 +3408,22 @@ def test_9_judges(day, diary, ticks, candles):
         say(f"        footprint (your BookMap aggressive buyer vs seller) spoke in "
             f"{pct(foot['votes'], used):.0f}% of snapshots, right {pct(foot['q_hit'], max(1, foot['q_tot'])):.0f}% of the time"
             f" over its 3-bar window -> it is still a real judge in the vote, not a decoration")
-    top = rows[0][0] if rows else None
-    bot = rows[-1][0] if len(rows) > 2 else None
-    if rows:
-        by_money = sorted(rows, key=lambda x: (x[4], x[2]), reverse=True)
-        say(f"        best by accuracy: {rows[0][0]} {rows[0][2]:.0f}% | "
-            f"best by money per call: {by_money[0][0]} {by_money[0][4]:+.2f} pts/call")
-        if len(rows) > 2:
-            say(f"        worst by money per call: {by_money[-1][0]} {by_money[-1][4]:+.2f} pts/call "
+    top = lead_rows[0][0] if lead_rows else None
+    bot = lead_rows[-1][0] if len(lead_rows) > 2 else None
+    if lead_rows:
+        by_money = sorted(lead_rows, key=lambda x: (x[4], x[2]), reverse=True)
+        say(f"        best by accuracy (active): {lead_rows[0][0]} {lead_rows[0][2]:.0f}% | "
+            f"best by money per call (active): {by_money[0][0]} {by_money[0][4]:+.2f} pts/call")
+        if len(lead_rows) > 2:
+            say(f"        worst by money per call (active): {by_money[-1][0]} {by_money[-1][4]:+.2f} pts/call "
                 f"({by_money[-1][2]:.0f}% right) -> a judge can be right often and still lose money; "
                 f"weight by money, not by pride")
     say("        hourly heat (right% of that judge's calls, top 6 active judges):")
-    act = sorted(stats.items(), key=lambda kv: kv[1]["votes"], reverse=True)[:6]
+    act = sorted(
+        [(j, st) for j, st in stats.items() if j not in retired_set],
+        key=lambda kv: kv[1]["votes"],
+        reverse=True,
+    )[:6]
     say("           " + " " * 20 + "".join(f"{h:>5}" for h in (8, 10, 12, 14, 16, 18, 20, 22)))
     for j, st in act:
         cells = ""
@@ -3358,7 +3432,7 @@ def test_9_judges(day, diary, ticks, candles):
             cells += f"{(f'{pct(hit, tot):.0f}' if tot else '-'):>5}"
         say(f"           {j:<20}{cells}")
     for j, st in stats.items():
-        if len(st["by_regime"]) > 1 and st["q_tot"] >= 10:
+        if j not in retired_set and len(st["by_regime"]) > 1 and st["q_tot"] >= 10:
             txt = ", ".join(f"{rg} {pct(v[0], v[1]):.0f}%(n={v[1]})"
                             for rg, v in sorted(st["by_regime"].items(),
                                                 key=lambda kv: -kv[1][1])[:3])
@@ -3373,7 +3447,7 @@ def test_9_judges(day, diary, ticks, candles):
                            "right_pct", "scored", "points_after_spread", "avg_points",
                            "agree_with_ensemble_pct", "weight_now", "weight_suggested"])
             for j, st, acc, pts, avg in rows:
-                wcsv.writerow([j, st["votes"], round(acc, 1), st["buy"], st["sell"], st["quiet"],
+                wcsv.writerow([j, st["votes"], round(pct(st["votes"], used), 1), st["buy"], st["sell"], st["quiet"],
                                round(acc, 1), st["q_tot"], round(pts, 1),
                                round(statistics.mean(st["pts"]), 3) if st["pts"] else 0,
                                round(pct(st["agree"], st["agree_tot"]), 1),
@@ -3382,29 +3456,30 @@ def test_9_judges(day, diary, ticks, candles):
         sug.write_text(json.dumps({
             "date": f"{day:%Y-%m-%d}",
             "method": "suggested = median weight of that judge today * (1 + 0.5*(accuracy-50%)/50%)",
-            "note": "review, not auto-apply. Anything scored on <20 votes is noise.",
+            "note": "review, not auto-apply. Active voting judges only; retired bench excluded.",
             "judges": {j: {"accuracy_pct": round(a, 1), "scored": st["q_tot"],
                             "weight_now": round(st["sugg"][0], 2),
                             "weight_suggested": round(st["sugg"][1], 2)}
-                       for j, st, a, _p, _av in rows if st["q_tot"] >= 20}
+                       for j, st, a, _p, _av in active_rows if st["q_tot"] >= 20}
         }, indent=1), encoding="utf-8")
         say(f"        saved: {out}")
         say(f"        saved: {sug}")
     except Exception as e:
         say(f"        [warn] could not save judge csv: {e}")
 
-    best_acc = rows[0][2] if rows else 0
-    if rows:
-        METRICS["judges"] = {"scored": len(rows),
-                             "best": f"{rows[0][0]} {rows[0][2]:.0f}%",
-                             "worst": f"{rows[-1][0]} {rows[-1][2]:.0f}%",
+    best_acc = lead_rows[0][2] if lead_rows else 0
+    if lead_rows:
+        METRICS["judges"] = {"scored": len(active_rows),
+                             "retired_bench": len(retired_rows),
+                             "best": f"{lead_rows[0][0]} {lead_rows[0][2]:.0f}%",
+                             "worst": f"{lead_rows[-1][0]} {lead_rows[-1][2]:.0f}%",
                              "used": used,
                              "table": [{"judge": j, "votes": st["votes"],
                                         "right_pct": round(a, 1), "scored": st["q_tot"],
                                         "buy": st["buy"], "sell": st["sell"], "quiet": st["quiet"],
                                         "part_pct": round(100.0 * st["votes"] / used, 1) if used else 0.0,
                                         "pts": round(pt, 1)}
-                                       for j, st, a, pt, _av in rows[:12]]}
+                                       for j, st, a, pt, _av in lead_rows[:12]]}
     grade = "PASS" if best_acc >= 55 else "WARN"
     why = [f"{len(stats)} judge(s) voted on this day | {len(rows)} graded (>=3 scored calls)"
            + (f" | {len(thin)} too few calls to grade (named below, never silently dropped)"
@@ -4946,6 +5021,23 @@ def test_16_team_cycle(day, diary, text, decisions):
                 if _power_history_ready(pr, active_seconds) is True
             )
             last_reason_up = str(last_probe.get("regime_reason", "")).upper()
+            try:
+                _tick_age_val = float(last_probe.get("tick_age_s") or 0.0)
+            except (TypeError, ValueError):
+                _tick_age_val = 0.0
+            _post_close_stale = False
+            if prior_ready_count > 0 and tf == expected_tf and last_reason_up == "STALE_FEED":
+                # Check if the log ran past CME Friday weekend close or daily break
+                _last_log_m = re.findall(r"(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2})", txt)
+                if _last_log_m:
+                    try:
+                        import session as _sess
+                        _ld = datetime.strptime(f"{_last_log_m[-1][0]} {_last_log_m[-1][1]}", "%Y-%m-%d %H:%M:%S")
+                        _lu = _ld.replace(tzinfo=BUDA).astimezone(timezone.utc)
+                        if _sess.is_cme_weekend_closed(_lu) or _sess.is_cme_daily_maintenance_break(_lu):
+                            _post_close_stale = True
+                    except Exception:
+                        _post_close_stale = False
             if (
                 prior_ready_count > 0
                 and tf == expected_tf
@@ -4955,6 +5047,12 @@ def test_16_team_cycle(day, diary, text, decisions):
                      f"active {tf} tail reached full readiness x{prior_ready_count} during session; "
                      f"final receipt ({tail}, reason={last_probe.get('regime_reason')}) reflects "
                      f"post-break re-warm after the scheduled CME daily maintenance break "
+                     f"(timeframe source: {active_source}){probe_note}")
+            elif _post_close_stale:
+                _chk("PASS", "1  active-timeframe regime history",
+                     f"active {tf} tail reached full readiness x{prior_ready_count} during session; "
+                     f"final receipt ({tail}, reason=STALE_FEED, tick_age_s={_tick_age_val:.1f}s) "
+                     f"captured after scheduled CME Globex close/weekend break "
                      f"(timeframe source: {active_source}){probe_note}")
             else:
                 _chk("WARN", "1  active-timeframe regime history",

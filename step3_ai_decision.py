@@ -415,16 +415,15 @@ class AIDecisionEngine:
     )
 
     _FALLBACK_FAMILY_MAP: Dict[str, str] = {
-        "cvd_trend": "TAPE", "ofi": "TAPE", "footprint_delta": "TAPE",
-        "footprint_imbalance": "TAPE", "l3_net_flow": "TAPE", "l3_aggr_ratio": "TAPE",
-        "l3_streak": "TAPE", "microprice": "BOOK", "depth_imbalance": "BOOK",
-        "l3_imbalance": "BOOK", "book_absorption": "BOOK", "iceberg": "HIDDEN",
-        "l3_absorption": "HIDDEN", "spoof": "HIDDEN", "cvd_divergence": "HIDDEN",
-        "sweep": "MAP", "vwap_bands": "MAP", "vwap_trend": "MAP",
-        "value_area": "MAP", "order_block": "MAP", "round_level": "MAP",
-        "asia_breakout": "MAP", "mtf_align": "WORLD", "adx_di": "WORLD",
-        "ema_trend": "WORLD", "macro_bias": "WORLD", "cross_market": "WORLD",
-        "news_sentiment": "WORLD",
+        "footprint_delta": "TAPE", "cvd_divergence": "TAPE", "absorption": "TAPE",
+        "cvd_momentum": "TAPE", "footprint_levels": "TAPE", "volume_roc": "TAPE",
+        "cvd_trend": "TAPE", "ofi": "TAPE", "footprint_imbalance": "TAPE",
+        "l3_net_flow": "BOOK", "l3_imbalance": "BOOK", "l3_large_ofi": "BOOK",
+        "microprice": "BOOK", "queue_pos": "BOOK", "depth_imbalance": "BOOK",
+        "iceberg": "HIDDEN", "sweep": "HIDDEN", "spoof_invert": "HIDDEN", "spoof": "HIDDEN",
+        "vwap_bands": "MAP", "vwap_trend": "MAP", "value_area": "MAP", "mtf": "MAP",
+        "trend_macd": "MAP", "sma20": "MAP", "order_block": "MAP", "asia_breakout": "MAP",
+        "news_sentiment": "WORLD", "macro_risk": "WORLD", "macro_bias": "WORLD",
     }
 
     @classmethod
@@ -455,10 +454,10 @@ class AIDecisionEngine:
         for item in judge_votes:
             if not isinstance(item, dict):
                 continue
-            jname = str(item.get("judge") or "").strip()
-            if not jname or jname in retired:
+            jname = str(item.get("judge") or item.get("name") or "").strip()
+            if not jname or jname in retired or jname in ("iceberg_noise", "whale_balanced") or bool(item.get("retired")):
                 continue
-            raw_dir = item.get("direction", item.get("vote", 0))
+            raw_dir = item.get("dir", item.get("direction", item.get("vote", 0)))
             if isinstance(raw_dir, str):
                 d_up = raw_dir.strip().upper()
                 v_sign = 1 if d_up == "BUY" else (-1 if d_up == "SELL" else 0)

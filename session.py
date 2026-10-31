@@ -96,20 +96,41 @@ def cme_daily_break_utc_window(now: Optional[datetime] = None) -> Tuple[str, str
     return f"{start_h:02d}:00", f"{end_h:02d}:00"
 
 
-def is_cme_daily_maintenance_break(now: Optional[datetime] = None) -> bool:
-    """True during the weekday 17:00-18:00 America/New_York CME Globex / CFD break."""
+def _ny_local_datetime(now: Optional[datetime] = None) -> datetime:
+    """Return naive local datetime in America/New_York (DST-aware with pure-Python fallback)."""
     n = _now(now)
     if n.tzinfo is None:
         n = n.replace(tzinfo=timezone.utc)
-    else:
-        n = n.astimezone(timezone.utc)
-    if n.weekday() not in {0, 1, 2, 3, 4}:
+    try:
+        from zoneinfo import ZoneInfo
+        return n.astimezone(ZoneInfo("America/New_York")).replace(tzinfo=None)
+    except Exception:
+        pass
+    u_naive = n.astimezone(timezone.utc).replace(tzinfo=None)
+    return u_naive + timedelta(hours=_us_eastern_offset_hours(u_naive))
+
+
+def is_cme_weekend_closed(now: Optional[datetime] = None) -> bool:
+    """True during CME Globex / XAUUSD weekend close (Fri 17:00 NY -> Sun 18:00 NY)."""
+    ny = _ny_local_datetime(now)
+    wd = ny.weekday()
+    if wd == 4 and ny.hour >= 17:
+        return True
+    if wd == 5:
+        return True
+    if wd == 6 and ny.hour < 18:
+        return True
+    return False
+
+
+def is_cme_daily_maintenance_break(now: Optional[datetime] = None) -> bool:
+    """True during the Mon-Thu 17:00-18:00 America/New_York CME Globex / CFD break."""
+    if is_cme_weekend_closed(now):
         return False
-    start_hm, end_hm = cme_daily_break_utc_window(n)
-    t = n.strftime("%H:%M")
-    if start_hm <= end_hm:
-        return start_hm <= t < end_hm
-    return t >= start_hm or t < end_hm
+    ny = _ny_local_datetime(now)
+    if ny.weekday() not in {0, 1, 2, 3}:
+        return False
+    return ny.hour == 17
 
 
 def _in_daily_break(now: datetime) -> bool:
@@ -136,6 +157,8 @@ def is_market_open(now: Optional[datetime] = None,
     if not enforce:
         return True
     now = _now(now)
+    if bool(getattr(config, "CME_DAILY_BREAK_AUTO", False)) and is_cme_weekend_closed(now):
+        return False
     if now.weekday() not in _trading_days():
         return False
     if _in_daily_break(now):
@@ -295,6 +318,9 @@ def session_context(now: Optional[datetime] = None) -> Dict[str, str]:
 
 def describe_now(now: Optional[datetime] = None) -> str:
     now = _now(now)
+    if bool(getattr(config, "CME_DAILY_BREAK_AUTO", False)) and is_cme_weekend_closed(now):
+        b_start, _ = cme_daily_break_utc_window(now)
+        return f"WEEKEND (CME Globex closed Fri {b_start} UTC / 17:00 NY -> Sun 18:00 NY)"
     if now.weekday() not in _trading_days():
         return f"WEEKEND/HOLIDAY ({_DAY_NAMES[now.weekday()]})"
     if _in_daily_break(now):

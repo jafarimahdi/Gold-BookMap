@@ -611,13 +611,22 @@ def _market_quality_evidence(data, elapsed_since_acquire_seconds: float = 0.0,
     }
 
 
+_EXECUTABLE_ROUTE_SHADOW_KEYS = frozenset({
+    "power_lead",
+    "passive_limit",
+    "passive_route_candidate",
+})
+
+
 def _attach_quality_evidence_to_shadow_candidates(snapshot) -> None:
-    """Attach this cycle's receipt to every non-executable shadow candidate.
+    """Attach this cycle's receipt to executable-route shadow candidates.
 
     Step 3 evaluates candidates before the post-analysis safety gate, so the
     first copy on the candidate may be empty or from the previous cycle. Refresh
     it after preflight, before decision-journal serialization; authorization
-    and candidate eligibility fields are deliberately untouched.
+    and candidate eligibility fields are deliberately untouched. Brain/gate
+    telemetry dicts (family_gate, class_gate_shadow, fresh_wave_shadow, etc.)
+    do not carry full L2 order-book copies so decisions_YYYYMMDD.csv stays slim.
     """
     if snapshot is None:
         return
@@ -628,14 +637,69 @@ def _attach_quality_evidence_to_shadow_candidates(snapshot) -> None:
     def _attach(container):
         if not isinstance(container, dict):
             return
-        for candidate in container.values():
-            if isinstance(candidate, dict):
+        for key, candidate in container.items():
+            if isinstance(candidate, dict) and key in _EXECUTABLE_ROUTE_SHADOW_KEYS:
                 candidate["market_quality_evidence"] = dict(evidence)
 
     _attach(getattr(snapshot, "shadow_candidates", None))
     shot = getattr(snapshot, "shot", None)
     if isinstance(shot, dict):
         _attach(shot.get("shadow_candidates"))
+
+
+def _compact_shadow_candidates_for_csv(raw_sc, quality_evidence=None) -> dict:
+    """Return a non-mutating CSV-compact copy of shadow_candidates.
+
+    Deduplicates repeated 4 KB market_quality_evidence dicts (and 2.5 KB raw L2
+    level arrays inside l2_diagnostics) into one concise top-level receipt so
+    decisions_YYYYMMDD.csv stays ~88% smaller without altering in-memory objects.
+    """
+    if not isinstance(raw_sc, dict) or not raw_sc:
+        return {}
+
+    def _slim_mqe(ev: dict) -> dict:
+        keep = (
+            "captured_at", "data_source", "data_symbol", "trade_symbol",
+            "quote_status", "level2_status", "safety_gate_status",
+            "safety_gate_reason", "price", "bid", "ask", "spread_pct",
+            "feed_age_seconds_at_decision", "quote_age_seconds_at_decision",
+            "depth_age_seconds_at_decision", "feed_warnings",
+        )
+        out_ev = {k: ev[k] for k in keep if k in ev}
+        l2d = ev.get("l2_diagnostics")
+        if isinstance(l2d, dict):
+            out_ev["l2_status"] = l2d.get("status")
+        return out_ev
+
+    hoisted_mqe = (
+        _slim_mqe(quality_evidence)
+        if isinstance(quality_evidence, dict) and quality_evidence
+        else None
+    )
+
+    def _strip_nested(obj):
+        if not isinstance(obj, dict):
+            return obj
+        nonlocal hoisted_mqe
+        copied = {}
+        for k, v in obj.items():
+            if k == "market_quality_evidence" and isinstance(v, dict):
+                if hoisted_mqe is None:
+                    hoisted_mqe = _slim_mqe(v)
+                copied[k] = {
+                    "quote_status": v.get("quote_status"),
+                    "safety_gate_status": v.get("safety_gate_status"),
+                }
+            elif isinstance(v, dict):
+                copied[k] = _strip_nested(v)
+            else:
+                copied[k] = v
+        return copied
+
+    out = _strip_nested(raw_sc)
+    if hoisted_mqe is not None and "market_quality_evidence" not in out:
+        out["market_quality_evidence"] = hoisted_mqe
+    return out
 
 
 def _persist_market_quality_snapshot(snapshot) -> bool:
@@ -886,7 +950,10 @@ def log_decision(snapshot, decision, exec_result) -> None:
         "next_event_title": getattr(getattr(snapshot, "news", None),
                                     "next_event_title", ""),
         "shadow_candidates": json.dumps(
-            getattr(snapshot, "shadow_candidates", {}) or {},
+            _compact_shadow_candidates_for_csv(
+                getattr(snapshot, "shadow_candidates", {}) or {},
+                getattr(snapshot, "quality_evidence", None),
+            ),
             sort_keys=True, default=str, separators=(",", ":")),
         "ai_rationale": getattr(decision, "rationale", ""),
         "reason": getattr(exec_result, "reason", ""),
@@ -2386,6 +2453,11 @@ def _load_logged_outcome_keys() -> set:
                         "pnl": row.get("pnl", ""),
                         "price": row.get("exit_price", ""),
                     }))
+                    comment = str(row.get("comment") or "")
+                    if "pos=" in comment:
+                        _p = _as_position_id(comment.split("pos=", 1)[1].split()[0])
+                        if _p:
+                            keys.add(f"pos:{_p}")
     except (OSError, csv.Error):
         pass
 
@@ -2890,16 +2962,59 @@ def run_pipeline(allow_new_entries: bool = True) -> None:
     try:
         from step5_monitoring import TradeMonitor
         monitor = TradeMonitor()
+        open_pos_ids = {
+            pid for pid in (
+                _as_position_id(p.get("position_id", p.get("ticket")))
+                for p in (open_positions or [])
+                if isinstance(p, dict)
+            )
+            if pid
+        }
         if plumbing_position_ids:
-            # Record the deal IDs separately so robot_report.py can preserve
-            # the audit evidence while excluding these tests from strategy
-            # performance statistics.
-            _save_plumbing_test_deals(
-                monitor.check_closed_deals(position_ids=plumbing_position_ids))
+            settled_plumbing = set()
+            try:
+                if _PLUMBING_DEALS_FILE.exists():
+                    _pstate = json.loads(_PLUMBING_DEALS_FILE.read_text(encoding="utf-8"))
+                    for _rec in (_pstate.get("deals") or []):
+                        if isinstance(_rec, dict):
+                            _pp = _as_position_id(_rec.get("position_id"))
+                            if _pp:
+                                settled_plumbing.add(_pp)
+            except (json.JSONDecodeError, OSError):
+                pass
+            pending_plumbing = {
+                pid for pid in plumbing_position_ids
+                if pid in open_pos_ids or pid not in settled_plumbing
+            }
+            if pending_plumbing:
+                _save_plumbing_test_deals(
+                    monitor.check_closed_deals(position_ids=pending_plumbing))
         logged_keys = _load_logged_outcome_keys()
+        settled_tracked = set()
+        for _k in logged_keys:
+            if not isinstance(_k, str):
+                continue
+            if _k.startswith("pos:"):
+                _pp = _as_position_id(_k[4:])
+                if _pp:
+                    settled_tracked.add(_pp)
+            elif _k.startswith("sig:"):
+                _pp = _as_position_id(_k[4:].split("|", 1)[0])
+                if _pp:
+                    settled_tracked.add(_pp)
+        if tracked_position_ids:
+            pending_tracked = {
+                pid for pid in tracked_position_ids
+                if pid in open_pos_ids or pid not in settled_tracked
+            }
+            closed_deals = (
+                monitor.check_closed_deals(position_ids=pending_tracked)
+                if pending_tracked else []
+            )
+        else:
+            closed_deals = monitor.check_closed_deals(position_ids=tracked_position_ids)
         new_keys = set()
-        for deal in monitor.check_closed_deals(
-                position_ids=tracked_position_ids):
+        for deal in closed_deals:
             deal_id = deal.get("deal_id")
             id_key = f"deal:{deal_id}" if deal_id not in (None, "", 0) else ""
             sig_key = _outcome_signature(deal)
@@ -2920,6 +3035,10 @@ def run_pipeline(allow_new_entries: bool = True) -> None:
                 comment=_comment)
             if id_key:
                 new_keys.add(id_key)
+            if pos_id not in (None, "", 0):
+                _norm_pos = _as_position_id(pos_id)
+                if _norm_pos:
+                    new_keys.add(f"pos:{_norm_pos}")
             new_keys.add(sig_key)
         if new_keys:
             _save_logged_outcome_keys(logged_keys | new_keys)

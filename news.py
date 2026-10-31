@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -57,6 +58,8 @@ NEWS_QUERIES = [
 
 _MEMO: Dict[str, Any] = {}          # in-memory cache {fetched_at, headlines}
 _MEMO_LOADED = False
+_BG_LOCK = threading.Lock()
+_BG_REFRESHING = False
 
 
 # --------------------------------------------------------------------------- #
@@ -115,6 +118,19 @@ def _fresh_cache() -> Optional[List[str]]:
                 return list(headlines)
         except (TypeError, ValueError):
             pass
+    return None
+
+
+def _stale_cache() -> Optional[List[str]]:
+    """Return any previously cached headlines (memory or disk) even after TTL expiry."""
+    if not config.NEWS_ENABLED:
+        return []
+    mem = _MEMO.get("headlines")
+    if isinstance(mem, list) and _MEMO.get("fetched_at") is not None:
+        return list(mem)
+    disk = _load_disk_cache() or {}
+    if "headlines" in disk and isinstance(disk.get("headlines"), list):
+        return list(disk["headlines"])
     return None
 
 
@@ -205,19 +221,58 @@ def fetch_headlines() -> List[str]:
     return headlines
 
 
+_DEFAULT_FETCH_HEADLINES = fetch_headlines
+
+
+def _spawn_async_news_refresh() -> None:
+    global _BG_REFRESHING
+    with _BG_LOCK:
+        if _BG_REFRESHING:
+            return
+        _BG_REFRESHING = True
+
+    def _worker() -> None:
+        global _BG_REFRESHING
+        try:
+            _DEFAULT_FETCH_HEADLINES()
+        except Exception as exc:
+            logger.debug("news: async refresh failed (%s)", exc)
+        finally:
+            with _BG_LOCK:
+                _BG_REFRESHING = False
+
+    threading.Thread(target=_worker, name="news-bg-refresh", daemon=True).start()
+
+
 def enrich_market_news(data: Dict[str, Any]) -> Dict[str, Any]:
     """Inject fresh headlines into data['news'] for Step 2 / Step 3.
 
+    Uses stale-while-revalidate when a prior cache exists so 15-minute RSS
+    network refreshes never stall the live MBO pipeline loop.
     Never touches existing fields (events, fetch_calendar, ...). Returns the
     same `data` dict for convenience.
     """
     if not config.NEWS_ENABLED:
         return data
     try:
-        headlines = fetch_headlines()
         news = data.setdefault("news", {})
-        # only fill when the provider didn't already supply headlines
         if not news.get("headlines"):
+            if (
+                fetch_headlines is _DEFAULT_FETCH_HEADLINES
+                and bool(getattr(config, "NEWS_ASYNC_REFRESH", True))
+            ):
+                fresh = _fresh_cache()
+                if fresh is not None:
+                    headlines = fresh
+                else:
+                    stale = _stale_cache()
+                    if stale is not None:
+                        _spawn_async_news_refresh()
+                        headlines = stale
+                    else:
+                        headlines = fetch_headlines()
+            else:
+                headlines = fetch_headlines()
             news["headlines"] = headlines
     except Exception as exc:  # never let news break the pipeline
         logger.warning("news: enrich failed (%s); continuing.", exc)

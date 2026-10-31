@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -56,6 +57,8 @@ _HEADERS = {
 }
 
 _MEMO: Dict[str, Any] = {}
+_BG_LOCK = threading.Lock()
+_BG_REFRESHING = False
 
 
 # --------------------------------------------------------------------------- #
@@ -85,6 +88,24 @@ def _fresh_cache() -> Optional[Dict[str, Any]]:
                 _MEMO["macro"] = m
                 _MEMO["fetched_at"] = fetched
                 return m
+    except (json.JSONDecodeError, OSError, ValueError):
+        pass
+    return None
+
+
+def _stale_cache() -> Optional[Dict[str, Any]]:
+    """Return any previously cached macro dict (memory or disk) even after TTL expiry."""
+    if not config.MACRO_ENABLED:
+        return None
+    mem = _MEMO.get("macro")
+    if isinstance(mem, dict) and _MEMO.get("fetched_at") is not None:
+        return dict(mem)
+    try:
+        path = _cache_path()
+        if path.exists():
+            state = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(state.get("macro"), dict) and state.get("fetched_at"):
+                return dict(state["macro"])
     except (json.JSONDecodeError, OSError, ValueError):
         pass
     return None
@@ -165,15 +186,57 @@ def fetch_macro() -> Dict[str, Any]:
     return out
 
 
+_DEFAULT_FETCH_MACRO = fetch_macro
+
+
+def _spawn_async_macro_refresh() -> None:
+    global _BG_REFRESHING
+    with _BG_LOCK:
+        if _BG_REFRESHING:
+            return
+        _BG_REFRESHING = True
+
+    def _worker() -> None:
+        global _BG_REFRESHING
+        try:
+            _DEFAULT_FETCH_MACRO()
+        except Exception as exc:
+            logger.debug("macro: async refresh failed (%s)", exc)
+        finally:
+            with _BG_LOCK:
+                _BG_REFRESHING = False
+
+    threading.Thread(target=_worker, name="macro-bg-refresh", daemon=True).start()
+
+
 def enrich_macro(data: Dict[str, Any]) -> Dict[str, Any]:
-    """Fill data['macro'] with live macro levels + series (if not provided)."""
+    """Fill data['macro'] with live macro levels + series (if not provided).
+
+    Uses stale-while-revalidate when a prior cache exists so 15-minute Yahoo
+    Finance HTTP calls never block the live MBO pipeline loop.
+    """
     if not config.MACRO_ENABLED:
         return data
     try:
         macro = data.setdefault("macro", {})
         if not (macro.get("usd_index") or macro.get("us_10y_yield")
                 or macro.get("vix_index")):
-            m = fetch_macro()
+            if (
+                fetch_macro is _DEFAULT_FETCH_MACRO
+                and bool(getattr(config, "MACRO_ASYNC_REFRESH", True))
+            ):
+                fresh = _fresh_cache()
+                if fresh is not None:
+                    m = fresh
+                else:
+                    stale = _stale_cache()
+                    if stale is not None:
+                        _spawn_async_macro_refresh()
+                        m = stale
+                    else:
+                        m = fetch_macro()
+            else:
+                m = fetch_macro()
             if m:
                 macro.update(m)
     except Exception as exc:

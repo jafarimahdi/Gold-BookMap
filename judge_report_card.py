@@ -62,15 +62,25 @@ def find_source_files(data_dir: Path, as_of: str, days_wanted: int):
 
 
 def load_day(path: Path):
-    """One audit day -> {judge: [votes, scored, hits, net_pts]}."""
+    """One audit day -> {judge: [votes, scored, hits, net_pts]}.
+
+    Skips judges on config.RETIRED_JUDGES so retired shadow-only notes never
+    enter Step 3's active JUDGE REPORT CARDS prompt block.
+    """
     out = {}
+    _retired = set()
+    try:
+        import config as _cfg
+        _retired = set(getattr(_cfg, "RETIRED_JUDGES", None) or ())
+    except Exception:
+        _retired = set()
     try:
         with open(path, "r", newline="", encoding="utf-8", errors="replace") as f:
             for row in csv.DictReader(f):
                 try:
                     judge = (row.get("judge") or "").strip()
                     scored = int(float(row.get("scored") or 0))
-                    if not judge or scored <= 0:
+                    if not judge or judge in _retired or scored <= 0:
                         continue
                     right = float(row.get("right_pct") or 0.0)
                     pts = float(row.get("points_after_spread") or 0.0)
