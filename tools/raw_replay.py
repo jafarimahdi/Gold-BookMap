@@ -73,6 +73,7 @@ except Exception:  # pragma: no cover
 import bookmap_bridge_provider as bbp
 import config
 import judge_families
+import session_levels
 import shadow_replay as sr
 import step2_market_analysis as s2
 from tools import insight as ins
@@ -201,12 +202,15 @@ def _discover_raw_files(
             chunks.append(p)
 
     compact = day_str.replace("-", "") if day_str else None
-    prev_compact = None
-    next_compact = None
+    allowed_compacts: Optional[set[str]] = None
     if day_str:
         d_obj = date.fromisoformat(day_str)
-        prev_compact = f"{d_obj - timedelta(days=1):%Y%m%d}"
-        next_compact = f"{d_obj + timedelta(days=1):%Y%m%d}"
+        # Allow 3 prior calendar days for `ticks` so Monday discovers Friday + Sunday prints
+        # for H1/M15 MTF & PDH/PDL/Prev_Settlement; keep `mbo` at 1 prior day for speed.
+        lb_days = 3 if kind == "ticks" else 1
+        allowed_compacts = {f"{d_obj + timedelta(days=1):%Y%m%d}", compact}
+        for d_back in range(1, lb_days + 1):
+            allowed_compacts.add(f"{d_obj - timedelta(days=d_back):%Y%m%d}")
 
     search_dirs = [root_dir, data_dir, data_dir / "archive", root_dir / "data", root_dir / "data" / "archive"]
     env_key = "BOOKMAP_BRIDGE_FILE" if kind == "ticks" else "BOOKMAP_MBO_FILE"
@@ -222,9 +226,9 @@ def _discover_raw_files(
             continue
         for pat in (f"{kind}_*.csv", f"{kind}_*.csv.gz"):
             for f in sorted(d.glob(pat)):
-                if compact is not None:
+                if allowed_compacts is not None:
                     m = re.match(rf"^{kind}_(\d{{8}})_", f.name, re.I)
-                    if m and m.group(1) not in {compact, prev_compact, next_compact}:
+                    if m and m.group(1) not in allowed_compacts:
                         continue
                 _add(f, is_live=False)
 
@@ -322,10 +326,11 @@ class _IncrementalM1Builder:
             cur[3] = price
             cur[4] += vol
 
-    def to_candles_dict(self) -> Dict[str, np.ndarray]:
+    def to_candles_dict(self, max_tail: Optional[int] = None) -> Dict[str, np.ndarray]:
         if not self.bars:
             return {}
-        keys = sorted(self.bars.keys())[-self.max_bars:]
+        cap = max_tail if (max_tail is not None and max_tail > 0) else self.max_bars
+        keys = sorted(self.bars.keys())[-cap:]
         return {
             "open": np.array([self.bars[k][0] for k in keys], dtype=float),
             "high": np.array([self.bars[k][1] for k in keys], dtype=float),
@@ -333,6 +338,58 @@ class _IncrementalM1Builder:
             "close": np.array([self.bars[k][3] for k in keys], dtype=float),
             "volume": np.array([self.bars[k][4] for k in keys], dtype=float),
         }
+
+    def to_resampled_dict(
+        self,
+        bucket_min: int,
+        completed_before_ep: Optional[float] = None,
+    ) -> Dict[str, np.ndarray]:
+        """Resample M1 bars by true UTC wall-clock buckets (immune to empty overnight minutes).
+        When `completed_before_ep` is given, only closed buckets (`bk + b_sec <= completed_before_ep`)
+        are emitted so RVOL / EMA / sweep checks never compare a newborn partial bar against full bars.
+        """
+        if not self.bars or bucket_min <= 1:
+            return self.to_candles_dict()
+        b_sec = int(bucket_min) * 60
+        grouped: Dict[int, List[float]] = {}
+        for k in sorted(self.bars.keys()):
+            if completed_before_ep is not None and k > completed_before_ep:
+                break
+            bk = (k // b_sec) * b_sec
+            if completed_before_ep is not None and (bk + b_sec) > (completed_before_ep + 1e-6):
+                continue
+            o, h, l, c, v = self.bars[k]
+            g = grouped.get(bk)
+            if g is None:
+                grouped[bk] = [o, h, l, c, v]
+            else:
+                if h > g[1]:
+                    g[1] = h
+                if l < g[2]:
+                    g[2] = l
+                g[3] = c
+                g[4] += v
+        if not grouped:
+            return {}
+        gkeys = sorted(grouped.keys())
+        return {
+            "open": np.array([grouped[k][0] for k in gkeys], dtype=float),
+            "high": np.array([grouped[k][1] for k in gkeys], dtype=float),
+            "low": np.array([grouped[k][2] for k in gkeys], dtype=float),
+            "close": np.array([grouped[k][3] for k in gkeys], dtype=float),
+            "volume": np.array([grouped[k][4] for k in gkeys], dtype=float),
+        }
+
+
+def _cme_session_open_ep(d_obj: date) -> float:
+    """Return exact UTC epoch of 18:00 US/Eastern on `d_obj - 1 day` (CME Globex session open)."""
+    target = d_obj.isoformat()
+    base = datetime(d_obj.year, d_obj.month, d_obj.day, 0, 0, tzinfo=timezone.utc) - timedelta(hours=12)
+    for m_off in range(0, 15 * 60, 15):
+        cand = base + timedelta(minutes=m_off)
+        if session_levels._cme_trade_day(session_levels._to_us_eastern(cand)) == target:
+            return cand.timestamp()
+    return (datetime(d_obj.year, d_obj.month, d_obj.day, 0, 0, tzinfo=timezone.utc) - timedelta(hours=6)).timestamp()
 
 
 def _fast_mbo_track_only(mbo_tail: bbp._MboTail, line: str) -> None:
@@ -596,6 +653,724 @@ def _walk_bracket(
 
 
 # --------------------------------------------------------------------------- #
+# Retired, Dormant, Previous & Textbook-Repaired Bench Judge Checkup (Non-Voting)
+# --------------------------------------------------------------------------- #
+def _evaluate_retired_and_previous_bench(
+    snap: Any,
+    md: Dict[str, Any],
+    tc_dt: datetime,
+    asia_state: Dict[str, float],
+    sess_state: Dict[str, Any],
+    tf_min: Optional[int] = None,
+) -> List[Tuple[str, str, int, float]]:
+    """
+    Evaluate all retired (`config.RETIRED_JUDGES`), dormant (`_ghost_on`),
+    previous (`v5.8.1` / `U-16`), and textbook-repaired candidate bench judges
+    directly on `(snap, md)` with zero effect on live active voting.
+    Law #11: Every bench judge's bar window and forward grading clock scale
+    dynamically with `tf_min` (`config.BASE_TF_MINUTES`).
+    Returns list of `(judge_name, category, clock_min, dir_sign)`.
+    """
+    out: List[Tuple[str, str, int, float]] = []
+    px = float(getattr(snap, "price", 0.0) or 0.0)
+    if px <= 0.0:
+        return out
+
+    tf_eff = max(1, int(tf_min if tf_min is not None else getattr(config, "BASE_TF_MINUTES", 3) or 3))
+    tf_sec = float(tf_eff * 60.0)
+
+    regime = str(getattr(snap, "regime", "NEUTRAL") or "NEUTRAL").upper()
+    vol = getattr(snap, "volatility", None)
+    atr_live = float(getattr(vol, "atr", 0.0) or 0.0)
+    atr_eff = atr_live if atr_live > 0 else max(px * 0.001, 1.5)
+    vp = getattr(snap, "volume_profile", None)
+    of = getattr(snap, "order_flow", None)
+    fp = getattr(snap, "footprint", None)
+    l3 = getattr(snap, "level3", None)
+    tr = getattr(snap, "trend", None)
+    mac = getattr(snap, "macro", None)
+    tc_ep = tc_dt.timestamp()
+
+    # Determine higher-timeframe bias dynamically across active MTF ladder (or M15/M1 fallback)
+    mtf_bias = 0
+    mtf_dict = getattr(snap, "mtf_trends", None) or getattr(snap, "mtf", None)
+    if isinstance(mtf_dict, dict) and mtf_dict:
+        m_up = sum(1 for v in mtf_dict.values() if str(v or "").upper() == "UP")
+        m_dn = sum(1 for v in mtf_dict.values() if str(v or "").upper() == "DOWN")
+        if m_up > m_dn:
+            mtf_bias = 1
+        elif m_dn > m_up:
+            mtf_bias = -1
+
+    candles = md.get("candles") if isinstance(md, dict) else None
+    c_raw = candles.get("close") if isinstance(candles, dict) else None
+    n_m1 = len(c_raw) if c_raw is not None else 0
+    o_arr = np.asarray(candles["open"], dtype=float) if n_m1 > 0 else None
+    h_arr = np.asarray(candles["high"], dtype=float) if n_m1 > 0 else None
+    l_arr = np.asarray(candles["low"], dtype=float) if n_m1 > 0 else None
+    c_arr = np.asarray(c_raw, dtype=float) if n_m1 > 0 else None
+    v_arr = np.asarray(candles.get("volume") if candles.get("volume") is not None else np.ones(n_m1), dtype=float) if n_m1 > 0 else None
+
+    c15_d = md.get("candles_m15") if isinstance(md, dict) else None
+    if mtf_bias == 0 and isinstance(c15_d, dict) and c15_d.get("close") is not None and len(c15_d["close"]) >= 3:
+        cl15 = np.asarray(c15_d["close"], dtype=float)
+        sma_short = float(np.mean(cl15[-3:]))
+        if cl15[-1] > sma_short and cl15[-1] > cl15[-2]:
+            mtf_bias = 1
+        elif cl15[-1] < sma_short and cl15[-1] < cl15[-2]:
+            mtf_bias = -1
+    if mtf_bias == 0 and n_m1 >= 45 and c_arr is not None:
+        try:
+            _o15, _h15, _l15, cl15, _v15 = s2._aggregate_m1(o_arr, h_arr, l_arr, c_arr, v_arr, 15)
+            if len(cl15) >= 3:
+                sma_short = float(np.mean(cl15[-3:]))
+                if cl15[-1] > sma_short and cl15[-1] > cl15[-2]:
+                    mtf_bias = 1
+                elif cl15[-1] < sma_short and cl15[-1] < cl15[-2]:
+                    mtf_bias = -1
+        except Exception:
+            mtf_bias = 0
+    if mtf_bias == 0 and tr is not None:
+        td_str = str(getattr(tr, "trend_direction", "") or "").upper()
+        mtf_bias = 1 if td_str == "UP" else (-1 if td_str == "DOWN" else 0)
+
+    def _emit(name: str, cat: str, clk_m5_equiv: int, d: float) -> None:
+        bars = 2 if name == "microprice" else max(1, int(round(float(clk_m5_equiv) / 5.0)))
+        clk_dyn = max(1, int(bars * tf_eff))
+        if d > 0:
+            out.append((name, cat, clk_dyn, 1.0))
+        elif d < 0:
+            out.append((name, cat, clk_dyn, -1.0))
+
+    # --- 1. vwap_zscore (RETIRED; L3652-3656, RANGE-gated -sign(z) fade) ---
+    if vp is not None:
+        z = float(getattr(vp, "vwap_zscore", 0.0) or 0.0)
+        if regime == "RANGE" and abs(z) > 1.5:
+            _emit("vwap_zscore", "RETIRED", 60, -1.0 if z > 0 else 1.0)
+
+        # --- 2. poc_day (RETIRED; L3617-3619, 1-tick sign(px - poc)) ---
+        poc = float(getattr(vp, "poc", 0.0) or 0.0)
+        if poc > 0 and px != poc:
+            _emit("poc_day", "RETIRED", 60, 1.0 if px > poc else -1.0)
+
+    # --- 3. supply_demand [legacy] (RETIRED; L3760-3786 + U-14 key fix) ---
+    ns = float(getattr(snap, "nearest_support", 0.0) or 0.0)
+    nr = float(getattr(snap, "nearest_resistance", 0.0) or 0.0)
+    obs = getattr(snap, "order_blocks", None) or []
+    atr_z = atr_live if atr_live > 0 else px * 0.002
+    b_sd = bool(ns > 0 and 0 < (px - ns) <= 1.5 * atr_z)
+    s_sd = bool(nr > 0 and 0 < (nr - px) <= 1.5 * atr_z)
+    if b_sd and not s_sd:
+        _emit("supply_demand", "RETIRED", 60, 1.0)
+    elif s_sd and not b_sd:
+        _emit("supply_demand", "RETIRED", 60, -1.0)
+    elif b_sd and s_sd:
+        n_obs = max(len(obs), 1)
+        b_idx = max((z.get("bar", 0) for z in obs if z.get("type") == "demand" and float(z.get("bottom", 0) or 0) <= px), default=0)
+        s_idx = max((z.get("bar", 0) for z in obs if z.get("type") == "supply" and float(z.get("top", 0) or 0) >= px), default=0)
+        net_sd = (0.6 + 0.3 * (b_idx / n_obs)) - (0.6 + 0.3 * (s_idx / n_obs))
+        if abs(net_sd) > 1e-6:
+            _emit("supply_demand", "RETIRED", 60, net_sd)
+
+    # --- 4. supply_demand[fix] (REPAIRED: true wall-clock active-TIMEFRAME unmitigated zones + >=1.0 ATR impulse + TREND seatbelt) ---
+    ctf_sd = (md.get("candles_tf") or md.get(f"candles_m{tf_eff}") or md.get("candles_m5")) if isinstance(md, dict) else None
+    if (isinstance(ctf_sd, dict) and ctf_sd.get("close") is not None and len(ctf_sd["close"]) >= 8) or (n_m1 >= 8 * tf_eff and c_arr is not None):
+        try:
+            used_closed_m5 = bool(isinstance(ctf_sd, dict) and ctf_sd.get("close") is not None and len(ctf_sd["close"]) >= 8)
+            if used_closed_m5:
+                o5 = np.asarray(ctf_sd["open"], dtype=float)
+                h5 = np.asarray(ctf_sd["high"], dtype=float)
+                l5 = np.asarray(ctf_sd["low"], dtype=float)
+                c5 = np.asarray(ctf_sd["close"], dtype=float)
+            else:
+                o5, h5, l5, c5, _v5 = s2._aggregate_m1(o_arr, h_arr, l_arr, c_arr, v_arr, int(tf_eff))
+            n5 = len(c5)
+            if n5 >= 8:
+                tr5 = [max(float(h5[i] - l5[i]), abs(float(h5[i] - c5[i - 1])), abs(float(l5[i] - c5[i - 1]))) for i in range(1, n5)]
+                atr5 = float(sum(tr5[-14:]) / min(len(tr5), 14)) if tr5 else atr_eff
+                best_dem = 0.0
+                best_sup = 0.0
+                k = 2
+                mit_end = n5 if used_closed_m5 else (n5 - 1)
+                # Evaluate pivots on closed M5 bars; check mitigation across subsequent closed M5 bars
+                for i in range(k, n5 - 3):
+                    win_h = h5[i - k : i + k + 1]
+                    win_l = l5[i - k : i + k + 1]
+                    if float(h5[i]) >= float(np.max(win_h)):
+                        z_top = float(h5[i])
+                        z_bot = float(max(o5[i], c5[i]))
+                        dep_drop = z_bot - float(np.min(l5[i + 1 : min(i + 4, n5)]))
+                        mitigated = any(float(c5[j]) > z_top for j in range(i + 1, max(i + 1, mit_end)))
+                        if dep_drop >= 1.0 * atr5 and not mitigated and z_bot >= px:
+                            if best_sup == 0.0 or z_bot < best_sup:
+                                best_sup = z_bot
+                    if float(l5[i]) <= float(np.min(win_l)):
+                        z_bot = float(l5[i])
+                        z_top = float(min(o5[i], c5[i]))
+                        dep_rise = float(np.max(h5[i + 1 : min(i + 4, n5)])) - z_top
+                        mitigated = any(float(c5[j]) < z_bot for j in range(i + 1, max(i + 1, mit_end)))
+                        if dep_rise >= 1.0 * atr5 and not mitigated and z_top <= px:
+                            if z_top > best_dem:
+                                best_dem = z_top
+                allow_buy = not (regime == "TREND" and mtf_bias < 0)
+                allow_sell = not (regime == "TREND" and mtf_bias > 0)
+                hit_dem = allow_buy and best_dem > 0 and 0 <= (px - best_dem) <= 1.2 * atr_eff
+                hit_sup = allow_sell and best_sup > 0 and 0 <= (best_sup - px) <= 1.2 * atr_eff
+                if hit_dem and not hit_sup:
+                    _emit("supply_demand[fix]", "REPAIRED", 60, 1.0)
+                elif hit_sup and not hit_dem:
+                    _emit("supply_demand[fix]", "REPAIRED", 60, -1.0)
+        except Exception:
+            pass
+
+    # --- 5. htf_poc [legacy] (RETIRED; L3795-3825, inverted <=1 ATR magnet bug) ---
+    hpoc = getattr(snap, "htf_poc", None) or {}
+    h1_p = float(hpoc.get("H1", 0.0) or 0.0) if isinstance(hpoc, dict) else 0.0
+    h4_p = float(hpoc.get("H4", 0.0) or 0.0) if isinstance(hpoc, dict) else 0.0
+    if h4_p <= 0.0 and isinstance(md, dict) and isinstance(md.get("_htf_m1_240"), dict):
+        try:
+            fb_poc = s2._compute_htf_poc(md["_htf_m1_240"])
+            if h1_p <= 0.0:
+                h1_p = float(fb_poc.get("H1", 0.0) or 0.0)
+            h4_p = float(fb_poc.get("H4", 0.0) or 0.0)
+        except Exception:
+            pass
+    if atr_live > 0 and (h1_p > 0 or h4_p > 0):
+        net_hp = 0.0
+        if h1_p > 0:
+            dh1 = abs(px - h1_p) / atr_live
+            if dh1 <= 1.0:
+                net_hp += 0.7 if px >= h1_p else -0.7
+            elif dh1 > 2.0:
+                net_hp += -0.4 if px > h1_p else 0.4
+        if h4_p > 0:
+            dh4 = abs(px - h4_p) / atr_live
+            if dh4 <= 1.5:
+                net_hp += 0.9 if px >= h4_p else -0.9
+        if abs(net_hp) > 1e-6:
+            _emit("htf_poc", "RETIRED", 120, net_hp)
+
+        # --- 6. htf_poc[fix] (REPAIRED: silent inside 0.6 ATR; RANGE >=2 ATR fade; TREND H1+H4 migration) ---
+        if h1_p > 0:
+            dh1 = abs(px - h1_p) / atr_live
+            if regime == "RANGE" and dh1 >= 2.0:
+                _emit("htf_poc[fix]", "REPAIRED", 60, -1.0 if px > h1_p else 1.0)
+            elif regime == "TREND" and h4_p > 0 and dh1 >= 0.8:
+                if px > h1_p and px > h4_p and mtf_bias >= 0:
+                    _emit("htf_poc[fix]", "REPAIRED", 60, 1.0)
+                elif px < h1_p and px < h4_p and mtf_bias <= 0:
+                    _emit("htf_poc[fix]", "REPAIRED", 60, -1.0)
+
+    # --- 7 & 8. whale_walls [legacy] vs whale_walls[fix] (live book only, no BID_CANCEL, <=2 ATR, no spoof) ---
+    whale_bid_any = False
+    whale_ask_any = False
+    ib_bid_any = False
+    ib_ask_any = False
+    if l3 is not None:
+        ob = getattr(l3, "order_book", None) or {}
+        bids_l3 = ob.get("bids") or [] if isinstance(ob, dict) else []
+        asks_l3 = ob.get("asks") or [] if isinstance(ob, dict) else []
+        evs_l3 = getattr(l3, "order_events", None) or []
+        w_thr = float(getattr(config, "WHALE_LOT_THRESHOLD", 30.0) or 30.0)
+
+        # Legacy L3320-3380 (1% radius + `"BID" in ev_type` cancel bug)
+        wb_leg = 0.0
+        wa_leg = 0.0
+        for bp, bsz in bids_l3:
+            if float(bsz) >= w_thr and abs(float(bp) - px) / px < 0.01:
+                wb_leg += float(bsz)
+        for ap, asz in asks_l3:
+            if float(asz) >= w_thr and abs(float(ap) - px) / px < 0.01:
+                wa_leg += float(asz)
+        for ev in evs_l3[-500:]:
+            if not isinstance(ev, dict):
+                continue
+            esz = float(ev.get("size", 0.0) or 0.0)
+            epx = float(ev.get("price", 0.0) or 0.0)
+            etp = str(ev.get("type") or ev.get("event_type") or "").upper()
+            if esz >= w_thr and epx > 0 and abs(epx - px) / px < 0.01:
+                if "BID" in etp:
+                    wb_leg += esz
+                elif "ASK" in etp:
+                    wa_leg += esz
+        whale_bid_any = wb_leg > 0
+        whale_ask_any = wa_leg > 0
+        if wb_leg > 0 or wa_leg > 0:
+            if wb_leg > wa_leg * 1.2:
+                _emit("whale_walls", "RETIRED", 30, 1.0)
+            elif wa_leg > wb_leg * 1.2:
+                _emit("whale_walls", "RETIRED", 30, -1.0)
+
+        # Repaired whale_walls[fix]: ONLY live resting book <= max(2.0*ATR, 1.50), exclude spoof_levels, TREND guard
+        sp_lvls = getattr(l3, "spoof_levels", None) or {}
+        if isinstance(sp_lvls, dict):
+            sp_prices = [float(sp_k) for sp_k, sp_cnt in sp_lvls.items() if float(sp_cnt or 0) > 0]
+        else:
+            sp_prices = [float(sp.get("price", 0.0) or 0.0) for sp in sp_lvls if isinstance(sp, dict)]
+        max_w_dist = max(2.0 * atr_eff, 1.50)
+        wb_fix = 0.0
+        wa_fix = 0.0
+        for bp, bsz in bids_l3:
+            bpf = float(bp)
+            if float(bsz) >= w_thr and 0 <= (px - bpf) <= max_w_dist:
+                if not any(abs(bpf - spx) <= 0.20 for spx in sp_prices):
+                    wb_fix += float(bsz)
+        for ap, asz in asks_l3:
+            apf = float(ap)
+            if float(asz) >= w_thr and 0 <= (apf - px) <= max_w_dist:
+                if not any(abs(apf - spx) <= 0.20 for spx in sp_prices):
+                    wa_fix += float(asz)
+        if wb_fix > wa_fix * 1.4 and not (regime == "TREND" and mtf_bias < 0):
+            _emit("whale_walls[fix]", "REPAIRED", 30, 1.0)
+        elif wa_fix > wb_fix * 1.4 and not (regime == "TREND" and mtf_bias > 0):
+            _emit("whale_walls[fix]", "REPAIRED", 30, -1.0)
+
+        # Iceberg side flags for legacy queue_pos (supports real Dict[price, count] & test list[dict])
+        ib_lvls = getattr(l3, "iceberg_levels", None) or {}
+        if isinstance(ib_lvls, dict):
+            for ib_k, ib_cnt in ib_lvls.items():
+                ibp = float(ib_k or 0.0)
+                if float(ib_cnt or 0) > 0 and ibp > 0 and abs(ibp - px) / px < 0.003:
+                    if ibp <= px:
+                        ib_bid_any = True
+                    else:
+                        ib_ask_any = True
+        else:
+            for ib in ib_lvls:
+                if isinstance(ib, dict):
+                    ibs = str(ib.get("side") or "").upper()
+                    ibp = float(ib.get("price", 0.0) or 0.0)
+                    if ibp > 0 and abs(ibp - px) / px < 0.003:
+                        if ibs == "BID":
+                            ib_bid_any = True
+                        elif ibs == "ASK":
+                            ib_ask_any = True
+
+        # --- 13. l3_ofi_streak (RETIRED; L3287-3294) ---
+        bs = int(getattr(l3, "buy_streak", 0) or 0)
+        ss = int(getattr(l3, "sell_streak", 0) or 0)
+        if (bs >= 3 or ss >= 3) and bs != ss:
+            _emit("l3_ofi_streak", "RETIRED", 15, 1.0 if bs > ss else -1.0)
+
+        # --- 14. iceberg_legacy (RETIRED; L3469-3477) ---
+        ib_ev = int(getattr(l3, "iceberg_events", 0) or 0)
+        l3_imb = float(getattr(l3, "order_book_imbalance", 0.0) or 0.0)
+        if ib_ev >= 1 and not (ib_bid_any or ib_ask_any) and abs(l3_imb) > 0.2:
+            _emit("iceberg_legacy", "RETIRED", 30, 1.0 if l3_imb > 0 else -1.0)
+
+        # --- 15. spoof_invert_loose (RETIRED; L3512-3519) ---
+        sp_ev = int(getattr(l3, "spoof_events", 0) or 0)
+        if sp_ev >= 1 and sp_lvls:
+            if isinstance(sp_lvls, dict):
+                sp_b = sum(int(v or 0) for k, v in sp_lvls.items() if float(k) <= px and abs(float(k) - px) / px < 0.003)
+                sp_a = sum(int(v or 0) for k, v in sp_lvls.items() if float(k) > px and abs(float(k) - px) / px < 0.003)
+            else:
+                sp_b = sum(1 for sp in sp_lvls if isinstance(sp, dict) and str(sp.get("side") or "").upper() == "BID" and abs(float(sp.get("price", 0) or 0) - px) / px < 0.003)
+                sp_a = sum(1 for sp in sp_lvls if isinstance(sp, dict) and str(sp.get("side") or "").upper() == "ASK" and abs(float(sp.get("price", 0) or 0) - px) / px < 0.003)
+            if sp_b > 0 and sp_a > 0 and sp_b != sp_a:
+                _emit("spoof_invert_loose", "RETIRED", 30, -1.0 if sp_b > sp_a else 1.0)
+
+    # --- 9, 10, 11, 12, 20, 21. Order-flow / L2 retired & dormant judges ---
+    if of is not None:
+        mid_p = float(getattr(of, "mid_price", 0.0) or 0.0)
+        mic_p = float(getattr(of, "microprice", 0.0) or 0.0)
+        if mid_p > 0 and mic_p > 0:
+            m_dev_bps = ((mic_p - mid_p) / px) * 10000.0
+            if abs(m_dev_bps) > 0.2:
+                _emit("microprice", "RETIRED", 15, 1.0 if m_dev_bps > 0 else -1.0)
+
+        ba_rat = float(getattr(of, "bid_ask_ratio", 1.0) or 1.0)
+        if ba_rat > 1.2 and (whale_bid_any or ib_bid_any):
+            _emit("queue_pos", "RETIRED", 15, 1.0)
+        elif 0 < ba_rat < 0.8 and (whale_ask_any or ib_ask_any):
+            _emit("queue_pos", "RETIRED", 15, -1.0)
+
+        dlt = float(getattr(of, "delta", 0.0) or 0.0)
+        if ba_rat >= 1.5 and dlt > 0:
+            _emit("queue_pos[ck2017]", "REPAIRED", 15, 1.0)
+        elif 0 < ba_rat <= 0.67 and dlt < 0:
+            _emit("queue_pos[ck2017]", "REPAIRED", 15, -1.0)
+
+        bp_pct = float(getattr(of, "buying_pressure", 50.0) or 50.0)
+        sp_pct = float(getattr(of, "selling_pressure", 50.0) or 50.0)
+        if bp_pct > 60.0:
+            _emit("delta_pressure", "RETIRED", 15, 1.0)
+        elif sp_pct > 60.0:
+            _emit("delta_pressure", "RETIRED", 15, -1.0)
+
+        b_dep = float(getattr(of, "level2_bid_depth", 0.0) or 0.0)
+        a_dep = float(getattr(of, "level2_ask_depth", 0.0) or 0.0)
+        ofi_l2 = float(getattr(of, "ofi", 0.0) or 0.0)
+        if (b_dep + a_dep) > 0 and abs(ofi_l2 / (b_dep + a_dep)) > 0.15:
+            _emit("l2_ofi", "DORMANT", 15, 1.0 if ofi_l2 > 0 else -1.0)
+
+        d_imb = float(getattr(of, "depth_imbalance", 0.0) or 0.0)
+        if abs(d_imb) >= 0.15:
+            _emit("l2_depth_top5", "DORMANT", 15, 1.0 if d_imb > 0 else -1.0)
+
+    # --- 16. Macro retired judges (when 5d macro series is non-zero) ---
+    if mac is not None:
+        uchg = float(getattr(mac, "usd_change_5d", 0.0) or 0.0)
+        ychg = float(getattr(mac, "yield_change_5d", 0.0) or 0.0)
+        vspk = bool(getattr(mac, "vix_spike", False))
+        vchg = float(getattr(mac, "vix_change_5d", 0.0) or 0.0)
+        if abs(uchg) > 0.3:
+            _emit("macro_dxy", "RETIRED", 120, -1.0 if uchg > 0 else 1.0)
+        if abs(ychg) > 2.0:
+            _emit("macro_yield", "RETIRED", 120, -1.0 if ychg > 0 else 1.0)
+        if vspk and abs(vchg) > 5.0:
+            _emit("macro_vix", "RETIRED", 120, 1.0 if vchg > 0 else -1.0)
+
+    # --- 17, 18, 19, 22. Technical M1 dormant & v5.8.1 previous judges ---
+    if tr is not None:
+        m_hist = float(getattr(tr, "macd_histogram", 0.0) or 0.0)
+        if abs(m_hist) > 0.02:
+            _emit("trend_macd", "DORMANT", 60, 1.0 if m_hist > 0 else -1.0)
+
+        sma20 = float(getattr(tr, "sma_20", 0.0) or 0.0)
+        if sma20 > 0 and px != sma20:
+            _emit("sma20", "DORMANT", 30, 1.0 if px > sma20 else -1.0)
+
+        sma50 = float(getattr(tr, "sma_50", 0.0) or 0.0)
+        if sma50 > 0 and px != sma50:
+            _emit("sma50", "DORMANT", 60, 1.0 if px > sma50 else -1.0)
+
+        t_dir = str(getattr(tr, "trend_direction", "NEUTRAL") or "NEUTRAL").upper()
+        if t_dir == "UP":
+            _emit("trend_ma_adx", "DORMANT", 60, 1.0)
+        elif t_dir == "DOWN":
+            _emit("trend_ma_adx", "DORMANT", 60, -1.0)
+
+        rsi_v = float(getattr(tr, "rsi", 50.0) or 50.0)
+        if regime == "RANGE":
+            if rsi_v < 30.0:
+                _emit("rsi_range_fade", "PREVIOUS", 30, 1.0)
+            elif rsi_v > 70.0:
+                _emit("rsi_range_fade", "PREVIOUS", 30, -1.0)
+        if rsi_v > 55.0:
+            _emit("rsi_ema_mom", "PREVIOUS", 30, 1.0)
+        elif 0.0 < rsi_v < 45.0:
+            _emit("rsi_ema_mom", "PREVIOUS", 30, -1.0)
+
+    # --- Remaining _ghost_on dormant directional baselines (L3183, L3185, L3605) ---
+    if vp is not None:
+        vw_px = float(getattr(vp, "vwap", 0.0) or 0.0)
+        if vw_px > 0 and px != vw_px:
+            _emit("ghost_vwap_side", "DORMANT", 60, 1.0 if px > vw_px else -1.0)
+    if of is not None:
+        cvd_v = float(getattr(of, "cvd", 0.0) or 0.0)
+        if cvd_v != 0.0:
+            _emit("ghost_cvd_sign", "DORMANT", 30, 1.0 if cvd_v > 0 else -1.0)
+        ba_r2 = float(getattr(of, "bid_ask_ratio", 1.0) or 1.0)
+        if ba_r2 > 1.2:
+            _emit("ghost_bid_ask", "DORMANT", 15, 1.0)
+        elif 0.0 < ba_r2 < 0.8:
+            _emit("ghost_bid_ask", "DORMANT", 15, -1.0)
+
+    # --- 23. asian_range_brk (PREVIOUS v5.8.1: 00-07Z box -> 08-12Z London breakout) ---
+    a_hi = float(asia_state.get("hi", 0.0) or 0.0)
+    a_lo = float(asia_state.get("lo", 0.0) or 0.0)
+    if 8 <= tc_dt.hour <= 12 and a_hi > a_lo > 0 and (a_hi - a_lo) >= 1.0:
+        if px > a_hi:
+            _emit("asian_range_brk", "PREVIOUS", 60, 1.0)
+        elif px < a_lo:
+            _emit("asian_range_brk", "PREVIOUS", 60, -1.0)
+
+    # --- 24 & 24b. session_ib_on & session_pdh_pdl (U-16 session_levels.py: IB/ON + PDH/PDL/Prev_Settlement) ---
+    if isinstance(sess_state, dict) and sess_state:
+        ibh = float(sess_state.get("ibh", 0.0) or 0.0)
+        ibl = float(sess_state.get("ibl", 0.0) or 0.0)
+        ib_ok = bool(sess_state.get("ib_complete", False)) and ibh > ibl > 0
+        onh = float(sess_state.get("onh", 0.0) or 0.0)
+        onl = float(sess_state.get("onl", 0.0) or 0.0)
+        if ib_ok and regime == "TREND":
+            if px > ibh:
+                _emit("session_ib_on", "PREVIOUS", 60, 1.0)
+            elif px < ibl:
+                _emit("session_ib_on", "PREVIOUS", 60, -1.0)
+        elif regime == "RANGE":
+            if ib_ok and 0 <= (ibh - px) <= 0.6 * atr_eff:
+                _emit("session_ib_on", "PREVIOUS", 60, -1.0)
+            elif ib_ok and 0 <= (px - ibl) <= 0.6 * atr_eff:
+                _emit("session_ib_on", "PREVIOUS", 60, 1.0)
+            elif onh > onl > 0 and 0 <= (onh - px) <= 0.6 * atr_eff:
+                _emit("session_ib_on", "PREVIOUS", 60, -1.0)
+            elif onh > onl > 0 and 0 <= (px - onl) <= 0.6 * atr_eff:
+                _emit("session_ib_on", "PREVIOUS", 60, 1.0)
+
+        pdh = float(sess_state.get("prev_high", 0.0) or 0.0)
+        pdl = float(sess_state.get("prev_low", 0.0) or 0.0)
+        pset = float(sess_state.get("prev_settlement", 0.0) or 0.0)
+        if pdh > pdl > 0:
+            if regime == "TREND":
+                if px > pdh and mtf_bias >= 0:
+                    _emit("session_pdh_pdl", "PREVIOUS", 60, 1.0)
+                elif px < pdl and mtf_bias <= 0:
+                    _emit("session_pdh_pdl", "PREVIOUS", 60, -1.0)
+            else:
+                if 0 <= (pdh - px) <= 0.6 * atr_eff:
+                    _emit("session_pdh_pdl", "PREVIOUS", 60, -1.0)
+                elif 0 <= (px - pdl) <= 0.6 * atr_eff:
+                    _emit("session_pdh_pdl", "PREVIOUS", 60, 1.0)
+                elif pset > 0 and 0 < abs(px - pset) <= 0.4 * atr_eff:
+                    _emit("session_pdh_pdl", "PREVIOUS", 60, -1.0 if px > pset else 1.0)
+
+    # --- 25 & 25b. round_numbers ($50 RANGE bounce) & round_numbers_5st (exact db0bf52 5-state flow judge) ---
+    if regime == "RANGE":
+        r50 = round(px / 50.0) * 50.0
+        dist_r = px - r50
+        if 0 < dist_r <= 0.4 * atr_eff:
+            _emit("round_numbers", "PREVIOUS", 30, 1.0)
+        elif 0 < (-dist_r) <= 0.4 * atr_eff:
+            _emit("round_numbers", "PREVIOUS", 30, -1.0)
+
+    # Exact historical db0bf52 3-tier ($100/$50, $25, $10) 5-state flow-dependent round-number judge
+    best_rn = None
+    best_rn_d = 1e9
+    for step_rn, mult_rn in ((50.0, 1.0), (25.0, 0.7), (10.0, 0.4)):
+        lvl_rn = round(px / step_rn) * step_rn
+        d_rn = abs(px - lvl_rn)
+        if d_rn < best_rn_d:
+            best_rn_d = d_rn
+            best_rn = (lvl_rn, mult_rn)
+    if best_rn is not None and best_rn_d <= max(0.8 * atr_eff, 1.25):
+        lvl_rn, _m_rn = best_rn
+        of_dlt = float(getattr(of, "delta", 0.0) or 0.0) if of is not None else 0.0
+        abs_net = float(getattr(of, "absorption_net", 0.0) or 0.0) if of is not None else 0.0
+        prev_px = float(c_arr[-2]) if (c_arr is not None and n_m1 >= 2) else px
+        if prev_px <= lvl_rn < px and of_dlt > 0:
+            _emit("round_numbers_5st", "PREVIOUS", 30, 1.0)
+        elif prev_px >= lvl_rn > px and of_dlt < 0:
+            _emit("round_numbers_5st", "PREVIOUS", 30, -1.0)
+        elif px < lvl_rn and abs_net < 0:
+            _emit("round_numbers_5st", "PREVIOUS", 30, -1.0)
+        elif px > lvl_rn and abs_net > 0:
+            _emit("round_numbers_5st", "PREVIOUS", 30, 1.0)
+        elif regime == "RANGE" and px != lvl_rn:
+            _emit("round_numbers_5st", "PREVIOUS", 30, -1.0 if px < lvl_rn else 1.0)
+
+    # --- 26-29. POWER v1 & v2 Exclusive Instruments (never before graded side-by-side with Classroom) ---
+    pw = getattr(snap, "power", None) or {}
+    if isinstance(pw, dict) and pw:
+        pw_d = str(pw.get("direction") or "NEITHER").upper()
+        if pw_d == "UP":
+            _emit("power_v2_dir", "POWER", 30, 1.0)
+        elif pw_d == "DOWN":
+            _emit("power_v2_dir", "POWER", 30, -1.0)
+        inp_j = pw.get("input_judges") or {}
+        if isinstance(inp_j, dict):
+            bp_j = inp_j.get("big_prints")
+            if isinstance(bp_j, dict) and isinstance(bp_j.get("value"), (int, float)):
+                bp_v = float(bp_j["value"])
+                if abs(bp_v) >= 0.15:
+                    _emit("power_big_prints", "POWER", 15, 1.0 if bp_v > 0 else -1.0)
+            fl_j = inp_j.get("footprint_levels")
+            if isinstance(fl_j, dict) and isinstance(fl_j.get("value"), (int, float)):
+                fl_v = float(fl_j["value"])
+                if abs(fl_v) >= 0.25:
+                    _emit("power_breadth_sqrt", "POWER", 15, 1.0 if fl_v > 0 else -1.0)
+
+    sig_map = getattr(snap, "signal_map", None)
+    if isinstance(sig_map, dict) and sig_map:
+        try:
+            import power_team as pt_v1
+            v1_res = pt_v1.decide(
+                sig_map,
+                order_flow=of,
+                footprint=fp,
+                level3=l3,
+                volume_profile=vp,
+                trend=tr,
+                volatility=vol,
+                news=getattr(snap, "news", None),
+                macro=mac,
+                price=px,
+                divergence=float(getattr(snap, "divergence", 0.0) or 0.0),
+                mtf=getattr(snap, "mtf", None),
+                config=config,
+                tick_data=md.get("tick_data") if isinstance(md, dict) else None,
+                atr=atr_eff,
+            )
+            v1_sc = float(v1_res.get("score", 0.0) or 0.0)
+            v1_door = str(v1_res.get("door") or "").upper()
+            if v1_sc >= 0.35 and v1_door in ("ABOVE", "BELOW"):
+                _emit("power_v1_legs", "POWER", 30, 1.0 if v1_door == "ABOVE" else -1.0)
+        except Exception:
+            pass
+
+    # --- 30-38. ACT_FIX: Stage-2 Textbook Shadow Twins of Buggy Active Judges (Law #5/#9/#10) ---
+    # 30. l3_large_ofi[fix]: cures L5586 `_ref_mid == 0.0` bug using true `px` mid + $2.50 Gaussian weight
+    raw_evs = md.get("order_events") if isinstance(md, dict) else None
+    if isinstance(raw_evs, list) and raw_evs:
+        lg_lots = float(getattr(config, "L3_LARGE_ORDER_LOTS", 20.0) or 20.0)
+        nt_usd = float(getattr(config, "L3_NEAR_TOUCH_USD", 2.50) or 2.50)
+        lg_ofi = 0.0
+        for ev in raw_evs[-1500:]:
+            if not isinstance(ev, dict):
+                continue
+            ts_raw = ev.get("epoch") if ev.get("epoch") is not None else ev.get("timestamp")
+            ev_ts = 0.0
+            if isinstance(ts_raw, (int, float)):
+                ev_ts = float(ts_raw)
+            elif isinstance(ts_raw, datetime):
+                ev_ts = ts_raw.timestamp()
+            elif isinstance(ts_raw, str) and ts_raw:
+                p_dt = _parse_ts_utc(ts_raw)
+                if p_dt is not None:
+                    ev_ts = p_dt.timestamp()
+            if ev_ts > 0 and (tc_ep - ev_ts) > tf_sec:
+                continue
+            esz = float(ev.get("size", 0.0) or 0.0)
+            epx = float(ev.get("price", 0.0) or 0.0)
+            if esz < lg_lots or epx <= 0.0:
+                continue
+            dist_u = abs(epx - px)
+            if dist_u > 3.0 * nt_usd:
+                continue
+            w_d = math.exp(-0.5 * (dist_u / max(nt_usd, 0.25)) ** 2)
+            etp = str(ev.get("type") or ev.get("event_type") or "").upper()
+            esd = str(ev.get("side") or "").upper()
+            is_bid = ("BID" in etp) or (esd == "BID")
+            is_ask = ("ASK" in etp) or (esd == "ASK")
+            is_rem = any(tok in etp for tok in ("CANCEL", "DELETE", "REMOVE"))
+            if is_bid and not is_ask:
+                lg_ofi += (-esz * w_d) if is_rem else (esz * w_d)
+            elif is_ask and not is_bid:
+                lg_ofi += (esz * w_d) if is_rem else (-esz * w_d)
+        if abs(lg_ofi) >= 15.0 and not (regime == "TREND" and ((lg_ofi > 0 and mtf_bias < 0) or (lg_ofi < 0 and mtf_bias > 0))):
+            _emit("l3_large_ofi[fix]", "ACT_FIX", 15, 1.0 if lg_ofi > 0 else -1.0)
+
+    # 31. iceberg[fix]: fresh <=180s refills, <=max(1.0*ATR, $1.50), unbroken bounce + TREND seatbelt
+    if l3 is not None:
+        ib_meta = getattr(l3, "iceberg_meta", None) or {}
+        if isinstance(ib_meta, dict) and ib_meta:
+            max_ib_d = max(1.0 * atr_eff, 1.50)
+            best_ib_sc = 0.0
+            best_ib_px = 0.0
+            for k_px, m_ib in ib_meta.items():
+                if not isinstance(m_ib, dict):
+                    continue
+                ibp = float(k_px or 0.0)
+                l_seen = float(m_ib.get("last_seen", 0.0) or 0.0)
+                refs = int(m_ib.get("refills", 0) or 0)
+                sc_ib = float(m_ib.get("score", 0.0) or 0.0)
+                if ibp <= 0 or refs < 2 or abs(ibp - px) > max_ib_d:
+                    continue
+                if l_seen > 0 and (tc_ep - l_seen) > tf_sec:
+                    continue
+                if sc_ib > best_ib_sc:
+                    best_ib_sc = sc_ib
+                    best_ib_px = ibp
+            if best_ib_px > 0:
+                of_d = float(getattr(of, "delta", 0.0) or 0.0) if of is not None else 0.0
+                if best_ib_px <= px and of_d >= 0 and not (regime == "TREND" and mtf_bias < 0):
+                    _emit("iceberg[fix]", "ACT_FIX", 30, 1.0)
+                elif best_ib_px > px and of_d <= 0 and not (regime == "TREND" and mtf_bias > 0):
+                    _emit("iceberg[fix]", "ACT_FIX", 30, -1.0)
+
+    # Closed wall-clock active-TIMEFRAME bars (`candles_tf`) for volume_roc[fix], sweep[fix], vwap_bands[fix], cvd_divergence[fix]
+    c3_d = (md.get("candles_tf") or md.get(f"candles_m{tf_eff}") or md.get("candles_m3")) if isinstance(md, dict) else None
+    o3 = h3_a = l3_a = c3 = v3 = None
+    if isinstance(c3_d, dict) and c3_d.get("close") is not None and len(c3_d["close"]) >= 6:
+        o3 = np.asarray(c3_d["open"], dtype=float)
+        h3_a = np.asarray(c3_d["high"], dtype=float)
+        l3_a = np.asarray(c3_d["low"], dtype=float)
+        c3 = np.asarray(c3_d["close"], dtype=float)
+        v3 = np.asarray(c3_d["volume"], dtype=float)
+    elif n_m1 >= 7 * tf_eff and c_arr is not None:
+        try:
+            o3, h3_a, l3_a, c3, v3 = s2._aggregate_m1(o_arr, h_arr, l_arr, c_arr, v_arr, tf_eff)
+        except Exception:
+            o3 = c3 = None
+
+    # 32. volume_roc[fix]: closed M3 RVOL >= 1.8x 20-bar median + body >= 0.45*(H-L) + CLV >=0.65 / <=0.35
+    if c3 is not None and len(c3) >= 12:
+        med_v3 = max(float(np.median(v3[-min(21, len(v3)) : -1])), 1.0)
+        rng3 = float(h3_a[-1] - l3_a[-1])
+        body3 = abs(float(c3[-1] - o3[-1]))
+        if float(v3[-1]) >= 1.8 * med_v3 and rng3 >= 0.30 and body3 >= 0.45 * rng3:
+            clv3 = float(c3[-1] - l3_a[-1]) / rng3
+            if clv3 >= 0.65:
+                _emit("volume_roc[fix]", "ACT_FIX", 30, 1.0)
+            elif clv3 <= 0.35:
+                _emit("volume_roc[fix]", "ACT_FIX", 30, -1.0)
+
+    # 33. sweep[fix]: cures V6_SWEEP_THRESHOLD_PCT=0.10 ($4/1m) bug -> closed M3, poke>=max(0.30,0.25*ATR), 1.5x vol
+    if c3 is not None and len(c3) >= 22:
+        hi20 = float(np.max(h3_a[-21:-1]))
+        lo20 = float(np.min(l3_a[-21:-1]))
+        med_v_sw = max(float(np.median(v3[-21:-1])), 1.0)
+        bar_atr3 = max(float(np.median(h3_a[-20:] - l3_a[-20:])), 0.40)
+        poke_thr = max(0.30, 0.25 * bar_atr3)
+        if float(v3[-1]) >= 1.5 * med_v_sw:
+            if float(h3_a[-1]) >= hi20 + poke_thr and float(c3[-1]) < hi20 and not (regime == "TREND" and mtf_bias > 0):
+                _emit("sweep[fix]", "ACT_FIX", 30, -1.0)
+            elif float(l3_a[-1]) <= lo20 - poke_thr and float(c3[-1]) > lo20 and not (regime == "TREND" and mtf_bias < 0):
+                _emit("sweep[fix]", "ACT_FIX", 30, 1.0)
+
+    # 34 & 35. vwap_bands[fix] & value_area[fix] (Dalton 2013: TREND seatbelt + responsive fade only in balance)
+    if vp is not None:
+        vw_b = float(getattr(vp, "vwap", 0.0) or 0.0)
+        vw_sd = float(getattr(vp, "vwap_std", 0.0) or 0.0)
+        if vw_b > 0 and vw_sd > 0:
+            z_vw = (px - vw_b) / vw_sd
+            if regime != "TREND":
+                thr_z = 1.25 if regime == "RANGE" else 2.0
+                if z_vw >= thr_z:
+                    _emit("vwap_bands[fix]", "ACT_FIX", 60, -1.0)
+                elif z_vw <= -thr_z:
+                    _emit("vwap_bands[fix]", "ACT_FIX", 60, 1.0)
+            elif c3 is not None and len(c3) >= 2 and float(h3_a[-1] - l3_a[-1]) > 0:
+                clv_climax = float(c3[-1] - l3_a[-1]) / float(h3_a[-1] - l3_a[-1])
+                if z_vw >= 2.5 and clv_climax <= 0.35:
+                    _emit("vwap_bands[fix]", "ACT_FIX", 60, -1.0)
+                elif z_vw <= -2.5 and clv_climax >= 0.65:
+                    _emit("vwap_bands[fix]", "ACT_FIX", 60, 1.0)
+
+        vah = float(getattr(vp, "value_area_high", 0.0) or 0.0)
+        val_p = float(getattr(vp, "value_area_low", 0.0) or 0.0)
+        if vah > val_p > 0:
+            if regime == "TREND":
+                if px > vah and mtf_bias >= 0:
+                    _emit("value_area[fix]", "ACT_FIX", 60, 1.0)
+                elif px < val_p and mtf_bias <= 0:
+                    _emit("value_area[fix]", "ACT_FIX", 60, -1.0)
+            else:
+                if 0 <= (vah - px) <= 0.8 * atr_eff:
+                    _emit("value_area[fix]", "ACT_FIX", 60, -1.0)
+                elif 0 <= (px - val_p) <= 0.8 * atr_eff:
+                    _emit("value_area[fix]", "ACT_FIX", 60, 1.0)
+
+    # 36. cvd_divergence[fix]: missing L3546 TREND seatbelt + closed-bar price rejection against passive absorption
+    div_v = float(getattr(snap, "divergence", 0.0) or 0.0)
+    if abs(div_v) >= 0.35 and c3 is not None and len(c3) >= 2:
+        if div_v > 0 and float(c3[-1]) > float(o3[-1]) and not (regime == "TREND" and mtf_bias < 0):
+            _emit("cvd_divergence[fix]", "ACT_FIX", 60, 1.0)
+        elif div_v < 0 and float(c3[-1]) < float(o3[-1]) and not (regime == "TREND" and mtf_bias > 0):
+            _emit("cvd_divergence[fix]", "ACT_FIX", 60, -1.0)
+
+    # 37. absorption[fix]: >=2 net absorbed walls + active-TIMEFRAME price has not broken through wall
+    if of is not None:
+        ab_net = float(getattr(of, "absorption_net", 0.0) or 0.0)
+        dp3 = float(c_arr[-1] - o_arr[-min(tf_eff, n_m1)]) if (c_arr is not None and n_m1 >= 2) else 0.0
+        if ab_net >= 2.0 and dp3 >= -0.20 * atr_eff and not (regime == "TREND" and mtf_bias < 0):
+            _emit("absorption[fix]", "ACT_FIX", 15, 1.0)
+        elif ab_net <= -2.0 and dp3 <= 0.20 * atr_eff and not (regime == "TREND" and mtf_bias > 0):
+            _emit("absorption[fix]", "ACT_FIX", 15, -1.0)
+
+    # 38. footprint_delta[fix]: >=0.18 deadband + Kyle's lambda > 0 over active-TIMEFRAME bar
+    if fp is not None:
+        fp_imb = float(getattr(fp, "delta_imbalance", 0.0) or 0.0)
+        dp3_fp = float(c_arr[-1] - o_arr[-min(tf_eff, n_m1)]) if (c_arr is not None and n_m1 >= 2) else 0.0
+        if fp_imb >= 0.18 and dp3_fp > 0.0:
+            _emit("footprint_delta[fix]", "ACT_FIX", 15, 1.0)
+        elif fp_imb <= -0.18 and dp3_fp < 0.0:
+            _emit("footprint_delta[fix]", "ACT_FIX", 15, -1.0)
+
+    return out
+
+
+# --------------------------------------------------------------------------- #
 # Reset stateful Step 2 singletons between replayed days (100% isolation)
 # --------------------------------------------------------------------------- #
 def _reset_step2_singletons() -> None:
@@ -643,9 +1418,21 @@ def replay_single_day(
     win_end_utc = win_end_local.astimezone(timezone.utc)
 
     stream_start_ep = (win_start_utc - timedelta(minutes=prewarm_min)).timestamp()
+    cme_open_ep = _cme_session_open_ep(d_obj)
+    tick_stream_start_ep = min(stream_start_ep, cme_open_ep)
+    day_00z_ep = datetime(d_obj.year, d_obj.month, d_obj.day, 0, 0, tzinfo=timezone.utc).timestamp()
+    # Scan up to 78h prior for ticks (captures Friday + Sunday history for Monday H1/M15 MTF & PDH/PDL/Settle)
+    htf_scan_start_ep = min(tick_stream_start_ep, cme_open_ep - 78 * 3600.0)
     # Keep +3h post-window trades for honest 180-minute forward outcome walks
     walk_end_ep = (win_end_utc + timedelta(minutes=185)).timestamp()
-    allowed_dates = {
+    tick_allowed_dates = {
+        f"{d_obj - timedelta(days=3):%Y-%m-%d}",
+        f"{d_obj - timedelta(days=2):%Y-%m-%d}",
+        f"{d_obj - timedelta(days=1):%Y-%m-%d}",
+        day_str,
+        f"{d_obj + timedelta(days=1):%Y-%m-%d}",
+    }
+    mbo_allowed_dates = {
         f"{d_obj - timedelta(days=1):%Y-%m-%d}",
         day_str,
         f"{d_obj + timedelta(days=1):%Y-%m-%d}",
@@ -657,25 +1444,30 @@ def replay_single_day(
     if not tick_files:
         return {"day": day_str, "ok": False, "reason": "no raw ticks files found"}
 
-    # Pass 1 (single-pass tick read): collect deduplicated Last trade prints up to walk_end_ep
-    # AND buffer in-window raw tick rows so Pass 2 never re-decompresses tick .csv.gz files!
+    # Pass 1 (single-pass tick read):
+    # - hist_trades_sz (`htf_scan_start_ep <= ep < cme_open_ep`): prior trading day prints for H1/M15 MTF & PDH/PDL/Settle
+    # - trades (`ep >= min(cme_open_ep, day_00z_ep, stream_start_ep)`): today's CME session + walkout prints
+    # - buffered_ticks (`tick_stream_start_ep <= ep <= win_end_ep`): raw tick rows for Step 1 tail & pure session VWAP/Profile
+    hist_trades_sz: List[Tuple[float, float, float]] = []
     trades: List[Tuple[float, float]] = []
+    trades_sz: List[Tuple[float, float, float]] = []
     seen_prints: set[Tuple[float, float, float]] = set()
     inst_counts: Counter = Counter()
     buffered_ticks: List[Tuple[float, str, str]] = []
     raw_tick_rows = 0
     win_end_ep = win_end_utc.timestamp()
+    today_session_floor_ep = min(cme_open_ep, day_00z_ep, stream_start_ep)
 
-    for ep, line in _iter_filtered_csv_events(tick_files, stream_start_ep, walk_end_ep, allowed_dates):
+    for ep, line in _iter_filtered_csv_events(tick_files, htf_scan_start_ep, walk_end_ep, tick_allowed_dates):
         raw_tick_rows += 1
         parts = line.rstrip("\r\n").split(",") if '"' not in line else next(csv.reader([line.rstrip("\r\n")]))
         if len(parts) < 7:
             continue
         ev = parts[1].strip()
         inst = parts[6].strip()
-        if inst:
+        if inst and ep >= stream_start_ep:
             inst_counts[inst] += 1
-        if ep <= win_end_ep:
+        if tick_stream_start_ep <= ep <= win_end_ep:
             buffered_ticks.append((ep, line, inst))
         if ev in ("Last", "Trade", "trade"):
             try:
@@ -687,18 +1479,29 @@ def replay_single_day(
                 pk = (round(ep, 4), px, sz)
                 if pk not in seen_prints:
                     seen_prints.add(pk)
-                    trades.append((ep, px))
+                    sz_eff = sz if sz > 0 else 1.0
+                    if ep < today_session_floor_ep:
+                        hist_trades_sz.append((ep, px, sz_eff))
+                    else:
+                        trades.append((ep, px))
+                        trades_sz.append((ep, px, sz_eff))
 
     if not trades:
         return {"day": day_str, "ok": False, "reason": f"0 trade prints on {day_str}"}
 
+    hist_trades_sz.sort(key=lambda x: x[0])
     trades.sort(key=lambda x: x[0])
+    trades_sz.sort(key=lambda x: x[0])
     trade_eps = [t[0] for t in trades]
     day_prints = sum(1 for ep, _ in trades if win_start_utc.timestamp() <= ep <= win_end_utc.timestamp())
     if day_prints == 0:
         return {"day": day_str, "ok": False, "reason": f"0 in-window prints on {day_str}"}
 
     bar_keys, walk_bars = _build_m1_walk_bars(trades)
+    if not inst_counts and buffered_ticks:
+        for _ep_b, _ln_b, inst_b in buffered_ticks:
+            if inst_b:
+                inst_counts[inst_b] += 1
     dominant_inst = inst_counts.most_common(1)[0][0] if inst_counts else getattr(config, "DATA_SYMBOL", "GC 12-26")
 
     # Active TIMEFRAME-linked 1x, 2x, 3x, 4x bar horizons (3, 6, 9, 12m on M3; 5, 10, 15, 20m on M5)
@@ -734,8 +1537,22 @@ def replay_single_day(
 
     cycles_out: List[Dict[str, Any]] = []
     judge_stats: Dict[str, Dict[str, Any]] = defaultdict(
-        lambda: {"calls": 0, "scored": 0, "hits": 0, "pts": 0.0, "buy": 0, "sell": 0, "w": 0.0}
+        lambda: {
+            "calls": 0, "scored": 0, "hits": 0, "gross_pts": 0.0, "pts": 0.0,
+            "b1_sum": 0.0, "b1_n": 0, "b4_sum": 0.0, "b4_n": 0,
+            "buy": 0, "sell": 0, "w": 0.0, "clk": 30,
+        }
     )
+    bench_judge_stats: Dict[str, Dict[str, Any]] = defaultdict(
+        lambda: {
+            "cat": "RETIRED", "clk": 30, "calls": 0, "scored": 0, "hits": 0,
+            "gross_pts": 0.0, "pts": 0.0, "b1_sum": 0.0, "b1_n": 0,
+            "b4_sum": 0.0, "b4_n": 0, "buy": 0, "sell": 0,
+        }
+    )
+    asia_state: Dict[str, float] = {"hi": 0.0, "lo": 0.0}
+    asia_end_ep = day_00z_ep + 7 * 3600.0
+    sess_trade_ptr = 0
     mbo_streamed = 0
     errors = 0
 
@@ -766,7 +1583,25 @@ def replay_single_day(
             mbo_tail.bad_lines = 0
 
             provider = _OfflineBridgeProvider(tail, mbo_tail if mbo_files else None)
-            m1_builder = _IncrementalM1Builder(max_bars=360)
+            # Dual causal candle builders:
+            # 1) `session_m1_builder` (max_bars=960 = 16h): pure current CME Globex session (18:00 ET -> tc_ep)
+            #    so VWAP, vwap_bands, vwap_zscore, poc_day, value_area never mix yesterday's session and never roll off mid-day.
+            # 2) `htf_m1_builder` (max_bars=1800 = 30h): multi-day M1 history for true wall-clock H1, M15, M5, M3 resampling!
+            session_m1_builder = _IncrementalM1Builder(max_bars=960)
+            htf_m1_builder = _IncrementalM1Builder(max_bars=1800)
+
+            # Pre-seed prior-trading-day history (`< today_session_floor_ep`) into `htf_m1_builder` & `session_levels`
+            # (PDH, PDL, PDC, and 13:29-13:30 ET CME volume-weighted prev_settlement — 100% causal before session open!)
+            last_hist_min = -1
+            for hep, hpx, hsz in hist_trades_sz:
+                htf_m1_builder.add_trade(hep, hpx, hsz)
+                h_dt = datetime.fromtimestamp(hep, tz=timezone.utc)
+                h_et = session_levels._to_us_eastern(h_dt)
+                is_settle_win = (h_et.hour == 13 and h_et.minute in (28, 29, 30))
+                h_min_k = int(hep // 60.0)
+                if is_settle_win or h_min_k != last_hist_min:
+                    last_hist_min = h_min_k
+                    session_levels.update(hpx, tmp_dir, volume=hsz, now=h_dt)
 
             inst_flt = dominant_inst if inst_counts else None
             tick_iter = (
@@ -776,7 +1611,7 @@ def replay_single_day(
             )
             buffered_ticks = []  # free reference once generator wraps the underlying list
             mbo_iter = iter(_iter_filtered_csv_events(
-                mbo_files, stream_start_ep, win_end_ep, allowed_dates, inst_filter=inst_flt
+                mbo_files, stream_start_ep, win_end_ep, mbo_allowed_dates, inst_filter=inst_flt
             )) if mbo_files else iter(())
 
             nxt_tick = next(tick_iter, None)
@@ -803,7 +1638,11 @@ def replay_single_day(
                         ps = t_line.rstrip("\r\n").split(",") if '"' not in t_line else next(csv.reader([t_line.rstrip("\r\n")]))
                         if len(ps) >= 4:
                             try:
-                                m1_builder.add_trade(t_ep, float(ps[2]), float(ps[3] or 1.0))
+                                p_val = float(ps[2])
+                                s_val = float(ps[3] or 1.0)
+                                htf_m1_builder.add_trade(t_ep, p_val, s_val)
+                                if t_ep >= cme_open_ep:
+                                    session_m1_builder.add_trade(t_ep, p_val, s_val)
                             except ValueError:
                                 pass
                     nxt_tick = next(tick_iter, None)
@@ -823,12 +1662,30 @@ def replay_single_day(
                     if len(mst.mbo_events) > 5000:
                         del mst.mbo_events[:-3200]
 
-                # Keep 3h rolling tick window (exact BOOKMAP_WINDOW_SECONDS=10800)
+                # Keep 8h rolling tick window matching live `config.BOOKMAP_WINDOW_SECONDS = 28800`
                 if step_idx % 15 == 1:
-                    tail._prune_old_ticks(10800.0)
-                provider._prebuilt_candles = m1_builder.to_candles_dict()
+                    tail._prune_old_ticks(28800.0)
+                sess_c_dict = session_m1_builder.to_candles_dict()
+                provider._prebuilt_candles = sess_c_dict if sess_c_dict else htf_m1_builder.to_candles_dict(max_tail=360)
 
                 md = provider.acquire(symbol=dominant_inst)
+                md["candles_is_m1"] = True
+                md["candles_tf_minutes"] = tf_min
+                md["candles_tf"] = (
+                    md["candles"] if tf_min <= 1
+                    else htf_m1_builder.to_resampled_dict(tf_min, completed_before_ep=tc_ep)
+                )
+                ladder_fn = getattr(config, "mtf_ladder_for_base_tf", None)
+                active_ladder = ladder_fn(tf_min) if callable(ladder_fn) else [("M9", 9), ("M15", 15), ("H1", 60)]
+                for _r_lbl, _r_min in active_ladder:
+                    md[f"candles_{str(_r_lbl).lower()}"] = htf_m1_builder.to_resampled_dict(
+                        int(_r_min), completed_before_ep=tc_ep
+                    )
+                md.setdefault("candles_h1", htf_m1_builder.to_resampled_dict(60, completed_before_ep=tc_ep))
+                md.setdefault("candles_m15", htf_m1_builder.to_resampled_dict(15, completed_before_ep=tc_ep))
+                md.setdefault("candles_m5", htf_m1_builder.to_resampled_dict(5, completed_before_ep=tc_ep))
+                md.setdefault("candles_m3", htf_m1_builder.to_resampled_dict(3, completed_before_ep=tc_ep))
+                md["_htf_m1_240"] = htf_m1_builder.to_candles_dict(max_tail=240)
                 md["macro"] = {}
                 md["news"] = {"headlines": [], "events": [], "fetch_calendar": False}
 
@@ -896,7 +1753,34 @@ def replay_single_day(
                 else:
                     gate_stage = f"CONF>={conf_thr:.0f}% ONLY (POWER={pw_dir})"
 
-                # Active judges & per-judge clock grading
+                # Forward tape outcomes for this cycle:
+                # Stage 1: TIMEFRAME-linked 1x, 2x, 3x, 4x bar horizons (3, 6, 9, 12m on M3; 5, 10, 15, 20m on M5)
+                pb1 = _price_after(trade_eps, trades, tc_ep, h1, tol_s=tol_tf_s)
+                pb2 = _price_after(trade_eps, trades, tc_ep, h2, tol_s=tol_tf_s)
+                pb3 = _price_after(trade_eps, trades, tc_ep, h3, tol_s=tol_tf_s)
+                pb4 = _price_after(trade_eps, trades, tc_ep, h4, tol_s=tol_tf_s)
+                hi4b, lo4b = _excursion_30m(trade_eps, trades, tc_ep, h4)
+
+                # Advance causal Asia box (00:00..07:00Z) and CME/COMEX session_levels strictly <= tc_ep
+                sess_state: Dict[str, Any] = {}
+                last_sess_min = -1
+                while sess_trade_ptr < len(trades_sz) and trades_sz[sess_trade_ptr][0] <= tc_ep:
+                    tep, tpx, tsz = trades_sz[sess_trade_ptr]
+                    if day_00z_ep <= tep < asia_end_ep:
+                        asia_state["hi"] = max(asia_state["hi"], tpx)
+                        asia_state["lo"] = min(asia_state["lo"], tpx) if asia_state["lo"] > 0 else tpx
+                    t_dt_s = datetime.fromtimestamp(tep, tz=timezone.utc)
+                    t_et_s = session_levels._to_us_eastern(t_dt_s)
+                    is_settle_s = (t_et_s.hour == 13 and t_et_s.minute in (28, 29, 30))
+                    cur_min_k = int(tep // 60.0)
+                    if is_settle_s or cur_min_k != last_sess_min:
+                        last_sess_min = cur_min_k
+                        sess_state = session_levels.update(tpx, tmp_dir, volume=tsz, now=t_dt_s)
+                    sess_trade_ptr += 1
+                if not sess_state and px > 0:
+                    sess_state = session_levels.update(px, tmp_dir, now=tc_dt)
+
+                # Active judges & per-judge clock grading (with Gross vs Net + M3 1b/4b path)
                 jvotes_raw = getattr(snap, "judge_votes", None) or []
                 active_votes: List[Dict[str, Any]] = []
                 for v in jvotes_raw:
@@ -914,26 +1798,53 @@ def replay_single_day(
                         jst = judge_stats[jname]
                         jst["calls"] += 1
                         jst["w"] = vw
+                        h_min = ins.judge_clock(jname, bar_seconds=tf_min * 60)
+                        jst["clk"] = h_min
                         if vd > 0:
                             jst["buy"] += 1
                         else:
                             jst["sell"] += 1
-                        h_min = ins.judge_clock(jname)
+                        if pb1 is not None:
+                            jst["b1_sum"] += (pb1 - px) if vd > 0 else (px - pb1)
+                            jst["b1_n"] += 1
+                        if pb4 is not None:
+                            jst["b4_sum"] += (pb4 - px) if vd > 0 else (px - pb4)
+                            jst["b4_n"] += 1
                         p_fut = _price_after(trade_eps, trades, tc_ep, h_min)
                         if p_fut is not None:
                             mv = (p_fut - px) if vd > 0 else (px - p_fut)
                             jst["scored"] += 1
                             if mv > 0:
                                 jst["hits"] += 1
+                            jst["gross_pts"] += mv
                             jst["pts"] += (mv - spread_cost)
 
-                # Forward tape outcomes for this cycle:
-                # Stage 1: TIMEFRAME-linked 1x, 2x, 3x, 4x bar horizons (3, 6, 9, 12m on M3; 5, 10, 15, 20m on M5)
-                pb1 = _price_after(trade_eps, trades, tc_ep, h1, tol_s=tol_tf_s)
-                pb2 = _price_after(trade_eps, trades, tc_ep, h2, tol_s=tol_tf_s)
-                pb3 = _price_after(trade_eps, trades, tc_ep, h3, tol_s=tol_tf_s)
-                pb4 = _price_after(trade_eps, trades, tc_ep, h4, tol_s=tol_tf_s)
-                hi4b, lo4b = _excursion_30m(trade_eps, trades, tc_ep, h4)
+                # Retired, Dormant, Previous & Repaired-Candidate Bench Checkup (100% Non-Voting Shadow)
+                for b_name, b_cat, b_clk, b_dir in _evaluate_retired_and_previous_bench(
+                    snap, md, tc_dt, asia_state, sess_state, tf_min=tf_min
+                ):
+                    bst = bench_judge_stats[b_name]
+                    bst["cat"] = b_cat
+                    bst["clk"] = b_clk
+                    bst["calls"] += 1
+                    if b_dir > 0:
+                        bst["buy"] += 1
+                    else:
+                        bst["sell"] += 1
+                    if pb1 is not None:
+                        bst["b1_sum"] += (pb1 - px) if b_dir > 0 else (px - pb1)
+                        bst["b1_n"] += 1
+                    if pb4 is not None:
+                        bst["b4_sum"] += (pb4 - px) if b_dir > 0 else (px - pb4)
+                        bst["b4_n"] += 1
+                    p_bfut = _price_after(trade_eps, trades, tc_ep, b_clk)
+                    if p_bfut is not None:
+                        bmv = (p_bfut - px) if b_dir > 0 else (px - p_bfut)
+                        bst["scored"] += 1
+                        if bmv > 0:
+                            bst["hits"] += 1
+                        bst["gross_pts"] += bmv
+                        bst["pts"] += (bmv - spread_cost)
 
                 # Retain legacy 5/15/30m pointers for backward compatibility
                 p5 = pb1 if h1 == 5 else _price_after(trade_eps, trades, tc_ep, 5)
@@ -1079,6 +1990,7 @@ def replay_single_day(
         "conf_threshold": conf_thr,
         "cycles": cycles_out,
         "judge_stats": dict(judge_stats),
+        "bench_judge_stats": dict(bench_judge_stats),
         "errors": errors,
         "elapsed_s": round(time.perf_counter() - t_wall0, 2),
     }
@@ -1260,7 +2172,20 @@ def synthesize_multi_day(results: List[Dict[str, Any]]) -> Tuple[str, str, Dict[
     by_hour = defaultdict(_new_bucket)
     by_fams = defaultdict(_new_bucket)
     by_trick_lens = defaultdict(_new_trick_bucket)
-    judge_tot = defaultdict(lambda: {"days": 0, "pos_days": 0, "calls": 0, "scored": 0, "hits": 0, "pts": 0.0, "w": 0.0})
+    judge_tot = defaultdict(
+        lambda: {
+            "days": 0, "pos_days": 0, "gross_pos_days": 0, "calls": 0, "scored": 0,
+            "hits": 0, "gross_pts": 0.0, "pts": 0.0, "b1_sum": 0.0, "b1_n": 0,
+            "b4_sum": 0.0, "b4_n": 0, "w": 0.0, "clk": 30,
+        }
+    )
+    bench_tot = defaultdict(
+        lambda: {
+            "cat": "RETIRED", "clk": 30, "days": 0, "pos_days": 0, "gross_pos_days": 0,
+            "calls": 0, "scored": 0, "hits": 0, "gross_pts": 0.0, "pts": 0.0,
+            "b1_sum": 0.0, "b1_n": 0, "b4_sum": 0.0, "b4_n": 0,
+        }
+    )
 
     a2_bm8 = {"n": 0, "go_n": 0, "fix18_pts": 0.0, "atr10_pts": 0.0}
     total_cycles = 0
@@ -1306,11 +2231,38 @@ def synthesize_multi_day(results: List[Dict[str, Any]]) -> Tuple[str, str, Dict[
             jt["days"] += 1
             if jst["pts"] > 0:
                 jt["pos_days"] += 1
+            if float(jst.get("gross_pts", 0.0)) > 0:
+                jt["gross_pos_days"] += 1
             jt["calls"] += jst["calls"]
             jt["scored"] += jst["scored"]
             jt["hits"] += jst["hits"]
+            jt["gross_pts"] += float(jst.get("gross_pts", 0.0))
             jt["pts"] += jst["pts"]
+            jt["b1_sum"] += float(jst.get("b1_sum", 0.0))
+            jt["b1_n"] += int(jst.get("b1_n", 0))
+            jt["b4_sum"] += float(jst.get("b4_sum", 0.0))
+            jt["b4_n"] += int(jst.get("b4_n", 0))
             jt["w"] = jst["w"]
+            jt["clk"] = int(jst.get("clk") or ins.judge_clock(j))
+
+        for bj, bst in (r.get("bench_judge_stats") or {}).items():
+            bt = bench_tot[bj]
+            bt["cat"] = str(bst.get("cat") or "RETIRED")
+            bt["clk"] = int(bst.get("clk") or 30)
+            bt["days"] += 1
+            if bst["pts"] > 0:
+                bt["pos_days"] += 1
+            if float(bst.get("gross_pts", 0.0)) > 0:
+                bt["gross_pos_days"] += 1
+            bt["calls"] += bst["calls"]
+            bt["scored"] += bst["scored"]
+            bt["hits"] += bst["hits"]
+            bt["gross_pts"] += float(bst.get("gross_pts", 0.0))
+            bt["pts"] += bst["pts"]
+            bt["b1_sum"] += float(bst.get("b1_sum", 0.0))
+            bt["b1_n"] += int(bst.get("b1_n", 0))
+            bt["b4_sum"] += float(bst.get("b4_sum", 0.0))
+            bt["b4_n"] += int(bst.get("b4_n", 0))
 
         for c in r["cycles"]:
             if c.get("error"):
@@ -1401,17 +2353,64 @@ def synthesize_multi_day(results: List[Dict[str, Any]]) -> Tuple[str, str, Dict[
     _fmt_bucket_table("[5] DIRECTION x REGIME MATRIX", by_dir_reg)
     _fmt_bucket_table("[6] BUDAPEST HOUR OF DAY (LOCAL CET/CEST)", {f"{h:02d}:00": by_hour[h] for h in sorted(by_hour)}, [f"{h:02d}:00" for h in sorted(by_hour)])
 
-    lines.append("\n[7] CURRENT ACTIVE JUDGES SCORECARD (GRADED ON EACH JUDGE'S OWN HORIZON CLOCK, NET OF SPREAD)")
-    lines.append(f"  {'JUDGE':<22} {'W':>5} {'POS_DAYS':>8} {'SCORED':>7} {'RIGHT%':>7} {'NET_PTS':>10} {'PTS/CALL':>9}")
-    lines.append("  " + "-" * 74)
+    jb1_hdr = f"+{h1}m(1b)"
+    jb4_hdr = f"+{h4}m(4b)"
+    lines.append("\n[7] CURRENT ACTIVE JUDGES SCORECARD (LAW #10: GROSS DIRECTIONAL ALPHA vs NET OF SPREAD)")
+    lines.append(
+        f"  {'JUDGE':<20} {'W':>5} {'CLK':>4} {'POS_DAYS':>8} {'SCORED':>7} {'RIGHT%':>7} "
+        f"{'GROSS_PTS':>10} {'GROSS/C':>8} {'NET_PTS':>10} {'PTS/CALL':>9} {jb1_hdr:>8} {jb4_hdr:>8}"
+    )
+    lines.append("  " + "-" * 116)
     for j, jt in sorted(judge_tot.items(), key=lambda kv: -kv[1]["pts"]):
         if jt["scored"] == 0:
             continue
         acc = 100.0 * jt["hits"] / jt["scored"]
         pdays_str = f"{jt['pos_days']}/{jt['days']}"
+        clk_s = f"{jt['clk']}m"
+        b1_s = f"{(jt['b1_sum']/jt['b1_n']):+.2f}" if jt["b1_n"] else "   -   "
+        b4_s = f"{(jt['b4_sum']/jt['b4_n']):+.2f}" if jt["b4_n"] else "   -   "
         lines.append(
-            f"  {j:<22} {jt['w']:>5.2f} {pdays_str:>8} "
-            f"{jt['scored']:>7} {acc:>6.1f}% {jt['pts']:>+10.1f} {jt['pts']/jt['scored']:>+9.3f}"
+            f"  {j:<20} {jt['w']:>5.2f} {clk_s:>4} {pdays_str:>8} "
+            f"{jt['scored']:>7} {acc:>6.1f}% {jt['gross_pts']:>+10.1f} {jt['gross_pts']/jt['scored']:>+8.3f} "
+            f"{jt['pts']:>+10.1f} {jt['pts']/jt['scored']:>+9.3f} {b1_s:>8} {b4_s:>8}"
+        )
+
+    lines.append(
+        "\n[7b] RETIRED, PREVIOUS & REPAIRED BENCH JUDGES -- FAIR-TRIAL CHECKUP (+ POWER & STAGE-2 [FIX], 100% NON-VOTING)"
+    )
+    lines.append(
+        f"  {'BENCH_JUDGE':<22} {'CAT':<8} {'CLK':>4} {'POS_DAYS':>8} {'SCORED':>7} {'RIGHT%':>7} "
+        f"{'GROSS_PTS':>10} {'GROSS/C':>8} {'NET_PTS':>10} {'PTS/CALL':>9} {jb1_hdr:>8} {jb4_hdr:>8}"
+    )
+    lines.append("  " + "-" * 121)
+    cat_rank = {
+        "ACT_FIX": 0,
+        "REPAIRED": 1,
+        "POWER": 2,
+        "RETIRED": 3,
+        "PREVIOUS": 4,
+        "DORMANT": 5,
+    }
+    for bj, bt in sorted(
+        bench_tot.items(),
+        key=lambda kv: (cat_rank.get(kv[1]["cat"], 9), -kv[1]["gross_pts"]),
+    ):
+        if bt["scored"] == 0:
+            continue
+        acc = 100.0 * bt["hits"] / bt["scored"]
+        pdays_str = f"{bt['pos_days']}/{bt['days']}"
+        clk_s = f"{bt['clk']}m"
+        b1_s = f"{(bt['b1_sum']/bt['b1_n']):+.2f}" if bt["b1_n"] else "   -   "
+        b4_s = f"{(bt['b4_sum']/bt['b4_n']):+.2f}" if bt["b4_n"] else "   -   "
+        lines.append(
+            f"  {bj:<22} {bt['cat']:<8} {clk_s:>4} {pdays_str:>8} "
+            f"{bt['scored']:>7} {acc:>6.1f}% {bt['gross_pts']:>+10.1f} {bt['gross_pts']/bt['scored']:>+8.3f} "
+            f"{bt['pts']:>+10.1f} {bt['pts']/bt['scored']:>+9.3f} {b1_s:>8} {b4_s:>8}"
+        )
+    if not any(bt["scored"] > 0 for k, bt in bench_tot.items() if k.startswith("macro_")):
+        lines.append(
+            "  * Note: macro_risk / news_sentiment (active) & macro_dxy / macro_yield / macro_vix (retired) require external"
+            " Yahoo/Calendar feeds absent from offline BookMap ticks/mbo CSVs."
         )
 
     if a2_bm8["n"] > 0:

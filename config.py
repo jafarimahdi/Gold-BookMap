@@ -123,6 +123,73 @@ def _ffloat_first(names, default: float) -> float:
     return default
 
 
+def parse_timeframe_minutes(tf_raw, default: int = 5) -> int:
+    """Law #11: Parse any chart TIMEFRAME string (M1..M240, H1..H12, D1, or minutes)
+    into positive integer minutes so every subsystem scales from one master knob."""
+    s = str(tf_raw or "").strip().upper()
+    if not s:
+        return max(1, int(default))
+    if s in ("D1", "1D"):
+        return 1440
+    if s.startswith("H") and s[1:].isdigit():
+        return max(1, int(s[1:]) * 60)
+    if s.startswith("M") and s[1:].isdigit():
+        return max(1, int(s[1:]))
+    if s.endswith("MIN") and s[:-3].strip().isdigit():
+        return max(1, int(s[:-3].strip()))
+    if s.isdigit():
+        return max(1, int(s))
+    return max(1, int(default))
+
+
+def mtf_ladder_for_base_tf(base_tf_min: int) -> list:
+    """Law #11: Return 3 strictly-higher confirmation timeframes [(name, minutes), ...]
+    as clean structural multiples of `base_tf_min` (never voting on <= base_tf_min
+    and never slicing across active chart candle boundaries when integer multiples exist):
+      - M1  (1m)  -> M5 (5m),   M15 (15m),  H1 (60m)
+      - M2  (2m)  -> M6 (6m),   M15 (15m),  H1 (60m)
+      - M3  (3m)  -> M9 (9m),   M15 (15m),  H1 (60m)   [exact 3x, 5x, 20x M3]
+      - M4  (4m)  -> M12 (12m), M30 (30m),  H1 (60m)
+      - M5  (5m)  -> M15 (15m), H1 (60m),   H4 (240m)  [exact 3x, 12x, 48x M5]
+      - M10 (10m) -> M30 (30m), H1 (60m),   H4 (240m)
+      - M15 (15m) -> H1 (60m),  H4 (240m),  D1 (1440m)
+      - M30 (30m) -> H2 (120m), H4 (240m),  D1 (1440m)
+      - H1  (60m) -> H4 (240m), H12 (720m), D1 (1440m)
+    """
+    b = max(1, int(base_tf_min or 5))
+    presets = {
+        1:  [("M5", 5), ("M15", 15), ("H1", 60)],
+        2:  [("M6", 6), ("M15", 15), ("H1", 60)],
+        3:  [("M9", 9), ("M15", 15), ("H1", 60)],
+        4:  [("M12", 12), ("M30", 30), ("H1", 60)],
+        5:  [("M15", 15), ("H1", 60), ("H4", 240)],
+        6:  [("M18", 18), ("H1", 60), ("H4", 240)],
+        10: [("M30", 30), ("H1", 60), ("H4", 240)],
+        12: [("M36", 36), ("H1", 60), ("H4", 240)],
+        15: [("H1", 60), ("H4", 240), ("D1", 1440)],
+        20: [("H1", 60), ("H4", 240), ("D1", 1440)],
+        30: [("H2", 120), ("H4", 240), ("D1", 1440)],
+        60: [("H4", 240), ("H12", 720), ("D1", 1440)],
+    }
+    if b in presets:
+        return list(presets[b])
+
+    def _lbl(mins: int) -> str:
+        if mins >= 1440 and mins % 1440 == 0:
+            return f"D{mins // 1440}"
+        if mins >= 60 and mins % 60 == 0:
+            return f"H{mins // 60}"
+        return f"M{mins}"
+
+    r1 = 3 * b
+    anchors = [5 * b, 15, 30, 60, 120, 240, 480, 720, 1440, 12 * b, 20 * b, 48 * b]
+    higher = sorted({m for m in anchors if m >= 5 * b})
+    r2 = higher[0] if higher else 5 * b
+    higher3 = [m for m in higher if m >= max(3 * r2, 12 * b)]
+    r3 = higher3[0] if higher3 else max(3 * r2, 12 * b)
+    return [(_lbl(r1), r1), (_lbl(r2), r2), (_lbl(r3), r3)]
+
+
 def _refresh() -> None:
     g = globals()
 
@@ -137,20 +204,12 @@ def _refresh() -> None:
     g["POWER_V2_SHADOW_ENABLED"] = _fget("POWER_V2_SHADOW_ENABLED", "0") == "1"
     g["POWER_M5_TICK_SIZE"] = _ffloat("POWER_M5_TICK_SIZE", 0.0)
 
-    # fusionv1 (2026-10-17, owner-ordered): one timeframe knob drives POWER.
-    # TIMEFRAME (M1..H1) -> BASE_TF_MINUTES -> POWER_BAR_SECONDS; the explicit
-    # POWER_BAR_SECONDS env overrides. The classroom follows A1_BASE_TF_MINUTES
-    # (set it to match: M3 -> A1_BASE_TF_MINUTES=3).
-    _tf_minutes = {"M1": 1, "M2": 2, "M3": 3, "M4": 4, "M5": 5, "M6": 6,
-                   "M8": 8, "M10": 10, "M12": 12, "M15": 15, "M20": 20,
-                   "M30": 30, "H1": 60}
-    _tf_key = str(g["TIMEFRAME"]).strip().upper()
-    _base_tf_min = _tf_minutes.get(_tf_key)
-    if _base_tf_min is None and _tf_key.startswith("M") and _tf_key[1:].isdigit():
-        _parsed_tf = int(_tf_key[1:])
-        if 1 <= _parsed_tf <= 60:
-            _base_tf_min = _parsed_tf
-    g["BASE_TF_MINUTES"] = _base_tf_min if _base_tf_min is not None else 5
+    # Law #11 (Master Chart Timeframe Synchronization Law): one timeframe knob
+    # drives POWER, Classroom bar caching, chart-bar analyzers, MTF ladder, and
+    # rolling order-flow windows. Explicit env vars still override if set.
+    g["BASE_TF_MINUTES"] = parse_timeframe_minutes(g["TIMEFRAME"], 5)
+    g["A1_BASE_TF_MINUTES"] = _fint("A1_BASE_TF_MINUTES", int(g["BASE_TF_MINUTES"]))
+    g["MTF_LADDER"] = mtf_ladder_for_base_tf(int(g["BASE_TF_MINUTES"]))
     g["POWER_BAR_SECONDS"] = int(_ffloat(
         "POWER_BAR_SECONDS", 60.0 * g["BASE_TF_MINUTES"]))
     g["ORDER_FLOW_WINDOW_SECONDS"] = int(_ffloat(

@@ -84,6 +84,8 @@ _POWER_PROBE_STARTUP_CACHE = {}
 # --------------------------------------------------------------------------- #
 import os as _a1_os
 
+import sys as _a1_sys
+
 try:
     A1_BASE_TF_MINUTES = max(1, int(_a1_os.environ.get("A1_BASE_TF_MINUTES", "5") or 5))
 except Exception:
@@ -96,9 +98,65 @@ except Exception:
 _A1_BAR_SERVICE_CACHE: Dict[str, Any] = {}
 
 
+def _active_base_tf_minutes() -> int:
+    """Law #11: Resolve active chart timeframe minutes dynamically so Classroom,
+    chart-bar indicators, MTF ladder, and caches follow `config.TIMEFRAME`
+    automatically while preserving standalone `A1_BASE_TF_MINUTES` overrides."""
+    env_a1 = _a1_os.environ.get("A1_BASE_TF_MINUTES", "").strip()
+    if env_a1:
+        try:
+            return max(1, int(float(env_a1)))
+        except ValueError:
+            pass
+    if int(A1_BASE_TF_MINUTES or 5) != 5:
+        return max(1, int(A1_BASE_TF_MINUTES))
+    cfg_mod = _a1_sys.modules.get("config")
+    if cfg_mod is not None:
+        try:
+            cfg_tf = getattr(cfg_mod, "BASE_TF_MINUTES", None)
+            if cfg_tf is not None:
+                return max(1, int(cfg_tf))
+        except (TypeError, ValueError):
+            pass
+    return max(1, int(A1_BASE_TF_MINUTES or 5))
+
+
+def _mtf_ladder_for_base_tf(base_tf_min: Optional[int] = None) -> List[Tuple[str, int]]:
+    """Law #11: 3 strictly-higher confirmation timeframes [(name, minutes), ...]
+    as clean structural multiples of `base_tf_min` (e.g. M3 -> M9/M15/H1 [3x/5x/20x];
+    M5 -> M15/H1/H4 [3x/12x/48x]; M1 -> M5/M15/H1; M15 -> H1/H4/D1)."""
+    b = max(1, int(base_tf_min if base_tf_min is not None else _active_base_tf_minutes()))
+    cfg_mod = _a1_sys.modules.get("config")
+    if cfg_mod is not None and hasattr(cfg_mod, "mtf_ladder_for_base_tf"):
+        try:
+            return list(cfg_mod.mtf_ladder_for_base_tf(b))
+        except Exception:
+            pass
+    presets = {
+        1:  [("M5", 5), ("M15", 15), ("H1", 60)],
+        2:  [("M6", 6), ("M15", 15), ("H1", 60)],
+        3:  [("M9", 9), ("M15", 15), ("H1", 60)],
+        4:  [("M12", 12), ("M30", 30), ("H1", 60)],
+        5:  [("M15", 15), ("H1", 60), ("H4", 240)],
+        6:  [("M18", 18), ("H1", 60), ("H4", 240)],
+        10: [("M30", 30), ("H1", 60), ("H4", 240)],
+        12: [("M36", 36), ("H1", 60), ("H4", 240)],
+        15: [("H1", 60), ("H4", 240), ("D1", 1440)],
+        20: [("H1", 60), ("H4", 240), ("D1", 1440)],
+        30: [("H2", 120), ("H4", 240), ("D1", 1440)],
+        60: [("H4", 240), ("H12", 720), ("D1", 1440)],
+    }
+    if b in presets:
+        return list(presets[b])
+    r1 = 3 * b
+    r2 = 5 * b
+    r3 = 20 * b
+    return [(f"M{r1}", r1), (f"M{r2}", r2), (f"M{r3}", r3)]
+
+
 def _a1_bucket_index(now, tf_minutes=None):
     """Clock-derived UTC bucket index (epoch minutes // tf). DST-immune."""
-    tf = int(tf_minutes or A1_BASE_TF_MINUTES)
+    tf = int(tf_minutes or _active_base_tf_minutes())
     return int((now.timestamp() // 60.0) // tf)
 
 
@@ -288,7 +346,7 @@ def _a1_try_serve(market_data, now, price):
         age_s = (now - entry["stored_at"]).total_seconds()
     except Exception:
         return None
-    if age_s > 3 * A1_BASE_TF_MINUTES * 60 or age_s < -60:
+    if age_s > 3 * _active_base_tf_minutes() * 60 or age_s < -60:
         return None                                  # tape-stall / clock-skew guard
     if _a1_news_state_of(snap) in ("WARNING", "BLACKOUT"):
         return None                                  # news window: always fresh
@@ -3104,21 +3162,31 @@ class SignalEngine:
         # its importance (H1 counts most). Stacked agreement = strong signal;
         # disagreement weakens it — this filters trades that fight the trend.
         mtf_trends = mtf_trends or {}
-        # v6.0 M5 scalper: M5 boss 1.2, M15 0.8, H1 0.4
+        ladder = _mtf_ladder_for_base_tf()
         if getattr(config, "V6_4TEAMS_ENABLED", False):
-            tf_weights = {"H1": float(getattr(config, "V6_MTF_H1_WEIGHT", 0.4)),
-                          "M15": float(getattr(config, "V6_MTF_M15_WEIGHT", 0.8)),
-                          "M5": float(getattr(config, "V6_MTF_M5_WEIGHT", 1.2))}
+            w_fast = float(getattr(config, "V6_MTF_M5_WEIGHT", 1.2))
+            w_mid = float(getattr(config, "V6_MTF_M15_WEIGHT", 0.8))
+            w_slow = float(getattr(config, "V6_MTF_H1_WEIGHT", 0.4))
         else:
-            tf_weights = {"H1": float(getattr(config, "SIGNAL_W_H1", 1.0)),
-                          "M15": float(getattr(config, "SIGNAL_W_M15", 0.8)),
-                          "M5": float(getattr(config, "SIGNAL_W_M5", 0.6))}
-        for tf_name in ("H1", "M15", "M5"):
+            w_fast = float(getattr(config, "SIGNAL_W_M5", 0.6))
+            w_mid = float(getattr(config, "SIGNAL_W_M15", 0.8))
+            w_slow = float(getattr(config, "SIGNAL_W_H1", 1.0))
+        rung_weights = (w_fast, w_mid, w_slow)
+        tf_weights: Dict[str, float] = {
+            "M5": w_fast, "M9": w_fast, "M15": w_mid, "H1": w_slow, "H4": w_slow, "D1": w_slow,
+        }
+        for idx_r, (r_name, _r_min) in enumerate(ladder[:3]):
+            tf_weights[r_name] = rung_weights[min(idx_r, 2)]
+        # Vote across active ladder (slow -> fast) or fallback explicit keys if caller supplied custom mtf_trends
+        ladder_names = [r[0] for r in reversed(ladder[:3])]
+        vote_keys = ladder_names if any(k in mtf_trends for k in ladder_names) else sorted(mtf_trends.keys())
+        for tf_name in vote_keys:
             tf_dir = mtf_trends.get(tf_name)
+            w_tf = tf_weights.get(tf_name, w_mid)
             if tf_dir == "UP" and _may_vote("mtf"):
-                votes.append((+1.0, tf_weights[tf_name]))
+                votes.append((+1.0, w_tf))
             elif tf_dir == "DOWN" and _may_vote("mtf"):
-                votes.append((-1.0, tf_weights[tf_name]))
+                votes.append((-1.0, w_tf))
 
         if mtf_trends:
             summary = " ".join(f"{k}:{v}" for k, v in sorted(mtf_trends.items()))
@@ -4224,7 +4292,7 @@ def parse_judge_panel(notes: List[str]) -> List[Dict[str, Any]]:
                 elif token in ("SELL", "bearish", "below", "down"):
                     d = -1.0
             # the applied weight is the only number we need to score the panel
-            mw = _re.search(r"(?:\bw|weight)\s+([\d.]+)", note)
+            mw = _re.search(r"(?:\bw|weight|adaptive)\s+([\d.]+)", note)
             if mw:
                 try:
                     w = float(mw.group(1))
@@ -4255,6 +4323,9 @@ def parse_judge_panel(notes: List[str]) -> List[Dict[str, Any]]:
                     d = -1.0 if (g and g[0] == "bids") else 1.0
                 elif judge in ("l3_net_flow",):
                     d = 1.0 if (g and g[0] == "BUY") else -1.0
+                elif judge == "vwap_zscore":
+                    # L3655 votes -np.sign(z) (mean-reversion fade: +z -> SELL -1, -z -> BUY +1)
+                    d = -1.0 if lead > 0 else (1.0 if lead < 0 else 0.0)
                 elif lead:
                     d = 1.0 if lead > 0 else -1.0
             elif judge == "l3_ofi_streak":
@@ -4403,17 +4474,13 @@ def _aggregate_m1(open_: np.ndarray, high: np.ndarray, low: np.ndarray,
 
 
 def _derive_mtf_from_m1(open_: np.ndarray, high: np.ndarray, low: np.ndarray,
-                        close: np.ndarray, vol: np.ndarray) -> Dict[str, str]:
-    """v3: derive higher-timeframe trends from our OWN M1 candles.
-
-    The futures bridge supplies only M1; resampling revives the MTF
-    confirmation votes without a new data source. A timeframe votes only
-    with >= 20 aggregated bars (same rule as the native MTF detector).
-    M5 needs ~100 min of window, M15 ~5 h (set NT_WINDOW_SECONDS=28800).
-    """
+                        close: np.ndarray, vol: np.ndarray,
+                        base_tf_min: Optional[int] = None) -> Dict[str, str]:
+    """Law #11: derive strictly-higher-timeframe trends from M1 candles using
+    the active chart timeframe ladder (e.g. M3 -> M9/M15/H1; M5 -> M15/H1/H4)."""
     out: Dict[str, str] = {}
-    for tf_name, factor in (("M5", 5), ("M15", 15), ("H1", 60)):
-        _o, h, l, c, v = _aggregate_m1(open_, high, low, close, vol, factor)
+    for tf_name, factor in _mtf_ladder_for_base_tf(base_tf_min):
+        _o, h, l, c, v = _aggregate_m1(open_, high, low, close, vol, int(factor))
         if len(c) >= 20:
             t = _detect_tf_trend(c)
             if t in ("UP", "DOWN"):
@@ -4484,19 +4551,27 @@ def _asian_range_state(tick_data: List[Dict], price: float,
     return out
 
 
-def _detect_mtf_trends(market_data: Dict[str, Any]) -> Dict[str, str]:
-    """Trend direction for each higher timeframe present in market_data.
-
-    Reads `candles_m5` / `candles_m15` / `candles_h1` (each a dict with a
-    "close" array) and returns e.g. {"H1":"UP","M15":"DOWN","M5":"UP"}.
-    Timeframes with no data are omitted (no votes in the signal engine).
-    """
+def _detect_mtf_trends(market_data: Dict[str, Any],
+                       base_tf_min: Optional[int] = None) -> Dict[str, str]:
+    """Law #11: Trend direction for each higher timeframe in the active chart ladder
+    (e.g. M3 -> M9/M15/H1; M5 -> M15/H1/H4), plus any explicit higher-TF `candles_<tf>`
+    dict supplied by callers/tests whose bar width exceeds `base_tf_min`."""
+    b = max(1, int(base_tf_min if base_tf_min is not None else _active_base_tf_minutes()))
+    ladder = _mtf_ladder_for_base_tf(b)
     out: Dict[str, str] = {}
-    for tf_name in ("H1", "M15", "M5"):
+    for tf_name, _tf_min in reversed(ladder):
         close = _as_array(
             (market_data.get(f"candles_{tf_name.lower()}") or {}).get("close", []))
         if len(close) >= 20:
             out[tf_name] = _detect_tf_trend(close)
+    if not out:
+        for fb_name, fb_min in (("H4", 240), ("H1", 60), ("M30", 30), ("M15", 15), ("M9", 9), ("M5", 5)):
+            if fb_min <= b:
+                continue
+            close = _as_array(
+                (market_data.get(f"candles_{fb_name.lower()}") or {}).get("close", []))
+            if len(close) >= 20:
+                out[fb_name] = _detect_tf_trend(close)
     return out
 
 
@@ -5292,20 +5367,20 @@ def _cross_market_check(current_cvd: float, current_price: float) -> dict:
 
 
 def _detect_divergence(close: np.ndarray, cvd: float, lookback: int = 15,
-                       tick_data: Optional[List[Dict]] = None) -> float:
+                       tick_data: Optional[List[Dict]] = None,
+                       bar_minutes: int = 1) -> float:
     """CVD-price divergence: +1 bullish, -1 bearish, 0 none.
-    
-    v5.9 BANK-GRADE time-weighted + volume-weighted:
-    - Old: used cumulative CVD whole day (stale)
-    - New: builds CVD per M1 bar from tick_data timestamps, uses last 15 bars only
-    - Volume-weighted: divergence strength = min(1.2, abs(cvd_15)/100) — 100 lots = strong
-    - Example: price lower low but CVD_15 rising +80 lots = bullish reversal, sellers exhausted
+
+    Law #11: Buckets timestamped ticks by `bar_minutes * 60` (e.g. 180s M3 bars
+    on M3, 300s M5 bars on M5, or 60s M1 bars when `bar_minutes=1`) so CVD slope
+    and `close[-lookback]` share the exact active chart timeframe.
     """
     close = np.asarray(close, dtype=float)
     if len(close) < lookback:
         return 0.0
+    bar_s = max(60, int(bar_minutes or 1) * 60)
 
-    # Try time-weighted from tick_data if available (scan full 2*lookback minute
+    # Try time-weighted from tick_data if available (scan full 2*lookback bar
     # window from newest tick instead of a fixed [-1000:] slice that held <6 min
     # on 200-1,200 print/min CME Gold days and fell through to stale 3h CVD).
     saw_timestamped_ticks = False
@@ -5317,7 +5392,7 @@ def _detect_divergence(close: np.ndarray, cvd: float, lookback: int = 15,
                 tick_data[-1].get("timestamp", tick_data[-1].get("time"))
             )
             cutoff_ep = (
-                newest_ep - float((2 * lookback + 2) * 60)
+                newest_ep - float((2 * lookback + 2) * bar_s)
                 if newest_ep is not None else None
             )
             for idx in range(len(tick_data) - 1, -1, -1):
@@ -5332,8 +5407,7 @@ def _detect_divergence(close: np.ndarray, cvd: float, lookback: int = 15,
                     break
                 saw_timestamped_ticks = True
                 try:
-                    dt = datetime.fromtimestamp(ep, tz=timezone.utc)
-                    minute_key = dt.replace(second=0, microsecond=0)
+                    bucket_key = int(ep // bar_s)
                     vol = float(t.get("volume", 0) or 0)
                     side = str(t.get("side", "BUY")).upper()
                     if vol < 2:
@@ -5345,9 +5419,9 @@ def _detect_divergence(close: np.ndarray, cvd: float, lookback: int = 15,
                     else:
                         w_vol = vol
                     if side in ("BUY", "B", "BID", "1"):
-                        minute_deltas[minute_key] += w_vol
+                        minute_deltas[bucket_key] += w_vol
                     else:
-                        minute_deltas[minute_key] -= w_vol
+                        minute_deltas[bucket_key] -= w_vol
                 except Exception:
                     continue
             sorted_minutes = sorted(minute_deltas.items())
@@ -5499,38 +5573,52 @@ def analyze_market(market_data: Dict[str, Any],
     tick_data = market_data.get("tick_data") or []
     open_, high, low, close, vol = _extract_candles(market_data)
 
-    # ---- technicals ---------------------------------------------------------
+    # Law #11: Separate pure session M1 profile bars (`open_, high, low, close, vol`
+    # for VWAP/POC/VA and 60/240m HTF POC) from active chart-timeframe bars
+    # (`tf_open..tf_vol` = M3 today, or any M1..H1 `TIMEFRAME` in the future)
+    # used by Technicals (ATR/ADX-regime/BB/RSI/MACD/MA), volume_roc, sweep,
+    # cvd_divergence, and order_blocks.
+    active_tf_min = _active_base_tf_minutes()
+    tf_open, tf_high, tf_low, tf_close, tf_vol = open_, high, low, close, vol
+    tf_is_m1_fallback = False
+    raw_ctf = market_data.get("candles_tf")
+    if isinstance(raw_ctf, dict) and len(_as_array(raw_ctf.get("close", []))) >= 2:
+        tf_open, tf_high, tf_low, tf_close, tf_vol = _extract_candles({"candles": raw_ctf})
+    elif active_tf_min > 1 and len(close) >= 15 * active_tf_min:
+        tf_open, tf_high, tf_low, tf_close, tf_vol = _aggregate_m1(
+            open_, high, low, close, vol, active_tf_min
+        )
+    elif active_tf_min > 1 and bool(market_data.get("candles_is_m1")):
+        tf_is_m1_fallback = True
+
+    # ---- technicals (calibrated on active TIMEFRAME chart bars) -------------
     ta = TechnicalAnalyzer()
     volatility = VolatilityMetrics(timestamp=now)
     trend = TrendMetrics(timestamp=now)
 
-    if len(close) >= 2:
-        atr = ta.compute_atr(high, low, close)
-        # ATR fallback ladder: compute_atr needs 15 candles; on a fresh
-        # NT bridge file there may be only a handful. A dead ATR (0.0)
-        # silently inflates every stop distance downstream (the manager
-        # would fall back to 0.5% of price ~ 21 pts — far too wide for
-        # gold intraday). Use the best available estimate instead:
-        #   1. mean M1 range (same scale as a true M1 ATR)
-        #   2. traded tick range * 0.25 (very rough, minutes of data)
+    if len(tf_close) >= 2:
+        atr = ta.compute_atr(tf_high, tf_low, tf_close)
         if atr <= 0:
-            atr = float(np.mean(np.asarray(high, dtype=float) -
-                                np.asarray(low, dtype=float)))
-            notes.append(f"ATR estimated from M1 range ({atr:.2f})")
-        bb_u, bb_m, bb_l = ta.compute_bollinger_bands(close)
-        atr_pct = (atr / close[-1] * 100.0) if close[-1] else 0.0
-        rng = float(np.ptp(close[-52:])) if len(close) >= 2 else 0.0
+            atr = float(np.mean(np.asarray(tf_high, dtype=float) -
+                                np.asarray(tf_low, dtype=float)))
+            notes.append(f"ATR estimated from M{active_tf_min if not tf_is_m1_fallback else 1} range ({atr:.2f})")
+        if tf_is_m1_fallback and atr > 0:
+            atr = float(atr * np.sqrt(float(active_tf_min)))
+            notes.append(f"ATR scaled M1->M{active_tf_min} ({atr:.2f})")
+        bb_u, bb_m, bb_l = ta.compute_bollinger_bands(tf_close)
+        atr_pct = (atr / tf_close[-1] * 100.0) if tf_close[-1] else 0.0
+        rng = float(np.ptp(tf_close[-52:])) if len(tf_close) >= 2 else 0.0
         vol_rank = float(np.clip(atr / (rng + 1e-10), 0.0, 1.0)) if rng > 0 else 0.0
         volatility = VolatilityMetrics(
             atr=atr, atr_percent=atr_pct, bb_upper=bb_u, bb_middle=bb_m,
             bb_lower=bb_l, bb_width=((bb_u - bb_l) / bb_m) if bb_m else 0.0,
             volatility_rank=vol_rank, timestamp=now)
 
-        mas = ta.compute_moving_averages(close)
-        adx, pdi, mdi = ta.compute_adx(high, low, close)
-        macd, macd_sig, macd_hist = ta.compute_macd(close)
-        rsi = ta.compute_rsi(close)
-        t_dir, t_strength = ta.compute_trend(close, high, low)
+        mas = ta.compute_moving_averages(tf_close)
+        adx, pdi, mdi = ta.compute_adx(tf_high, tf_low, tf_close)
+        macd, macd_sig, macd_hist = ta.compute_macd(tf_close)
+        rsi = ta.compute_rsi(tf_close)
+        t_dir, t_strength = ta.compute_trend(tf_close, tf_high, tf_low)
         trend = TrendMetrics(
             sma_9=mas["sma_9"], sma_20=mas["sma_20"], sma_50=mas["sma_50"],
             ema_12=mas["ema_12"], ema_26=mas["ema_26"], adx=adx, plus_di=pdi,
@@ -5618,9 +5706,11 @@ def analyze_market(market_data: Dict[str, Any],
     if order_flow.absorption_events == 0 and level3.iceberg_events >= 2:
         notes.append(f"M1 Footprint: absorption via icebergs {level3.iceberg_events}")
 
-    # ---- volume profile ------------------------------------------------------
+    # ---- volume profile (M1 session VWAP/POC/VA; active TIMEFRAME volume_roc)
     vp = VolumeProfileAnalyzer().analyze(high, low, close, vol) if len(close) else \
         VolumeProfileMetrics(timestamp=now)
+    if len(tf_vol) >= 2 and float(tf_vol[-2]) > 0:
+        vp.volume_roc = float((tf_vol[-1] - tf_vol[-2]) / tf_vol[-2] * 100.0)
 
     # ---- macro ---------------------------------------------------------------
     macro = MacroAnalyzer().analyze(market_data.get("macro") or {})
@@ -5642,15 +5732,21 @@ def analyze_market(market_data: Dict[str, Any],
         minutes_to_next_event=minutes_to_event, next_event_title=next_title,
         timestamp=now)
 
-    # ---- regime & divergence --------------------------------------------------
+    # ---- regime & divergence (Law #11: active TIMEFRAME chart bars) ----------
     regime = _detect_regime(trend.adx)
-    divergence = _detect_divergence(close, order_flow.cvd, tick_data=tick_data)  # v5.9 time-weighted
+    if not tf_is_m1_fallback and len(tf_close) >= 12:
+        divergence = _detect_divergence(
+            tf_close, order_flow.cvd, lookback=12,
+            tick_data=tick_data, bar_minutes=active_tf_min,
+        )
+    else:
+        divergence = _detect_divergence(close, order_flow.cvd, tick_data=tick_data, bar_minutes=1)
 
     # ---- multi-timeframe confirmation + spread -------------------------------
-    mtf_trends = _detect_mtf_trends(market_data)
-    # v3: no provider-side higher timeframes -> derive them from our own M1
+    mtf_trends = _detect_mtf_trends(market_data, base_tf_min=active_tf_min)
+    # Derive missing higher timeframes in active ladder from M1 bars
     if len(close) >= 5:
-        for tf, tf_dir in _derive_mtf_from_m1(open_, high, low, close, vol).items():
+        for tf, tf_dir in _derive_mtf_from_m1(open_, high, low, close, vol, base_tf_min=active_tf_min).items():
             mtf_trends.setdefault(tf, tf_dir)
     try:
         spread_pct = float(market_data.get("spread_pct") or 0.0)
@@ -5661,7 +5757,7 @@ def analyze_market(market_data: Dict[str, Any],
     if spread_pct > 0:
         notes.append("spread %.3f%%" % spread_pct)
 
-    # ---- order blocks / supply-demand zones -----------------------------------
+    # ---- order blocks / supply-demand zones (active TIMEFRAME chart bars) ----
     ob_enabled = True
     try:
         import config as _cfg
@@ -5671,7 +5767,7 @@ def analyze_market(market_data: Dict[str, Any],
     order_blocks: List[Dict] = []
     nearest_support = nearest_resistance = 0.0
     if ob_enabled:
-        order_blocks = _detect_order_blocks(high, low, close, open_)
+        order_blocks = _detect_order_blocks(tf_high, tf_low, tf_close, tf_open)
         nearest_support, nearest_resistance = _nearest_zones(order_blocks, price)
 
     # ---- v4.1: higher-timeframe POC (trailing 1h / 4h volume profiles) -------
@@ -5698,19 +5794,19 @@ def analyze_market(market_data: Dict[str, Any],
             asia_range["low"], asia_range["high"],
             " (London breakout)" if asia_range.get("breakout") else ""))
 
-    # ---- aggregate signal ----------------------------------------------------
+    # ---- aggregate signal (Law #11: recent_* pass active TIMEFRAME chart bars)
     sig_engine = SignalEngine()
     strength, direction, confidence, sig_notes = sig_engine.aggregate(
         price, volatility, trend, order_flow, footprint, level3, vp, macro,
         news, regime=regime, divergence=divergence, mtf_trends=mtf_trends,
         nearest_support=nearest_support, nearest_resistance=nearest_resistance,
-        recent_closes=(close if len(close) else None),  # v7.0 P0 #2: full close for 60 bar block, was close[-8:]
+        recent_closes=(tf_close if len(tf_close) else None),
         asia_range=asia_range or None,
         order_blocks=order_blocks,
         htf_poc=htf_poc,
-        recent_highs=(high if len(high) else None),
-        recent_lows=(low if len(low) else None),
-        recent_volumes=(vol if len(vol) else None))
+        recent_highs=(tf_high if len(tf_high) else None),
+        recent_lows=(tf_low if len(tf_low) else None),
+        recent_volumes=(tf_vol if len(tf_vol) else None))
     notes.extend(sig_notes)
 
     # L1 Cross-Market Confirmation

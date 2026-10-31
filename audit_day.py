@@ -3080,9 +3080,10 @@ def per_day_scores(days):
         if not diary:
             skipped.append((day, "no diary for this day - the judges left no record"))
             continue
-        candles = build_candles(ticks)
+        _day_bs, _day_bs_src = _audit_bar_seconds(day, _load_run_config(day))
+        candles = build_candles(ticks, bar_seconds=_day_bs)
         if not candles:
-            skipped.append((day, "tape too short to build M5 candles"))
+            skipped.append((day, f"tape too short to build M{max(1, _day_bs // 60)} candles"))
             continue
         stats, used, _srcs, _recs = collect_day_scores(diary, candles)
         if not used:
@@ -3154,9 +3155,10 @@ def cross_day_scores(days):
         if not diary:
             skipped.append((day, "no diary for this day - the judges left no record"))
             continue
-        candles = build_candles(ticks)
+        _day_bs, _day_bs_src = _audit_bar_seconds(day, _load_run_config(day))
+        candles = build_candles(ticks, bar_seconds=_day_bs)
         if not candles:
-            skipped.append((day, "tape too short to build M5 candles"))
+            skipped.append((day, f"tape too short to build M{max(1, _day_bs // 60)} candles"))
             continue
         stats, used, _srcs, _recs = collect_day_scores(diary, candles)
         if not used:
@@ -6000,7 +6002,8 @@ def main(argv=None):
                                             decisions, log_path)
     reports["teams"], _ = _safe_test(8, "TEAM/JUDGE CHECK", test_8_teams, diary)
     try:
-        candles = build_candles(ticks)
+        _main_bs, _main_bs_src = _audit_bar_seconds(day, _load_run_config(day))
+        candles = build_candles(ticks, bar_seconds=_main_bs)
     except Exception as _ce:
         print(f"[warn] candle build failed ({type(_ce).__name__}: {_ce}) -> judge clock left empty")
         candles = []

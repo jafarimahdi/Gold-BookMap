@@ -3192,7 +3192,7 @@ def _env_snapshot() -> dict:
         "TRADING_ENABLED": g("TRADING_ENABLED"),
         "ALLOW_LIVE_TRADING": g("ALLOW_LIVE_TRADING"),
         "TIMEFRAME": g("TIMEFRAME"),
-        "A1_BASE_TF_MINUTES": os.environ.get("A1_BASE_TF_MINUTES"),
+        "A1_BASE_TF_MINUTES": os.environ.get("A1_BASE_TF_MINUTES") or str(g("A1_BASE_TF_MINUTES") or g("BASE_TF_MINUTES") or 5),
         "VOICE_GAIN": os.environ.get("VOICE_GAIN"),
         "POWER_BAR_SECONDS": g("POWER_BAR_SECONDS"),
         "STOP_LOSS_ATR_MULT": g("STOP_LOSS_ATR_MULT"),

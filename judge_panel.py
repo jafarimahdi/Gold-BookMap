@@ -110,7 +110,7 @@ def parse_judge_panel(notes: List[str]) -> List[Dict[str, Any]]:
                 elif token in ("SELL", "bearish", "below", "down"):
                     d = -1.0
             # the applied weight is the only number we need to score the panel
-            mw = _re.search(r"(?:\bw|weight)\s+([\d.]+)", note)
+            mw = _re.search(r"(?:\bw|weight|adaptive)\s+([\d.]+)", note)
             if mw:
                 try:
                     w = float(mw.group(1))
@@ -141,6 +141,9 @@ def parse_judge_panel(notes: List[str]) -> List[Dict[str, Any]]:
                     d = -1.0 if (g and g[0] == "bids") else 1.0
                 elif judge in ("l3_net_flow",):
                     d = 1.0 if (g and g[0] == "BUY") else -1.0
+                elif judge == "vwap_zscore":
+                    # L3655 votes -np.sign(z) (mean-reversion fade: +z -> SELL -1, -z -> BUY +1)
+                    d = -1.0 if lead > 0 else (1.0 if lead < 0 else 0.0)
                 elif lead:
                     d = 1.0 if lead > 0 else -1.0
             elif judge == "l3_ofi_streak":
@@ -296,17 +299,21 @@ def _aggregate_m1(open_: np.ndarray, high: np.ndarray, low: np.ndarray,
 
 
 def _derive_mtf_from_m1(open_: np.ndarray, high: np.ndarray, low: np.ndarray,
-                        close: np.ndarray, vol: np.ndarray) -> Dict[str, str]:
-    """v3: derive higher-timeframe trends from our OWN M1 candles.
-
-    The futures bridge supplies only M1; resampling revives the MTF
-    confirmation votes without a new data source. A timeframe votes only
-    with >= 20 aggregated bars (same rule as the native MTF detector).
-    M5 needs ~100 min of window, M15 ~5 h (set NT_WINDOW_SECONDS=28800).
-    """
+                        close: np.ndarray, vol: np.ndarray,
+                        base_tf_min: Optional[int] = None) -> Dict[str, str]:
+    """Law #11: derive strictly-higher-timeframe trends from M1 candles using
+    the active chart timeframe ladder (synced with step2_market_analysis)."""
+    import sys as _sys
+    cfg_m = _sys.modules.get("config")
+    b = int(base_tf_min if base_tf_min is not None else getattr(cfg_m, "BASE_TF_MINUTES", 5) or 5)
+    ladder_fn = getattr(cfg_m, "mtf_ladder_for_base_tf", None) if cfg_m is not None else None
+    ladder = ladder_fn(b) if callable(ladder_fn) else (
+        [("M5", 5), ("M15", 15), ("H1", 60)] if b == 1
+        else ([("M9", 9), ("M15", 15), ("H1", 60)] if b == 3 else [("M15", 15), ("H1", 60), ("H4", 240)])
+    )
     out: Dict[str, str] = {}
-    for tf_name, factor in (("M5", 5), ("M15", 15), ("H1", 60)):
-        _o, h, l, c, v = _aggregate_m1(open_, high, low, close, vol, factor)
+    for tf_name, factor in ladder:
+        _o, h, l, c, v = _aggregate_m1(open_, high, low, close, vol, int(factor))
         if len(c) >= 20:
             t = _detect_tf_trend(c)
             if t in ("UP", "DOWN"):
@@ -377,17 +384,29 @@ def _asian_range_state(tick_data: List[Dict], price: float,
     return out
 
 
-def _detect_mtf_trends(market_data: Dict[str, Any]) -> Dict[str, str]:
-    """Trend direction for each higher timeframe present in market_data.
-
-    Reads `candles_m5` / `candles_m15` / `candles_h1` (each a dict with a
-    "close" array) and returns e.g. {"H1":"UP","M15":"DOWN","M5":"UP"}.
-    Timeframes with no data are omitted (no votes in the signal engine).
-    """
+def _detect_mtf_trends(market_data: Dict[str, Any],
+                       base_tf_min: Optional[int] = None) -> Dict[str, str]:
+    """Law #11: Trend direction for each higher timeframe in the active chart ladder."""
+    import sys as _sys
+    cfg_m = _sys.modules.get("config")
+    b = max(1, int(base_tf_min if base_tf_min is not None else getattr(cfg_m, "BASE_TF_MINUTES", 5) or 5))
+    ladder_fn = getattr(cfg_m, "mtf_ladder_for_base_tf", None) if cfg_m is not None else None
+    ladder = ladder_fn(b) if callable(ladder_fn) else (
+        [("M5", 5), ("M15", 15), ("H1", 60)] if b == 1
+        else ([("M9", 9), ("M15", 15), ("H1", 60)] if b == 3 else [("M15", 15), ("H1", 60), ("H4", 240)])
+    )
     out: Dict[str, str] = {}
-    for tf_name in ("H1", "M15", "M5"):
+    for tf_name, _tf_min in reversed(ladder):
         close = _as_array(
             (market_data.get(f"candles_{tf_name.lower()}") or {}).get("close", []))
         if len(close) >= 20:
             out[tf_name] = _detect_tf_trend(close)
+    if not out:
+        for fb_name, fb_min in (("H4", 240), ("H1", 60), ("M30", 30), ("M15", 15), ("M9", 9), ("M5", 5)):
+            if fb_min <= b:
+                continue
+            close = _as_array(
+                (market_data.get(f"candles_{fb_name.lower()}") or {}).get("close", []))
+            if len(close) >= 20:
+                out[fb_name] = _detect_tf_trend(close)
     return out

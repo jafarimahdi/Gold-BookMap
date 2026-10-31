@@ -1356,7 +1356,68 @@ class BookmapBridgeProvider(BaseProvider):
         self.last_data_ts = last_data_dt
 
         symbol_out = name or symbol or getattr(config, "DATA_SYMBOL", "MGC 12-26")
+        has_prebuilt = getattr(self, "_prebuilt_candles", None) is not None
         data = self.build_market_data(symbol=symbol_out)
+        data["candles_is_m1"] = True
+        try:
+            base_tf_min = max(1, int(getattr(config, "BASE_TF_MINUTES", 5) or 5))
+        except (TypeError, ValueError):
+            base_tf_min = 5
+        data["candles_tf_minutes"] = base_tf_min
+        if not has_prebuilt and ticks:
+            try:
+                import numpy as _np
+                ep_rows = []
+                for _t in ticks:
+                    _dt_t = _t.get("ts")
+                    if isinstance(_dt_t, datetime):
+                        ep_rows.append((_dt_t.timestamp(), float(_t["price"]), float(_t["volume"])))
+                if ep_rows:
+                    _ref_ep = float(last_data_dt.timestamp()) if isinstance(last_data_dt, datetime) else ep_rows[-1][0]
+
+                    def _bucket_rows(b_min: int, drop_forming_min_bars: int = 15):
+                        b_sec = max(60, int(b_min) * 60)
+                        o_l, h_l, l_l, c_l, v_l, k_l = [], [], [], [], [], []
+                        cur_k = None
+                        for _ep, _px, _sz in ep_rows:
+                            _k = int(_ep // b_sec)
+                            if _k != cur_k:
+                                o_l.append(_px)
+                                h_l.append(_px)
+                                l_l.append(_px)
+                                c_l.append(_px)
+                                v_l.append(_sz)
+                                k_l.append(_k)
+                                cur_k = _k
+                            else:
+                                if _px > h_l[-1]:
+                                    h_l[-1] = _px
+                                if _px < l_l[-1]:
+                                    l_l[-1] = _px
+                                c_l[-1] = _px
+                                v_l[-1] += _sz
+                        # Exclude incomplete forming multi-minute bar once enough closed history exists
+                        if b_min > 1 and len(c_l) > drop_forming_min_bars and (k_l[-1] + 1) * b_sec > _ref_ep:
+                            o_l.pop(); h_l.pop(); l_l.pop(); c_l.pop(); v_l.pop()
+                        if not c_l:
+                            return {}
+                        return {
+                            "open": _np.asarray(o_l, dtype=float),
+                            "high": _np.asarray(h_l, dtype=float),
+                            "low": _np.asarray(l_l, dtype=float),
+                            "close": _np.asarray(c_l, dtype=float),
+                            "volume": _np.asarray(v_l, dtype=float),
+                        }
+
+                    data["candles_tf"] = data.get("candles", {}) if base_tf_min == 1 else _bucket_rows(base_tf_min, 15)
+                    ladder_fn = getattr(config, "mtf_ladder_for_base_tf", None)
+                    ladder = ladder_fn(base_tf_min) if callable(ladder_fn) else [("M15", 15), ("H1", 60)]
+                    for _tf_lbl, _tf_m in ladder:
+                        _cd = _bucket_rows(int(_tf_m), 20)
+                        if _cd:
+                            data[f"candles_{str(_tf_lbl).lower()}"] = _cd
+            except Exception:
+                pass
         data["bid_depth"] = dict(analysis_bids)
         data["ask_depth"] = dict(analysis_asks)
         data["order_book"] = {"bids": list(self.order_book["bids"]),

@@ -455,16 +455,13 @@ def trades_page(day, decisions, outcomes, tracked, mt5=None):
 # htf_poc and the macro judges are graded on 120. The console (audit_day.JUDGE_HORIZON)
 # was always right, so there is now exactly ONE table and this page reads it: horizon
 # = quick_candles x 5, because the judges are scored on M5 bars.
-def _load_judge_clock():
+def _load_judge_horizon_bars():
+    """Law #11: Load each judge's grading horizon in CHART BARS (not hardcoded M5 minutes)
+    from audit_day.JUDGE_HORIZON so judge clocks scale dynamically with `TIMEFRAME`
+    (e.g. 3/6/12/24 bars -> 9/18/36/72m on M3, 15/30/60/120m on M5, 3/6/12/24m on M1)."""
     try:
         import sys
         from pathlib import Path
-
-        # If audit_day.py is running as a script, its live module is __main__, not
-        # sys.modules['audit_day']. Importing it by name here would execute a second
-        # copy; its top-level .env load can overwrite the isolated demo environment
-        # before the price-page builder runs. Reuse __main__ only when it is this
-        # insight.py sibling's audit_day.py; otherwise use the normally imported module.
         _A = sys.modules.get("audit_day")
         if _A is None:
             _main = sys.modules.get("__main__")
@@ -477,11 +474,9 @@ def _load_judge_clock():
             import audit_day as _A
         h = getattr(_A, "JUDGE_HORIZON", None)
         if isinstance(h, dict) and h:
-            return {k: int(v[0]) * 5 for k, v in h.items()}, "audit_day.JUDGE_HORIZON"
+            return {k: int(v[0]) for k, v in h.items()}, "audit_day.JUDGE_HORIZON"
     except Exception:
         pass
-    # audit_day not importable (page rendered standalone): mirror of the same table,
-    # kept in candles so the two can be diffed by eye.
     _mirror = {
         "footprint_delta": 3, "footprint_levels": 3, "l3_imbalance": 3,
         "l3_ofi_streak": 3, "l3_net_flow": 3, "l3_large_ofi": 3,
@@ -493,32 +488,37 @@ def _load_judge_clock():
         "delta_pressure": 6, "volume_roc": 6, "macro_yield": 24, "macro_dxy": 24,
         "macro_vix": 24, "macro_risk": 24, "news_sentiment": 24, "mtf": 12,
     }
-    return {k: v * 5 for k, v in _mirror.items()}, "built-in mirror (audit_day not importable)"
+    return dict(_mirror), "built-in mirror (audit_day not importable)"
 
 
-JUDGE_CLOCK, JUDGE_CLOCK_SOURCE = _load_judge_clock()
-JUDGE_CLOCK_DEFAULT = 15
+JUDGE_HORIZON_BARS, JUDGE_CLOCK_SOURCE = _load_judge_horizon_bars()
+JUDGE_CLOCK_DEFAULT_BARS = 3
+JUDGE_CLOCK = {k: v * active_timeframe_minutes() for k, v in JUDGE_HORIZON_BARS.items()}
+JUDGE_CLOCK_DEFAULT = JUDGE_CLOCK_DEFAULT_BARS * active_timeframe_minutes()
 
 
-def judge_clock(name):
-    """Minutes this judge is graded over. An unknown name is a bug, not a 15-minute
-    judge, so it is reported as such instead of being silently graded."""
-    return JUDGE_CLOCK.get(name, JUDGE_CLOCK_DEFAULT)
+def judge_clock(name, day=None, bar_seconds=None):
+    """Law #11: Minutes this judge is graded over on the active chart TIMEFRAME
+    (`JUDGE_HORIZON_BARS[name] * active_timeframe_minutes(day, bar_seconds)`)."""
+    tf_min = active_timeframe_minutes(day=day, bar_seconds=bar_seconds)
+    bars = JUDGE_HORIZON_BARS.get(name, JUDGE_CLOCK_DEFAULT_BARS)
+    return max(1, int(bars) * int(tf_min))
 
 
-def judge_clock_note(name):
-    return ("" if name in JUDGE_CLOCK else
+def judge_clock_note(name, day=None, bar_seconds=None):
+    def_min = JUDGE_CLOCK_DEFAULT_BARS * active_timeframe_minutes(day=day, bar_seconds=bar_seconds)
+    return ("" if name in JUDGE_HORIZON_BARS else
             f" <b>[unknown judge '{html.escape(str(name))}' - graded on the "
-            f"{JUDGE_CLOCK_DEFAULT}-minute default; this name is not in "
+            f"{def_min}-minute ({JUDGE_CLOCK_DEFAULT_BARS}-bar) default; this name is not in "
             f"{html.escape(JUDGE_CLOCK_SOURCE)}]</b>")
 
 
-def judges_page(day, diary, series, decisions=None):
+def judges_page(day, diary, series, decisions=None, bar_seconds=None):
     """One page per day: each judge, its scorecard, and every call it made.
 
-    A judge is graded on its OWN clock (see JUDGE_CLOCK): a footprint read is judged on
-    the next 15 minutes, a macro read on the next 2 hours. Grading them all on one
-    horizon is how a fast judge gets blamed for a slow move.
+    A judge is graded on its OWN clock scaled to the active chart TIMEFRAME
+    (see judge_clock): a 3-bar footprint read is judged over 9 minutes on M3
+    (15 minutes on M5), and a 24-bar macro read over 72 minutes on M3.
     """
     idx = series_index(series)
     per = {}
@@ -537,7 +537,7 @@ def judges_page(day, diary, series, decisions=None):
                 d = float(v.get("dir", 0) or 0)
             except Exception:
                 d = 0.0
-            mins = judge_clock(name)
+            mins = judge_clock(name, day=day, bar_seconds=bar_seconds)
             fut = price_at(series, when, mins, idx)   # when is UTC - correct by construction
             move = (fut - price) if (fut is not None) else None
             right = None
