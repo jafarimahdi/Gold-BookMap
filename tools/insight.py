@@ -63,6 +63,60 @@ def _fmt(x, nd=1, sign=False):
     return f"{v:+.{nd}f}" if sign else f"{v:.{nd}f}"
 
 
+_CANONICAL_RETIRED = frozenset({
+    "delta_pressure", "htf_poc", "iceberg_legacy", "l3_ofi_streak",
+    "macro_dxy", "macro_vix", "macro_yield", "microprice", "poc_day",
+    "queue_pos", "spoof_invert_loose", "supply_demand", "vwap_zscore",
+    "whale_walls",
+})
+_LAST_PANEL_WEIGHTS: dict[str, float] = {}
+
+
+def _retired_judge_set() -> set[str]:
+    """Active retired-judge set without importing config/.env into demo fixtures."""
+    import os
+    import sys
+
+    out = set(_CANONICAL_RETIRED)
+    for mod_name in ("audit_day", "__main__"):
+        mod = sys.modules.get(mod_name)
+        if mod is None:
+            continue
+        rj = getattr(mod, "RETIRED_JUDGES", None)
+        if isinstance(rj, (dict, set, list, tuple, frozenset)):
+            out.update(str(k).strip().lower() for k in rj if str(k).strip())
+        env_map = getattr(mod, "ENV", None)
+        if isinstance(env_map, dict):
+            raw = str(env_map.get("RETIRED_JUDGES") or "").strip()
+            if raw:
+                out.update(t.strip().lower() for t in raw.split(",") if t.strip())
+    cfg = sys.modules.get("config")
+    if cfg is not None:
+        for k in (getattr(cfg, "RETIRED_JUDGES", None) or ()):
+            if str(k).strip():
+                out.add(str(k).strip().lower())
+    raw_env = os.environ.get("RETIRED_JUDGES")
+    if raw_env is not None:
+        s = raw_env.strip()
+        if not s:
+            out.clear()
+        else:
+            out.update(t.strip().lower() for t in s.split(",") if t.strip())
+    unret = str(os.environ.get("UNRETIRE_JUDGES") or "").strip()
+    if unret:
+        for t in unret.split(","):
+            if t.strip():
+                out.discard(t.strip().lower())
+    return out
+
+
+def _is_retired_vote(name: str, vote_dict: dict | None = None, retired_set: set[str] | None = None) -> bool:
+    rset = _retired_judge_set() if retired_set is None else retired_set
+    if isinstance(vote_dict, dict) and bool(vote_dict.get("retired")):
+        return True
+    return str(name or "").strip().lower() in rset
+
+
 def minute_series(ticks):
     """[(dt, price)] one point per minute (last price in that minute), sorted.
 
@@ -133,6 +187,7 @@ def candle_atr(candles, when, bars=3):
 # --------------------------------------------------------------------------- #
 def decisions_page(day, decisions, diary, series, title_extra=""):
     """Self-contained HTML: every decision + the panel that stood behind it."""
+    retired_set = _retired_judge_set()
     rows = []
     for i, d in enumerate(decisions or []):
         ts = d.get("_dt")
@@ -159,13 +214,25 @@ def decisions_page(day, decisions, diary, series, title_extra=""):
                 fav, adv = hi - price, price - lo
             elif (d.get("signal_direction") or "").upper() == "SELL":
                 fav, adv = price - lo, hi - price
-        judges = "".join(
-            f"<tr><td>{esc(v.get('judge'))}</td>"
-            f"<td class={'up' if float(v.get('dir', 0) or 0) > 0 else ('dn' if float(v.get('dir', 0) or 0) < 0 else 'q')}>"
-            f"{'BUY' if float(v.get('dir', 0) or 0) > 0 else ('SELL' if float(v.get('dir', 0) or 0) < 0 else 'quiet')}</td>"
-            f"<td>{_fmt(v.get('weight'), 2)}</td><td class=raw>{esc(v.get('raw'))}</td></tr>"
-            for v in panel if isinstance(v, dict)
-        )
+        judges_parts = []
+        active_panel_count = 0
+        for v in panel:
+            if not isinstance(v, dict):
+                continue
+            jname = str(v.get("judge") or "?")
+            is_ret = _is_retired_vote(jname, v, retired_set)
+            if not is_ret:
+                active_panel_count += 1
+            vd = float(v.get("dir", 0) or 0)
+            vcls = "q" if is_ret else ("up" if vd > 0 else ("dn" if vd < 0 else "q"))
+            vlbl = "BUY" if vd > 0 else ("SELL" if vd < 0 else "quiet")
+            w_txt = "0.00 [OFF]" if is_ret else _fmt(v.get("weight"), 2)
+            j_txt = f"{esc(jname)} <span class='q'>[retired]</span>" if is_ret else esc(jname)
+            judges_parts.append(
+                f"<tr><td>{j_txt}</td><td class={vcls}>{vlbl}</td>"
+                f"<td>{esc(w_txt)}</td><td class=raw>{esc(v.get('raw'))}</td></tr>"
+            )
+        judges = "".join(judges_parts)
         st = str(d.get("exec_status") or "?")
         cls = "ok" if st.upper() == "EXECUTED" else ("bad" if st.upper() in ("DEFERRED", "REJECTED") else "")
         rows.append(f"""
@@ -191,7 +258,7 @@ def decisions_page(day, decisions, diary, series, title_extra=""):
           <tr><td>strength / conf</td><td>{_fmt((near or {}).get('strength'))} / {_fmt((near or {}).get('confidence'))}%</td></tr>
         </table>
       </div>
-      <div><h4>The panel ({len(panel)} votes)</h4>
+      <div><h4>The panel ({active_panel_count} active / {len(panel)} logged)</h4>
         <table><tr><th>judge</th><th>vote</th><th>w</th><th>raw</th></tr>{judges or '<tr><td colspan=4>no panel recorded</td></tr>'}</table>
       </div>
       <div><h4>What happened next</h4>
@@ -207,8 +274,17 @@ def decisions_page(day, decisions, diary, series, title_extra=""):
   </div>
 </div>""")
     head = f"{day} - {len(decisions or [])} decisions {title_extra}"
-    return _page(f"Decisions — {esc(day)}", head, "".join(rows) or
-                 "<p>No decisions were logged for this day.</p>")
+    is_replay = "current-version" in str(title_extra).lower() or "raw-replay" in str(title_extra).lower()
+    law8_note = (
+        "" if is_replay else
+        "<p class='sub' style='padding:10px 22px 0;margin:0'>"
+        "<b>Law #8 note:</b> this ledger shows what the app version running on this date logged live. "
+        "To measure how the <b>current</b> app version reacts to this day's raw <code>ticks</code> + "
+        "<code>mbo</code> tape, run <code>python tools/raw_replay.py --date "
+        f"{esc(day)}</code>.</p>"
+    )
+    return _page(f"Decisions — {esc(day)}", head, law8_note + ("".join(rows) or
+                 "<p style='padding:12px 22px'>No decisions were logged for this day.</p>"))
 
 
 # --------------------------------------------------------------------------- #
@@ -363,16 +439,19 @@ def judges_page(day, diary, series, decisions=None):
                   for c in scored if c["move"] is not None)
         return len(calls), len(scored), hits, pts
 
-    order = sorted(per.items(), key=lambda kv: (-_stat(kv[1])[1], kv[0]))
+    retired_set = _retired_judge_set()
+    order = sorted(per.items(), key=lambda kv: (kv[0].strip().lower() in retired_set, -_stat(kv[1])[1], kv[0]))
     total_snaps = len([r for r in (diary or []) if r.get("judge_votes")])
 
     blocks = []
     for name, calls in order:
+        is_ret = name.strip().lower() in retired_set
         n, scored, hits, pts = _stat(calls)
         acc = (100.0 * hits / scored) if scored else None
         ppc = (pts / scored) if scored else None
         part = (100.0 * n / total_snaps) if total_snaps else 0.0
         thin = scored < 3
+        ret_badge = "<span class='pill'>retired [w 0.00]</span> " if is_ret else ""
         badge = ("<span class='pill bad'>too few calls to grade</span>" if thin else
                  f"<span class='pill {'ok' if (acc or 0) >= 55 else ''}'>{acc:.0f}% right</span>")
         money = ("<span class='pill ok'>makes money</span>" if (ppc or 0) > 0
@@ -381,7 +460,7 @@ def judges_page(day, diary, series, decisions=None):
             f"<tr><td>{c['when']:%H:%M:%S}</td>"
             f"<td class={'up' if c['dir'] > 0 else ('dn' if c['dir'] < 0 else 'q')}>"
             f"{'BUY' if c['dir'] > 0 else ('SELL' if c['dir'] < 0 else 'quiet')}</td>"
-            f"<td>{_fmt(c['w'], 2)}</td>"
+            f"<td>{'0.00' if is_ret else _fmt(c['w'], 2)}</td>"
             f"<td>{_fmt(c['price'], 2)}</td>"
             f"<td>+{c['mins']}m</td>"
             f"<td>{_fmt(c['move'], 2, True)}</td>"
@@ -392,7 +471,7 @@ def judges_page(day, diary, series, decisions=None):
 <div class="card">
   <div class="head" onclick="this.parentNode.classList.toggle('open')">
     <span class="t">{esc(name)}</span>
-    {badge} {money}
+    {ret_badge}{badge} {money}
     <span class="num">{n} vote(s)</span>
     <span class="num">{part:.0f}% of snapshots</span>
     <span class="num">scored {scored}</span>
@@ -497,7 +576,10 @@ def panel_rows(day, diary, series):
     """[(when, price, {judge: dir}, ens_dir, future_move)] for one day.
 
     future_move = price 15 minutes later minus price now (same rule for every weight set).
+    Retired judges (weight 0.00 / RETIRED_JUDGES) are excluded from active weight math so
+    --weight-ab and --walk-forward never resurrect retired voters at weight 1.0.
     """
+    retired_set = _retired_judge_set()
     rows = []
     idx = series_index(series)
     for rec in diary or []:
@@ -507,11 +589,20 @@ def panel_rows(day, diary, series):
             continue
         votes = {}
         for v in (rec.get("judge_votes") or []):
-            if isinstance(v, dict):
-                try:
-                    votes[str(v.get("judge"))] = float(v.get("dir", 0) or 0)
-                except Exception:
+            if not isinstance(v, dict):
+                continue
+            jname = str(v.get("judge") or "").strip()
+            if not jname or _is_retired_vote(jname, v, retired_set):
+                continue
+            try:
+                raw_w = v.get("weight")
+                if raw_w is not None and float(raw_w) <= 0.0:
                     continue
+                if raw_w is not None:
+                    _LAST_PANEL_WEIGHTS[jname] = float(raw_w)
+                votes[jname] = float(v.get("dir", 0) or 0)
+            except Exception:
+                continue
         if not votes:
             continue
         fut = price_at(series, dt, 15, idx)          # dt is tz-aware UTC; series is UTC
@@ -525,12 +616,17 @@ def panel_rows(day, diary, series):
 
 def _score(rows, weights):
     """(right, total, points) for one weight set. Quiet = no vote = no trade."""
+    retired_set = _retired_judge_set()
     right = tot = 0
     pts = 0.0
     for _dt, _price, votes, _ens, move in rows:
         num = den = 0.0
         for j, d in votes.items():
+            if str(j).strip().lower() in retired_set:
+                continue
             w = float(weights.get(j, 1.0))
+            if w <= 0.0:
+                continue
             if d:
                 num += w * d
                 den += w
@@ -549,10 +645,13 @@ def _score(rows, weights):
 def suggested_weights(rows, days_back=0):
     """Weight each judge by how often it was right - the same idea as test 9, computed
     here across whichever rows are handed in (one day, or the learning window of a fold)."""
+    retired_set = _retired_judge_set()
     hit = defaultdict(int)
     tot = defaultdict(int)
     for _dt, _price, votes, _ens, move in rows:
         for j, d in votes.items():
+            if str(j).strip().lower() in retired_set:
+                continue
             if not d or not move:
                 continue
             tot[j] += 1
@@ -574,9 +673,10 @@ def weight_ab(days_data, weights_now=None, weights_new=None, min_n=100):
         return "no diary snapshots with a judge panel and a price 15 minutes later - nothing to compare", {}
     sets = {}
     auto, table = suggested_weights(all_rows)
-    sets["current (as used)"] = weights_now or {}
+    eff_now = dict(weights_now) if weights_now is not None else dict(_LAST_PANEL_WEIGHTS)
+    sets["current (as used)"] = eff_now
     sets["suggested (from accuracy)"] = weights_new or auto
-    equal = {j: 1.0 for j in set(auto) | set((weights_now or {}))}
+    equal = {j: 1.0 for j in set(auto) | set(eff_now)}
     sets["equal weight (1.0)"] = equal
     lines = [f"{'=' * 78}", f" WEIGHT A/B — {len(days_data)} day(s), {len(all_rows)} snapshots", f"{'=' * 78}",
              " scoring rule: a vote is right when the price 15 minutes later moved its way.",
@@ -622,6 +722,7 @@ def walk_forward(days_data, fold=3, weights_now=None):
     learned_better = 0
     folds = 0
     rows_summary = []
+    eff_now = dict(weights_now) if weights_now is not None else dict(_LAST_PANEL_WEIGHTS)
     for i in range(fold, len(days_data)):
         test_day, test_rows = days_data[i]
         learn_rows = [r for _d, rows in days_data[i - fold:i] for r in rows]
@@ -630,7 +731,7 @@ def walk_forward(days_data, fold=3, weights_now=None):
         w_new, _t = suggested_weights(learn_rows)
         if not w_new:
             continue
-        r_fix, n_fix, _p = _score(test_rows, weights_now or {})
+        r_fix, n_fix, _p = _score(test_rows, eff_now)
         r_new, n_new, _p2 = _score(test_rows, w_new)
         if not n_fix or not n_new:
             continue

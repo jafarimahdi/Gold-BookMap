@@ -1216,6 +1216,11 @@ def _top_depth_receipt(levels: Dict[float, float], timestamps: Dict[float, Any],
     return receipt
 
 
+def _now_utc_epoch() -> float:
+    """High-resolution UTC epoch (avoids Windows UCRT64 coarse 15.6ms time.time() lag vs datetime.now)."""
+    return datetime.now(timezone.utc).timestamp()
+
+
 class BookmapBridgeProvider(BaseProvider):
     """Step-1 provider that reads the BookMap bridge file (ticks.csv) + optional mbo.csv."""
 
@@ -1308,7 +1313,7 @@ class BookmapBridgeProvider(BaseProvider):
         except (TypeError, ValueError, OverflowError):
             max_age = 0.0
             max_age_limit_invalid = True
-        now_epoch = time.time()
+        now_epoch = _now_utc_epoch()
         fresh_bids, fresh_bid_ts, bid_counts = _fresh_depth_levels(
             raw_bids, bid_level_ts, now_epoch, max_age)
         fresh_asks, fresh_ask_ts, ask_counts = _fresh_depth_levels(

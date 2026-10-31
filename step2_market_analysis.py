@@ -3076,7 +3076,11 @@ class SignalEngine:
             if getattr(config, "V6_KILLZONES_ENABLED", False):
                 from datetime import datetime, timezone
                 from session import budapest_hour as _bud_hour
-                now_utc = datetime.now(timezone.utc)
+                _ref_now = getattr(news, "timestamp", None) or getattr(volatility, "timestamp", None)
+                if isinstance(_ref_now, datetime):
+                    now_utc = _ref_now.astimezone(timezone.utc) if _ref_now.tzinfo else _ref_now.replace(tzinfo=timezone.utc)
+                else:
+                    now_utc = datetime.now(timezone.utc)
                 bud_hour = _bud_hour(now_utc)
                 bud_min = now_utc.minute
                 killzone = _get_killzone(bud_hour, bud_min)
@@ -3124,7 +3128,11 @@ class SignalEngine:
         try:
             from session import is_budapest_trading_hours, budapest_hour, time_of_day, trading_session
             import datetime as _dt
-            now_utc = _dt.datetime.now(_dt.timezone.utc)
+            _ref_now = getattr(news, "timestamp", None) or getattr(volatility, "timestamp", None)
+            if isinstance(_ref_now, _dt.datetime):
+                now_utc = _ref_now.astimezone(_dt.timezone.utc) if _ref_now.tzinfo else _ref_now.replace(tzinfo=_dt.timezone.utc)
+            else:
+                now_utc = _dt.datetime.now(_dt.timezone.utc)
             is_bud = is_budapest_trading_hours(now_utc)
             b_hour = budapest_hour(now_utc)
             tod = time_of_day(now_utc)
@@ -4596,7 +4604,7 @@ def _get_persistent_l2() -> OrderBookDepthAnalyzer:
     return _PERSISTENT_L2
 
 
-def _l2_inputs(market_data: Dict[str, Any]):
+def _l2_inputs(market_data: Dict[str, Any], now: Optional[datetime] = None):
     """Return (usable, bids, asks, book, updates, reason) for the L2 feed."""
     quality = market_data.get("data_quality") or {}
     quality = quality if isinstance(quality, dict) else {}
@@ -4664,7 +4672,12 @@ def _l2_inputs(market_data: Dict[str, Any]):
                         str(depth_timestamp).replace("Z", "+00:00"))
                     if parsed_ts.tzinfo is None:
                         parsed_ts = parsed_ts.replace(tzinfo=timezone.utc)
-                    raw_depth_age = datetime.now(timezone.utc).timestamp() - parsed_ts.timestamp()
+                    _ref_ep = (
+                        (now.astimezone(timezone.utc) if now.tzinfo else now.replace(tzinfo=timezone.utc)).timestamp()
+                        if isinstance(now, datetime)
+                        else datetime.now(timezone.utc).timestamp()
+                    )
+                    raw_depth_age = _ref_ep - parsed_ts.timestamp()
             if isinstance(raw_depth_age, bool):
                 raise ValueError("boolean depth age")
             depth_age = float(raw_depth_age)
@@ -4773,7 +4786,7 @@ def _l2_metrics_for(market_data: Dict[str, Any], l2: OrderBookDepthAnalyzer,
                     now: Optional[datetime] = None):
     """Update L2 from trusted books, evaluated on the analysis event clock."""
     global _PERSISTENT_L2_TIMESTAMP, _PERSISTENT_L2_INSTRUMENT
-    usable, bids, asks, _book, updates, reason = _l2_inputs(market_data)
+    usable, bids, asks, _book, updates, reason = _l2_inputs(market_data, now=now)
     if not usable:
         l2.reset()
         _PERSISTENT_L2_TIMESTAMP = None
