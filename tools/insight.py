@@ -117,6 +117,114 @@ def _is_retired_vote(name: str, vote_dict: dict | None = None, retired_set: set[
     return str(name or "").strip().lower() in rset
 
 
+def _parse_tf_minutes(raw) -> int | None:
+    """Parse timeframe label or bar_seconds ('M3'->3, 'M5'->5, 'H1'->60, 180->3)."""
+    if raw is None or isinstance(raw, bool):
+        return None
+    if isinstance(raw, (int, float)):
+        v = float(raw)
+        if not math.isfinite(v) or v <= 0:
+            return None
+        if v >= 60 and int(round(v)) % 60 == 0:
+            return max(1, int(round(v / 60.0)))
+        return max(1, int(round(v)))
+    s = str(raw).strip().upper()
+    if not s:
+        return None
+    if s.startswith("M") and s[1:].isdigit():
+        return max(1, int(s[1:]))
+    if s.startswith("H") and s[1:].isdigit():
+        return max(1, int(s[1:]) * 60)
+    if s.isdigit():
+        iv = int(s)
+        if iv >= 60 and iv % 60 == 0:
+            return max(1, iv // 60)
+        if iv > 0:
+            return iv
+    return None
+
+
+def active_timeframe_minutes(day=None, bar_seconds=None) -> int:
+    """Return active chart bar size in minutes (e.g. 3 for M3, 5 for M5) without importing config."""
+    import os
+    import sys
+
+    if bar_seconds is not None:
+        m = _parse_tf_minutes(bar_seconds)
+        if m is not None:
+            return m
+
+    env_tf = _parse_tf_minutes(os.environ.get("TIMEFRAME"))
+    if env_tf is not None:
+        return env_tf
+
+    for mod_name in ("audit_day", "__main__"):
+        mod = sys.modules.get(mod_name)
+        if mod is None:
+            continue
+        if day is not None and hasattr(mod, "_load_run_config") and hasattr(mod, "_audit_bar_seconds"):
+            try:
+                from datetime import date as _date
+                d_obj = _date.fromisoformat(str(day)[:10]) if isinstance(day, str) else day
+                rc = mod._load_run_config(d_obj)
+                bs, _src = mod._audit_bar_seconds(d_obj, rc)
+                m = _parse_tf_minutes(bs)
+                if m is not None:
+                    return m
+            except Exception:
+                pass
+        metrics = getattr(mod, "METRICS", None)
+        if isinstance(metrics, dict):
+            wi = metrics.get("whatif")
+            if isinstance(wi, dict):
+                m = _parse_tf_minutes(wi.get("bar_seconds") or wi.get("timeframe"))
+                if m is not None:
+                    return m
+        env_map = getattr(mod, "ENV", None)
+        if isinstance(env_map, dict):
+            m = _parse_tf_minutes(env_map.get("TIMEFRAME") or env_map.get("POWER_BAR_SECONDS"))
+            if m is not None:
+                return m
+
+    cfg = sys.modules.get("config")
+    if cfg is not None:
+        m = _parse_tf_minutes(getattr(cfg, "TIMEFRAME", None))
+        if m is not None:
+            return m
+
+    return 3
+
+
+def what_if_horizons(day=None, bar_seconds=None) -> tuple[int, int, int, int]:
+    """1x, 2x, 3x, 4x bars of the active TIMEFRAME (e.g. 3, 6, 9, 12 min on M3)."""
+    tf = active_timeframe_minutes(day=day, bar_seconds=bar_seconds)
+    return (tf, 2 * tf, 3 * tf, 4 * tf)
+
+
+def classify_market_trick(direction, signed_moves, deadband: float = 0.30) -> tuple[str, str]:
+    """Classify 1..4-bar directional tape path into follow-through vs market trick."""
+    sig = str(direction or "").strip().upper()
+    if sig not in ("BUY", "SELL"):
+        return ("NO_SIGNAL", "neutral (no directional call)")
+    valid = [float(x) for x in (signed_moves or ()) if x is not None and math.isfinite(float(x))]
+    if len(valid) < 2:
+        return ("NO_TAPE", "insufficient forward tape")
+    m1 = valid[0]
+    early = valid[:2]
+    min_early = min(early)
+    max_early = max(early)
+    end = valid[-1]
+    if min_early <= -deadband and end >= deadband:
+        return ("FAKEOUT_WIN", f"SHAKEOUT -> WIN (dipped {min_early:+.2f} early, closed {end:+.2f})")
+    if max_early >= deadband and end <= -deadband:
+        return ("TRAP_REVERSAL", f"BAIT TRAP -> REVERSAL (popped {max_early:+.2f} early, reversed {end:+.2f})")
+    if m1 > 0 and end >= deadband and min_early > -deadband:
+        return ("CLEAN_FOLLOW", f"CLEAN FOLLOW-THROUGH ({m1:+.2f} -> {end:+.2f})")
+    if m1 <= 0 and end <= -deadband and max_early < deadband:
+        return ("CLEAN_AGAINST", f"STRAIGHT AGAINST ({m1:+.2f} -> {end:+.2f})")
+    return ("FLAT_CHOP", f"FLAT / CHOP ({end:+.2f} net)")
+
+
 def minute_series(ticks):
     """[(dt, price)] one point per minute (last price in that minute), sorted.
 
@@ -185,15 +293,18 @@ def candle_atr(candles, when, bars=3):
 # --------------------------------------------------------------------------- #
 # 1) the day's decisions, one expandable row each
 # --------------------------------------------------------------------------- #
-def decisions_page(day, decisions, diary, series, title_extra=""):
+def decisions_page(day, decisions, diary, series, title_extra="", bar_seconds=None):
     """Self-contained HTML: every decision + the panel that stood behind it."""
     retired_set = _retired_judge_set()
+    h1, h2, h3, h4 = what_if_horizons(day=day, bar_seconds=bar_seconds)
+    tf_lbl = f"M{h1}" if h1 < 60 else f"H{h1 // 60}"
     rows = []
     for i, d in enumerate(decisions or []):
         ts = d.get("_dt")
         dt = _loc(ts)                      # display only
         at = ts                            # UTC, for every price lookup below
         price = float(d.get("price") or 0)
+        sig_dir = (d.get("signal_direction") or "").upper()
         # the diary snapshot that was in front of the robot at that moment
         near, nd = None, None
         for rec in diary or []:
@@ -204,16 +315,24 @@ def decisions_page(day, decisions, diary, series, title_extra=""):
             if nd is None or gap < nd:
                 near, nd = rec, gap
         panel = (near or {}).get("judge_votes") or []
-        f5 = price_at(series, at, 5) if at else None
-        f15 = price_at(series, at, 15) if at else None
-        f30 = price_at(series, at, 30) if at else None
-        hi, lo = excursion(series, at, 30) if at else (None, None)
+        f1 = price_at(series, at, h1) if at else None
+        f2 = price_at(series, at, h2) if at else None
+        f3 = price_at(series, at, h3) if at else None
+        f4 = price_at(series, at, h4) if at else None
+        hi, lo = excursion(series, at, h4) if at else (None, None)
         fav = adv = None
         if price and hi and lo:
-            if (d.get("signal_direction") or "").upper() == "BUY":
+            if sig_dir == "BUY":
                 fav, adv = hi - price, price - lo
-            elif (d.get("signal_direction") or "").upper() == "SELL":
+            elif sig_dir == "SELL":
                 fav, adv = price - lo, hi - price
+        signed_moves = []
+        for fx in (f1, f2, f3, f4):
+            if fx is not None and price > 0 and sig_dir in ("BUY", "SELL"):
+                signed_moves.append((fx - price) if sig_dir == "BUY" else (price - fx))
+            else:
+                signed_moves.append(None)
+        _trick_code, trick_lbl = classify_market_trick(sig_dir, signed_moves)
         judges_parts = []
         active_panel_count = 0
         for v in panel:
@@ -245,7 +364,7 @@ def decisions_page(day, decisions, diary, series, title_extra=""):
     <span class="num">strength {_fmt(d.get('signal_strength'))}</span>
     <span class="num">conf {_fmt(d.get('signal_confidence'))}%</span>
     <span class="ai">AI {esc(d.get('ai_action'))} {_fmt(d.get('ai_confidence'))}%</span>
-    <span class="next">+15m {_fmt((f15 - price) if (f15 and price) else None, 2, True)}</span>
+    <span class="next">+{h4}m {_fmt((f4 - price) if (f4 and price) else None, 2, True)}</span>
   </div>
   <div class="body">
     <div class="cols">
@@ -261,12 +380,14 @@ def decisions_page(day, decisions, diary, series, title_extra=""):
       <div><h4>The panel ({active_panel_count} active / {len(panel)} logged)</h4>
         <table><tr><th>judge</th><th>vote</th><th>w</th><th>raw</th></tr>{judges or '<tr><td colspan=4>no panel recorded</td></tr>'}</table>
       </div>
-      <div><h4>What happened next</h4>
+      <div><h4>What happened next ({tf_lbl}: 1-4 bars)</h4>
         <table>
-          <tr><td>+5 min</td><td>{_fmt(f5, 2)}</td><td>{_fmt((f5 - price) if (f5 and price) else None, 2, True)}</td></tr>
-          <tr><td>+15 min</td><td>{_fmt(f15, 2)}</td><td>{_fmt((f15 - price) if (f15 and price) else None, 2, True)}</td></tr>
-          <tr><td>+30 min</td><td>{_fmt(f30, 2)}</td><td>{_fmt((f30 - price) if (f30 and price) else None, 2, True)}</td></tr>
-          <tr><td>in favour / against</td><td colspan=2>{_fmt(fav, 2)} / {_fmt(adv, 2)}</td></tr>
+          <tr><td>+{h1} min (1b)</td><td>{_fmt(f1, 2)}</td><td>{_fmt((f1 - price) if (f1 and price) else None, 2, True)}</td></tr>
+          <tr><td>+{h2} min (2b)</td><td>{_fmt(f2, 2)}</td><td>{_fmt((f2 - price) if (f2 and price) else None, 2, True)}</td></tr>
+          <tr><td>+{h3} min (3b)</td><td>{_fmt(f3, 2)}</td><td>{_fmt((f3 - price) if (f3 and price) else None, 2, True)}</td></tr>
+          <tr><td>+{h4} min (4b)</td><td>{_fmt(f4, 2)}</td><td>{_fmt((f4 - price) if (f4 and price) else None, 2, True)}</td></tr>
+          <tr><td>{h4}m in favour / against</td><td colspan=2>{_fmt(fav, 2)} / {_fmt(adv, 2)}</td></tr>
+          <tr><td>trick check</td><td colspan=2>{esc(trick_lbl)}</td></tr>
         </table>
         <p class="why"><b>Why {esc(st)}:</b> {esc(d.get('reason')) or 'no reason written'}</p>
       </div>
@@ -497,7 +618,7 @@ def judges_page(day, diary, series, decisions=None):
 # --------------------------------------------------------------------------- #
 # 3) one decision, in full, on the console
 # --------------------------------------------------------------------------- #
-def explain(day, hhmm, decisions, diary, series):
+def explain(day, hhmm, decisions, diary, series, bar_seconds=None):
     if not decisions:
         return f"no decisions logged for {day}"
     want = None
@@ -551,19 +672,31 @@ def explain(day, hhmm, decisions, diary, series):
                 out.append(f"     {str(v.get('judge')):<20} {dirn}  w {_fmt(v.get('weight'), 2)}  {v.get('raw')}")
     if best.get("_dt"):
         dt = best["_dt"]                   # UTC: the tape block below is a price lookup
-        hi, lo = excursion(series, dt, 30)
-        vals = [(-30, price_at(series, dt, -30)), (5, price_at(series, dt, 5)),
-                (15, price_at(series, dt, 15)), (30, price_at(series, dt, 30))]
-        out += ["", " WHAT HAPPENED NEXT (from the tape)"]
+        h1, h2, h3, h4 = what_if_horizons(day=day, bar_seconds=bar_seconds)
+        tf_lbl = f"M{h1}" if h1 < 60 else f"H{h1 // 60}"
+        hi, lo = excursion(series, dt, h4)
+        p1 = price_at(series, dt, h1)
+        p2 = price_at(series, dt, h2)
+        p3 = price_at(series, dt, h3)
+        p4 = price_at(series, dt, h4)
+        vals = [(-h4, price_at(series, dt, -h4)), (h1, p1), (h2, p2), (h3, p3), (h4, p4)]
+        sig_dir = (best.get("signal_direction") or "").upper()
+        signed_moves = [
+            ((px_f - price) if sig_dir == "BUY" else (price - px_f)) if (px_f is not None and price > 0 and sig_dir in ("BUY", "SELL")) else None
+            for px_f in (p1, p2, p3, p4)
+        ]
+        _trick_code, trick_lbl = classify_market_trick(sig_dir, signed_moves)
+        out += ["", f" WHAT HAPPENED NEXT (from the tape, {tf_lbl} 1-4 bars)"]
         for mins, p in vals:
             if p:
                 out.append(f"   {mins:>+4} min : {_fmt(p, 2)}  ({_fmt(p - price, 2, True)})")
         if hi and lo:
-            out.append(f"   30 min range: {_fmt(lo, 2)} .. {_fmt(hi, 2)}")
-            if (best.get("signal_direction") or "").upper() == "BUY":
+            out.append(f"   {h4:>2} min range: {_fmt(lo, 2)} .. {_fmt(hi, 2)}")
+            if sig_dir == "BUY":
                 out.append(f"   in favour   : {_fmt(hi - price, 2)} pts | against: {_fmt(price - lo, 2)} pts")
-            elif (best.get("signal_direction") or "").upper() == "SELL":
+            elif sig_dir == "SELL":
                 out.append(f"   in favour   : {_fmt(price - lo, 2)} pts | against: {_fmt(hi - price, 2)} pts")
+        out.append(f"   trick check : {trick_lbl}")
     out += ["", " Read it like this: the panel is what the robot actually consulted; the executor line is",
             " why it did or did not act; 'what happened next' is the market's answer, not a prediction.", ""]
     return "\n".join(out)

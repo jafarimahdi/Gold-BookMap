@@ -36,10 +36,12 @@ from __future__ import annotations
 
 import argparse
 import bisect
+import concurrent.futures
 import csv
 import glob
 import gzip
 import html
+import io
 import json
 import math
 import os
@@ -414,6 +416,14 @@ def _fast_mbo_track_only(mbo_tail: bbp._MboTail, line: str) -> None:
             active.pop(oid, None)
 
 
+def _open_fast_text(path: Path):
+    """1 MB buffered streaming reader (2x faster than default 8 KB gzip.open on large MBO .gz files)."""
+    if path.name.endswith(".gz"):
+        raw_fh = gzip.GzipFile(path, "rb")
+        return io.TextIOWrapper(io.BufferedReader(raw_fh, buffer_size=1048576), encoding="utf-8", errors="replace")
+    return open(path, "rt", encoding="utf-8", errors="replace", buffering=1048576)
+
+
 def _iter_filtered_csv_events(
     files: Sequence[Path],
     start_ep: float,
@@ -422,36 +432,51 @@ def _iter_filtered_csv_events(
     inst_filter: Optional[str] = None,
 ) -> Iterator[Tuple[float, str]]:
     """Yield `(epoch_utc, raw_line)` within `[start_ep, end_ep]` from ordered chunks."""
-    seen_recent: set[Tuple[str, str]] = set()
+    seen_recent: set[str] = set()
     recent_ring: collections.deque = collections.deque()
-    inst_suffix = f",{inst_filter}" if inst_filter else None
+    prev_ts_raw = ""
+    prev_ep: Optional[float] = None
+    early_stop_ep = end_ep + 300.0
     for path in files:
-        op = gzip.open if path.name.endswith(".gz") else open
+        is_live_tail = path.name.lower() in ("ticks.csv", "mbo.csv")
+        over_end_streak = 0
         try:
-            with op(path, "rt", encoding="utf-8", errors="replace") as fh:
+            with _open_fast_text(path) as fh:
                 for line in fh:
                     if not line or line[0] == "t" or len(line) < 20:
                         continue
                     if line[:10] not in allowed_prefixes:
                         continue
-                    if inst_suffix and inst_filter not in line:
+                    if inst_filter and inst_filter not in line:
                         continue
                     comma = line.find(",")
                     if comma <= 0:
                         continue
                     ts_raw = line[:comma]
-                    ep = _fast_ts_epoch(ts_raw)
-                    if ep is None or ep < start_ep or ep > end_ep:
+                    if ts_raw == prev_ts_raw:
+                        ep = prev_ep
+                    else:
+                        ep = _fast_ts_epoch(ts_raw)
+                        prev_ts_raw = ts_raw
+                        prev_ep = ep
+                    if ep is None or ep < start_ep:
                         continue
-                    sig = (ts_raw, line)
-                    if sig in seen_recent:
+                    if ep > end_ep:
+                        if not is_live_tail and ep > early_stop_ep:
+                            over_end_streak += 1
+                            if over_end_streak >= 500:
+                                break
                         continue
-                    seen_recent.add(sig)
-                    recent_ring.append(sig)
+                    over_end_streak = 0
+                    norm_line = line if line.endswith("\n") else (line + "\n")
+                    if norm_line in seen_recent:
+                        continue
+                    seen_recent.add(norm_line)
+                    recent_ring.append(norm_line)
                     if len(recent_ring) > 30_000:
-                        old_sig = recent_ring.popleft()
-                        seen_recent.discard(old_sig)
-                    yield ep, line if line.endswith("\n") else (line + "\n")
+                        old_line = recent_ring.popleft()
+                        seen_recent.discard(old_line)
+                    yield ep, norm_line
         except OSError:
             continue
 
@@ -632,12 +657,14 @@ def replay_single_day(
     if not tick_files:
         return {"day": day_str, "ok": False, "reason": "no raw ticks files found"}
 
-    # Pass 1: collect deduplicated Last trade prints for fast forward outcome grading
-    # AND detect the active instrument symbol on that date.
+    # Pass 1 (single-pass tick read): collect deduplicated Last trade prints up to walk_end_ep
+    # AND buffer in-window raw tick rows so Pass 2 never re-decompresses tick .csv.gz files!
     trades: List[Tuple[float, float]] = []
     seen_prints: set[Tuple[float, float, float]] = set()
     inst_counts: Counter = Counter()
+    buffered_ticks: List[Tuple[float, str, str]] = []
     raw_tick_rows = 0
+    win_end_ep = win_end_utc.timestamp()
 
     for ep, line in _iter_filtered_csv_events(tick_files, stream_start_ep, walk_end_ep, allowed_dates):
         raw_tick_rows += 1
@@ -648,6 +675,8 @@ def replay_single_day(
         inst = parts[6].strip()
         if inst:
             inst_counts[inst] += 1
+        if ep <= win_end_ep:
+            buffered_ticks.append((ep, line, inst))
         if ev in ("Last", "Trade", "trade"):
             try:
                 px = float(parts[2])
@@ -672,6 +701,13 @@ def replay_single_day(
     bar_keys, walk_bars = _build_m1_walk_bars(trades)
     dominant_inst = inst_counts.most_common(1)[0][0] if inst_counts else getattr(config, "DATA_SYMBOL", "GC 12-26")
 
+    # Active TIMEFRAME-linked 1x, 2x, 3x, 4x bar horizons (3, 6, 9, 12m on M3; 5, 10, 15, 20m on M5)
+    tf_raw = os.environ.get("TIMEFRAME") or getattr(config, "TIMEFRAME", "M3") or "M3"
+    tf_min = ins._parse_tf_minutes(tf_raw) or 3
+    h1, h2, h3, h4 = tf_min, 2 * tf_min, 3 * tf_min, 4 * tf_min
+    tf_label = f"M{tf_min}" if tf_min < 60 else f"H{tf_min // 60}"
+    tol_tf_s = max(90.0, tf_min * 45.0)
+
     # Ruler constants (matching audit_day / decision_ledger / shadow_replay)
     atr_const = float(os.environ.get("AUDIT_ATR", "3.18") or 3.18)
     spread_cost = float(os.environ.get("AUDIT_SPREAD", "0.50") or 0.50)
@@ -685,7 +721,7 @@ def replay_single_day(
     )
     max_hold_min = int(float(os.environ.get("AUDIT_MAX_HOLD_MIN", "180") or 180))
 
-    # Pass 2: stream raw ticks + raw MBO chronologically into isolated Step 1 + Step 2!
+    # Pass 2: stream buffered ticks + raw MBO chronologically into isolated Step 1 + Step 2!
     orig_time = time.time
     orig_now_utc = getattr(bbp, "_now_utc_epoch", None)
     orig_data_dir = getattr(config, "DATA_DIR", Path("data"))
@@ -733,11 +769,14 @@ def replay_single_day(
             m1_builder = _IncrementalM1Builder(max_bars=360)
 
             inst_flt = dominant_inst if inst_counts else None
-            tick_iter = iter(_iter_filtered_csv_events(
-                tick_files, stream_start_ep, win_end_utc.timestamp(), allowed_dates, inst_filter=inst_flt
-            ))
+            tick_iter = (
+                (ep_t, ln_t)
+                for ep_t, ln_t, inst_t in buffered_ticks
+                if not inst_flt or inst_t == inst_flt
+            )
+            buffered_ticks = []  # free reference once generator wraps the underlying list
             mbo_iter = iter(_iter_filtered_csv_events(
-                mbo_files, stream_start_ep, win_end_utc.timestamp(), allowed_dates, inst_filter=inst_flt
+                mbo_files, stream_start_ep, win_end_ep, allowed_dates, inst_filter=inst_flt
             )) if mbo_files else iter(())
 
             nxt_tick = next(tick_iter, None)
@@ -825,9 +864,20 @@ def replay_single_day(
                 pw_bars = int(((pw.get("regime_diagnostics") or {}).get("bars_used") or 0))
 
                 shot = getattr(snap, "shooting_plan", None) or {}
-                shot_act = str(shot.get("action") or "WAIT").upper()
+                # Stage 1 Fix: shooting_team.plan_shot() uses key "shot" ("GO" | "WAIT") + "why" list
+                shot_act = str(shot.get("shot") or shot.get("action") or "WAIT").upper()
                 shot_style = str(shot.get("entry_style") or "NONE")
-                shot_why = str(shot.get("reason") or shot.get("blocker_code") or "")
+                raw_why = shot.get("why")
+                if isinstance(raw_why, (list, tuple)) and raw_why:
+                    shot_why = "; ".join(str(x) for x in raw_why[:3])
+                else:
+                    shot_why = str(
+                        (shot.get("details") or {}).get("primary_reason")
+                        or shot.get("reason")
+                        or shot.get("blocker_code")
+                        or ""
+                    )
+                shot_a2_burst = bool(shot.get("a2_burst") or shot.get("aggressive_trigger_confirmed"))
 
                 fg = (getattr(snap, "shadow_candidates", None) or {}).get("family_gate") or {}
                 fg_ok = bool(fg.get("ok", False))
@@ -877,13 +927,24 @@ def replay_single_day(
                                 jst["hits"] += 1
                             jst["pts"] += (mv - spread_cost)
 
-                # Forward tape outcomes for this cycle
-                p5 = _price_after(trade_eps, trades, tc_ep, 5)
-                p15 = _price_after(trade_eps, trades, tc_ep, 15)
+                # Forward tape outcomes for this cycle:
+                # Stage 1: TIMEFRAME-linked 1x, 2x, 3x, 4x bar horizons (3, 6, 9, 12m on M3; 5, 10, 15, 20m on M5)
+                pb1 = _price_after(trade_eps, trades, tc_ep, h1, tol_s=tol_tf_s)
+                pb2 = _price_after(trade_eps, trades, tc_ep, h2, tol_s=tol_tf_s)
+                pb3 = _price_after(trade_eps, trades, tc_ep, h3, tol_s=tol_tf_s)
+                pb4 = _price_after(trade_eps, trades, tc_ep, h4, tol_s=tol_tf_s)
+                hi4b, lo4b = _excursion_30m(trade_eps, trades, tc_ep, h4)
+
+                # Retain legacy 5/15/30m pointers for backward compatibility
+                p5 = pb1 if h1 == 5 else _price_after(trade_eps, trades, tc_ep, 5)
+                p15 = pb3 if h3 == 15 else _price_after(trade_eps, trades, tc_ep, 15)
                 p30 = _price_after(trade_eps, trades, tc_ep, 30)
                 hi30, lo30 = _excursion_30m(trade_eps, trades, tc_ep, 30)
 
+                fav4b = adv4b = None
                 fav30 = adv30 = None
+                signed_4b: List[Optional[float]] = [None, None, None, None]
+                trick_code, trick_lbl = "NO_SIGNAL", "neutral (no directional call)"
                 fix_out, fix_pts = "NO_SIGNAL", 0.0
                 c3_out, c3_pts = "NO_SIGNAL", 0.0
                 tr10_out, tr10_pts = "NO_SIGNAL", 0.0
@@ -891,9 +952,17 @@ def replay_single_day(
 
                 if sig_dir in ("BUY", "SELL") and px > 0:
                     is_b = sig_dir == "BUY"
+                    if hi4b is not None and lo4b is not None:
+                        fav4b = (hi4b - px) if is_b else (px - lo4b)
+                        adv4b = (px - lo4b) if is_b else (hi4b - px)
                     if hi30 is not None and lo30 is not None:
                         fav30 = (hi30 - px) if is_b else (px - lo30)
                         adv30 = (px - lo30) if is_b else (hi30 - px)
+                    signed_4b = [
+                        ((pf - px) if is_b else (px - pf)) if pf is not None else None
+                        for pf in (pb1, pb2, pb3, pb4)
+                    ]
+                    trick_code, trick_lbl = ins.classify_market_trick(sig_dir, signed_4b)
 
                     # 1) Fixed benchmark SL/TP ruler
                     sl_fix = (px - sl_mult * atr_const) if is_b else (px + sl_mult * atr_const)
@@ -921,7 +990,7 @@ def replay_single_day(
                         tr10_out, tr10_pts = "VG_SKIP", 0.0
 
                     # 3) Bookmark #8 check on Shooting GO / A2 cycles: 1.80 fixed vs 1.0xATR floor
-                    if shot_act == "GO" or "AGGRESSIVE" in shot_style.upper():
+                    if shot_act == "GO" or "AGGRESSIVE" in shot_style.upper() or shot_a2_burst:
                         d18 = 1.80
                         _, a2_fix_pts = _walk_bracket(
                             bar_keys, walk_bars, tc_ep, sig_dir, px,
@@ -965,8 +1034,13 @@ def replay_single_day(
                     "shot_action": shot_act,
                     "shot_style": shot_style,
                     "shot_reason": shot_why,
+                    "shot_a2_burst": shot_a2_burst,
                     "gate_stage": gate_stage,
                     "active_votes": active_votes,
+                    "pb1": pb1, "pb2": pb2, "pb3": pb3, "pb4": pb4,
+                    "signed_4b": signed_4b,
+                    "fav4b": fav4b, "adv4b": adv4b,
+                    "trick_code": trick_code, "trick_label": trick_lbl,
                     "p5": p5, "p15": p15, "p30": p30,
                     "fav30": fav30, "adv30": adv30,
                     "fix_out": fix_out, "fix_pts": fix_pts,
@@ -993,6 +1067,8 @@ def replay_single_day(
         "day": day_str,
         "ok": True,
         "instrument": dominant_inst,
+        "timeframe": tf_label,
+        "tf_horizons": [h1, h2, h3, h4],
         "prints": day_prints,
         "raw_tick_rows": raw_tick_rows,
         "mbo_streamed": mbo_streamed,
@@ -1008,11 +1084,22 @@ def replay_single_day(
     }
 
 
+def _replay_worker(task: Tuple[str, str, str, int, str]) -> Dict[str, Any]:
+    """Top-level multiprocessing worker for parallel multi-day replay."""
+    day_s, root_s, data_s, every_s, win_s = task
+    return replay_single_day(
+        day_s, root_dir=Path(root_s), data_dir=Path(data_s), every_s=every_s, window_str=win_s
+    )
+
+
 # --------------------------------------------------------------------------- #
 # HTML Builder 1: Single-Day "Every decision" Page (Current Version on Raw Data)
 # --------------------------------------------------------------------------- #
 def build_day_decisions_html(res: Dict[str, Any]) -> str:
     day_str = res["day"]
+    tf_lbl = str(res.get("timeframe") or "M3")
+    h_list = list(res.get("tf_horizons") or [3, 6, 9, 12])
+    h1, h2, h3, h4 = h_list[0], h_list[1], h_list[2], h_list[3]
     cycles = [c for c in res["cycles"] if not c.get("error")]
     cards: List[str] = []
 
@@ -1020,7 +1107,12 @@ def build_day_decisions_html(res: Dict[str, Any]) -> str:
         d = c["direction"]
         conf = c["confidence"]
         px = c["price"]
-        p5, p15, p30 = c["p5"], c["p15"], c["p30"]
+        pb1 = c.get("pb1")
+        pb2 = c.get("pb2")
+        pb3 = c.get("pb3")
+        pb4 = c.get("pb4")
+        t_code = str(c.get("trick_code") or "NO_SIGNAL")
+        t_lbl = str(c.get("trick_label") or "-")
         is_sig = d in ("BUY", "SELL")
         is_c35 = is_sig and conf >= res["conf_threshold"]
         is_c65 = is_sig and conf >= 65.0
@@ -1038,6 +1130,10 @@ def build_day_decisions_html(res: Dict[str, Any]) -> str:
             tags.append("pw")
         if is_go:
             tags.append("go")
+        if t_code == "FAKEOUT_WIN":
+            tags.append("shake")
+        if t_code == "TRAP_REVERSAL":
+            tags.append("trap")
 
         pill_cls = "ok" if is_go else ("warn" if is_c35 else "")
         d_cls = "up" if d == "BUY" else ("dn" if d == "SELL" else "q")
@@ -1057,7 +1153,7 @@ def build_day_decisions_html(res: Dict[str, Any]) -> str:
     <span class="num">px {_fmt(px, 2)}</span>
     <span class="num">conf {_fmt(conf, 1)}%</span>
     <span class="num">POWER {_esc(c['power_dir'])} ({_esc(c['power_regime'])})</span>
-    <span class="num">+15m {_fmt((p15 - px) if (p15 and px) else None, 2, True)}</span>
+    <span class="num">+{h4}m {_fmt((pb4 - px) if (pb4 and px) else None, 2, True)}</span>
     <span class="num">SL/TP {_esc(c['fix_out'])} {_fmt(c['fix_pts'], 2, True) if is_sig else '-'}</span>
   </div>
   <div class="body">
@@ -1075,12 +1171,14 @@ def build_day_decisions_html(res: Dict[str, Any]) -> str:
       <div><h4>Current Active Panel ({len(c['active_votes'])} active votes, 0 retired)</h4>
         <table><tr><th>judge</th><th>vote</th><th>w</th><th>raw reason</th></tr>{jrows}</table>
       </div>
-      <div><h4>What Happened Next (Real Future Tape)</h4>
+      <div><h4>What Happened Next ({_esc(tf_lbl)} 1-4 Bars Real Tape)</h4>
         <table>
-          <tr><td>+5 min</td><td>{_fmt(p5, 2)}</td><td>{_fmt((p5 - px) if (p5 and px) else None, 2, True)}</td></tr>
-          <tr><td>+15 min</td><td>{_fmt(p15, 2)}</td><td>{_fmt((p15 - px) if (p15 and px) else None, 2, True)}</td></tr>
-          <tr><td>+30 min</td><td>{_fmt(p30, 2)}</td><td>{_fmt((p30 - px) if (p30 and px) else None, 2, True)}</td></tr>
-          <tr><td>30m in favour / against</td><td colspan="2">{_fmt(c['fav30'], 2)} / {_fmt(c['adv30'], 2)}</td></tr>
+          <tr><td>+{h1} min (1b)</td><td>{_fmt(pb1, 2)}</td><td>{_fmt((pb1 - px) if (pb1 and px) else None, 2, True)}</td></tr>
+          <tr><td>+{h2} min (2b)</td><td>{_fmt(pb2, 2)}</td><td>{_fmt((pb2 - px) if (pb2 and px) else None, 2, True)}</td></tr>
+          <tr><td>+{h3} min (3b)</td><td>{_fmt(pb3, 2)}</td><td>{_fmt((pb3 - px) if (pb3 and px) else None, 2, True)}</td></tr>
+          <tr><td>+{h4} min (4b)</td><td>{_fmt(pb4, 2)}</td><td>{_fmt((pb4 - px) if (pb4 and px) else None, 2, True)}</td></tr>
+          <tr><td>{h4}m in favour / against</td><td colspan="2">{_fmt(c.get('fav4b'), 2)} / {_fmt(c.get('adv4b'), 2)}</td></tr>
+          <tr><td>Market Trick Check</td><td colspan="2">{_esc(t_lbl)}</td></tr>
           <tr><td>Fixed SL/TP (180m)</td><td>{_esc(c['fix_out'])}</td><td>{_fmt(c['fix_pts'], 2, True) if is_sig else '-'}</td></tr>
           <tr><td>C3 Wall + 0.5xATR Trail</td><td>{_esc(c['c3_out'])}</td><td>{_fmt(c['c3_pts'], 2, True) if is_sig else '-'}</td></tr>
           <tr><td>Wall + 1.0xATR Trail</td><td>{_esc(c['tr10_out'])}</td><td>{_fmt(c['tr10_pts'], 2, True) if is_sig else '-'}</td></tr>
@@ -1098,6 +1196,8 @@ def build_day_decisions_html(res: Dict[str, Any]) -> str:
   <button onclick="flt('c65')" style="cursor:pointer;padding:4px 10px;background:#21262d;color:#3fb950;border:1px solid #30363d;border-radius:6px">Conf &gt;= 65%</button>
   <button onclick="flt('pw')" style="cursor:pointer;padding:4px 10px;background:#21262d;color:#d2a8ff;border:1px solid #30363d;border-radius:6px">POWER Active</button>
   <button onclick="flt('go')" style="cursor:pointer;padding:4px 10px;background:#21262d;color:#3fb950;border:1px solid #3fb950;border-radius:6px">Shooting GO</button>
+  <button onclick="flt('shake')" style="cursor:pointer;padding:4px 10px;background:#21262d;color:#f0883e;border:1px solid #30363d;border-radius:6px">Shakeout-&gt;Win</button>
+  <button onclick="flt('trap')" style="cursor:pointer;padding:4px 10px;background:#21262d;color:#f85149;border:1px solid #30363d;border-radius:6px">Bait Traps</button>
 </div>
 <script>
 function flt(tag){
@@ -1109,7 +1209,7 @@ function flt(tag){
 </script>
 """
     head = (
-        f"{day_str} ({res['day_type']}, net {res['day_net']:+.1f} / range {res['day_range']:.1f} pts) — "
+        f"{day_str} ({res['day_type']}, {tf_lbl} +{h1}/+{h2}/+{h3}/+{h4}m, net {res['day_net']:+.1f} / range {res['day_range']:.1f} pts) — "
         f"{len(cycles)} cycles replayed on CURRENT app version from {res['prints']:,} raw prints & "
         f"{res['mbo_streamed']:,} raw MBO events (Law #8)"
     )
@@ -1134,10 +1234,24 @@ def synthesize_multi_day(results: List[Dict[str, Any]]) -> Tuple[str, str, Dict[
         return msg, ins._page("Current-Version Raw Replay", "No data", f"<p>{_esc(msg)}</p>"), {"days": 0}
 
     conf_thr = ok_days[-1]["conf_threshold"]
+    tf_lbl = str(ok_days[-1].get("timeframe") or "M3")
+    h_list = list(ok_days[-1].get("tf_horizons") or [3, 6, 9, 12])
+    h1, h2, h3, h4 = h_list[0], h_list[1], h_list[2], h_list[3]
 
     def _new_bucket() -> Dict[str, Any]:
         return {"n": 0, "tp": 0, "sl": 0, "to": 0, "fix_pts": 0.0, "c3_pts": 0.0, "c3_n": 0,
-                "tr10_pts": 0.0, "m15_hit": 0, "m15_n": 0, "m15_pts": 0.0}
+                "tr10_pts": 0.0, "b4_hit": 0, "b4_n": 0, "b4_pts": 0.0}
+
+    def _new_trick_bucket() -> Dict[str, Any]:
+        return {
+            "n": 0,
+            "m": [[], [], [], []],
+            "CLEAN_FOLLOW": 0,
+            "FAKEOUT_WIN": 0,
+            "TRAP_REVERSAL": 0,
+            "CLEAN_AGAINST": 0,
+            "FLAT_CHOP": 0,
+        }
 
     by_gate = defaultdict(_new_bucket)
     by_conf = defaultdict(_new_bucket)
@@ -1145,9 +1259,10 @@ def synthesize_multi_day(results: List[Dict[str, Any]]) -> Tuple[str, str, Dict[
     by_dir_reg = defaultdict(_new_bucket)
     by_hour = defaultdict(_new_bucket)
     by_fams = defaultdict(_new_bucket)
+    by_trick_lens = defaultdict(_new_trick_bucket)
     judge_tot = defaultdict(lambda: {"days": 0, "pos_days": 0, "calls": 0, "scored": 0, "hits": 0, "pts": 0.0, "w": 0.0})
 
-    a2_bm8 = {"n": 0, "fix18_pts": 0.0, "atr10_pts": 0.0}
+    a2_bm8 = {"n": 0, "go_n": 0, "fix18_pts": 0.0, "atr10_pts": 0.0}
     total_cycles = 0
     total_signals = 0
 
@@ -1166,12 +1281,24 @@ def synthesize_multi_day(results: List[Dict[str, Any]]) -> Tuple[str, str, Dict[
             b["c3_n"] += 1
             b["c3_pts"] += c["c3_pts"]
             b["tr10_pts"] += c["tr10_pts"]
-        if c["p15"] is not None and c["price"] > 0:
-            mv15 = (c["p15"] - c["price"]) if c["direction"] == "BUY" else (c["price"] - c["p15"])
-            b["m15_n"] += 1
-            b["m15_pts"] += mv15
-            if mv15 > 0:
-                b["m15_hit"] += 1
+        pb4 = c.get("pb4")
+        if pb4 is not None and c["price"] > 0:
+            mv4 = (pb4 - c["price"]) if c["direction"] == "BUY" else (c["price"] - pb4)
+            b["b4_n"] += 1
+            b["b4_pts"] += mv4
+            if mv4 > 0:
+                b["b4_hit"] += 1
+
+    def _acc_trick(tb: Dict[str, Any], c: Dict[str, Any]) -> None:
+        tc_code = str(c.get("trick_code") or "")
+        if tc_code not in ("CLEAN_FOLLOW", "FAKEOUT_WIN", "TRAP_REVERSAL", "CLEAN_AGAINST", "FLAT_CHOP"):
+            return
+        tb["n"] += 1
+        tb[tc_code] += 1
+        s4 = c.get("signed_4b") or [None, None, None, None]
+        for idx_b in range(min(4, len(s4))):
+            if s4[idx_b] is not None:
+                tb["m"][idx_b].append(float(s4[idx_b]))
 
     for r in ok_days:
         for j, jst in r["judge_stats"].items():
@@ -1204,19 +1331,36 @@ def synthesize_multi_day(results: List[Dict[str, Any]]) -> Tuple[str, str, Dict[
             _acc_bucket(by_hour[c["buda_hour"]], c)
             _acc_bucket(by_fams[fam_k], c)
 
+            _acc_trick(by_trick_lens["ALL DIRECTIONAL SIGNALS"], c)
+            if c["shot_action"] == "GO":
+                _acc_trick(by_trick_lens["TAKEN / SHOOTING GO"], c)
+            else:
+                if conf < conf_thr:
+                    _acc_trick(by_trick_lens[f"SKIPPED: Conf < {conf_thr:.0f}%"], c)
+                else:
+                    _acc_trick(by_trick_lens["SKIPPED: Conf>=Thr but Shooting=WAIT"], c)
+            if conf >= 65.0:
+                _acc_trick(by_trick_lens["HIGH CONVICTION (Conf >= 65%)"], c)
+            _acc_trick(by_trick_lens[f"REGIME: {c['regime']}"], c)
+
             if c["a2_fix_pts"] is not None and c["a2_atr_pts"] is not None:
                 a2_bm8["n"] += 1
+                if c["shot_action"] == "GO":
+                    a2_bm8["go_n"] += 1
                 a2_bm8["fix18_pts"] += c["a2_fix_pts"]
                 a2_bm8["atr10_pts"] += c["a2_atr_pts"]
 
     # Build shareable plain-text report
     lines: List[str] = []
-    lines.append("=" * 100)
+    lines.append("=" * 108)
     lines.append(" LAW #8 CURRENT-VERSION RAW-DATA REPLAY & DIAGNOSTIC REPORT")
     lines.append(f" Generated: {datetime.now(BUDA_TZ):%Y-%m-%d %H:%M:%S %Z} | Days: {len(ok_days)} ({ok_days[0]['day']} .. {ok_days[-1]['day']})")
-    lines.append(f" Total Replayed Cycles: {total_cycles:,} | Signals: {total_signals:,} | Active Conf Threshold: {conf_thr:.0f}%")
+    lines.append(
+        f" Total Replayed Cycles: {total_cycles:,} | Signals: {total_signals:,} | "
+        f"Conf Threshold: {conf_thr:.0f}% | Active Chart Setup: {tf_lbl} (+{h1}/+{h2}/+{h3}/+{h4}m)"
+    )
     lines.append(" Zero old decisions/reports trusted -- 100% computed fresh from raw ticks + raw mbo on CURRENT code.")
-    lines.append("=" * 100)
+    lines.append("=" * 108)
 
     lines.append("\n[1] DAY-BY-DAY RAW REPLAY RECEIPT")
     lines.append(f"  {'DATE':<12} {'TYPE':<11} {'PRINTS':>8} {'MBO_EV':>9} {'RANGE':>6} {'NET':>7} {'CYC':>5} {'SIG>=' + str(int(conf_thr)):>8} {'FIX_PTS(>=' + str(int(conf_thr)) + ')':>14} {'C3_TRAIL':>10} {'SEC':>5}")
@@ -1231,9 +1375,11 @@ def synthesize_multi_day(results: List[Dict[str, Any]]) -> Tuple[str, str, Dict[
             f"{len(c35_rows):>8} {f_pts:>+14.1f} {c3_pts:>+10.1f} {r['elapsed_s']:>4.1f}s"
         )
 
+    b4_col_hdr = f"+{h4}m%"
+
     def _fmt_bucket_table(title: str, mapping: Dict[Any, Dict[str, Any]], key_order: Optional[Sequence[Any]] = None) -> None:
         lines.append(f"\n{title}")
-        lines.append(f"  {'BUCKET':<42} {'N':>5} {'TP/SL':>9} {'WR%':>6} {'+15m%':>6} {'FIX_PTS':>9} {'PTS/SIG':>8} {'C3_0.5A':>9} {'TR_1.0A':>9}")
+        lines.append(f"  {'BUCKET':<42} {'N':>5} {'TP/SL':>9} {'WR%':>6} {b4_col_hdr:>6} {'FIX_PTS':>9} {'PTS/SIG':>8} {'C3_0.5A':>9} {'TR_1.0A':>9}")
         lines.append("  " + "-" * 108)
         keys = key_order if key_order is not None else [k for k, _ in sorted(mapping.items(), key=lambda kv: -kv[1]["n"])]
         for k in keys:
@@ -1242,10 +1388,10 @@ def synthesize_multi_day(results: List[Dict[str, Any]]) -> Tuple[str, str, Dict[
             b = mapping[k]
             denom = b["tp"] + b["sl"]
             wr = (100.0 * b["tp"] / denom) if denom else 0.0
-            m15p = (100.0 * b["m15_hit"] / b["m15_n"]) if b["m15_n"] else 0.0
+            b4p = (100.0 * b["b4_hit"] / b["b4_n"]) if b["b4_n"] else 0.0
             tp_sl_str = f"{b['tp']}/{b['sl']}"
             lines.append(
-                f"  {str(k):<42} {b['n']:>5} {tp_sl_str:>9} {wr:>5.1f}% {m15p:>5.1f}% "
+                f"  {str(k):<42} {b['n']:>5} {tp_sl_str:>9} {wr:>5.1f}% {b4p:>5.1f}% "
                 f"{b['fix_pts']:>+9.1f} {b['fix_pts']/b['n']:>+8.2f} {b['c3_pts']:>+9.1f} {b['tr10_pts']:>+9.1f}"
             )
 
@@ -1270,8 +1416,46 @@ def synthesize_multi_day(results: List[Dict[str, Any]]) -> Tuple[str, str, Dict[
 
     if a2_bm8["n"] > 0:
         lines.append(
-            f"\n[8] BOOKMARK #8 SPRINT STOP CHECK (N={a2_bm8['n']} Shooting GO / Aggressive cycles): "
+            f"\n[8] BOOKMARK #8 SPRINT STOP CHECK (N={a2_bm8['n']} cycles, Shooting GO={a2_bm8['go_n']}): "
             f"Fixed 1.80/1.80 = {a2_bm8['fix18_pts']:+.1f} pts vs max(1.80, 1.0xATR) = {a2_bm8['atr10_pts']:+.1f} pts"
+        )
+    else:
+        lines.append(
+            "\n[8] BOOKMARK #8 SPRINT STOP CHECK: 0 Shooting GO / A2 cycles fired on this sample."
+        )
+
+    # [9] Stage 1: Timeframe-linked 1..4-bar path & Market Trick Detector
+    lines.append(
+        f"\n[9] {tf_lbl} BAR-BY-BAR PATH & MARKET TRICK DETECTOR "
+        f"(+{h1}m / +{h2}m / +{h3}m / +{h4}m = 1x..4x {tf_lbl})"
+    )
+    h1_c, h2_c, h3_c, h4_c = f"+{h1}m(1b)", f"+{h2}m(2b)", f"+{h3}m(3b)", f"+{h4}m(4b)"
+    lines.append(
+        f"  {'LENS':<36} {'N':>5} {h1_c:>9} {h2_c:>9} {h3_c:>9} {h4_c:>9} "
+        f"{'FOLLOW':>7} {'SHAKE->W':>8} {'TRAP->L':>8} {'AGAINST':>8}"
+    )
+    lines.append("  " + "-" * 116)
+    trick_order = [
+        "ALL DIRECTIONAL SIGNALS",
+        "TAKEN / SHOOTING GO",
+        "HIGH CONVICTION (Conf >= 65%)",
+        "SKIPPED: Conf>=Thr but Shooting=WAIT",
+        f"SKIPPED: Conf < {conf_thr:.0f}%",
+        "REGIME: TREND",
+        "REGIME: RANGE",
+        "REGIME: NEUTRAL",
+    ]
+    for tk in trick_order:
+        tb = by_trick_lens.get(tk)
+        if not tb or tb["n"] == 0:
+            continue
+        avgs = []
+        for idx_b in range(4):
+            arr = tb["m"][idx_b]
+            avgs.append(f"{(sum(arr)/len(arr)):+.2f}" if arr else "   -   ")
+        lines.append(
+            f"  {tk:<36} {tb['n']:>5} {avgs[0]:>9} {avgs[1]:>9} {avgs[2]:>9} {avgs[3]:>9} "
+            f"{tb['CLEAN_FOLLOW']:>7} {tb['FAKEOUT_WIN']:>8} {tb['TRAP_REVERSAL']:>8} {tb['CLEAN_AGAINST']:>8}"
         )
 
     # Automatic Strengths & Weaknesses Finder
@@ -1293,7 +1477,7 @@ def synthesize_multi_day(results: List[Dict[str, Any]]) -> Tuple[str, str, Dict[
             elif ppc <= -0.50:
                 weaknesses.append(f"Judge [{j}]: {jt['scored']} calls, {100.0*jt['hits']/jt['scored']:.1f}% right, {jt['pts']:+.1f} pts ({ppc:+.2f}/call)")
 
-    lines.append("\n[9] AUTO-DETECTED CURRENT-VERSION STRENGTHS & WEAKNESSES")
+    lines.append("\n[10] AUTO-DETECTED CURRENT-VERSION STRENGTHS & WEAKNESSES")
     lines.append("  STRONGEST PARTS:")
     for s in (strengths[:8] or ["(run across more raw tape days for >=5-signal buckets)"]):
         lines.append(f"    + {s}")
@@ -1326,6 +1510,8 @@ def synthesize_multi_day(results: List[Dict[str, Any]]) -> Tuple[str, str, Dict[
         "total_cycles": total_cycles,
         "total_signals": total_signals,
         "day_list": [r["day"] for r in ok_days],
+        "timeframe": tf_lbl,
+        "tf_horizons": [h1, h2, h3, h4],
     }
     return txt_report, html_report, summary_meta
 
@@ -1342,6 +1528,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--days", type=int, default=11, help="Auto-discover last N raw-data days (default: 11)")
     ap.add_argument("--every", type=int, default=60, help="Seconds between evaluation cycles (default: 60)")
     ap.add_argument("--window", default="08:00-23:00", help="Budapest local window (default: 08:00-23:00)")
+    ap.add_argument("--workers", type=int, default=0, help="Parallel worker processes across days (0=auto up to 3, 1=sequential)")
     ap.add_argument("--root-dir", default=str(ROOT), help="Project root directory")
     ap.add_argument("--data-dir", default=None, help="Data/output directory (default: <root>/data)")
     ap.add_argument("--no-browser", action="store_true", help="Do not auto-open HTML report in browser")
@@ -1362,13 +1549,38 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f"[fail] No raw ticks files found in {root_dir} or {data_dir}.")
         return 1
 
-    print(f"[Law #8 Raw Replay] Replaying {len(target_days)} day(s) on CURRENT app version: {', '.join(target_days)}")
+    every_s = max(10, int(args.every))
+    req_workers = int(args.workers)
+    if req_workers <= 0:
+        # Auto-parallelize multi-day runs on real repo runs; keep custom test fixtures sequential unless requested
+        is_default_repo = (root_dir == ROOT.resolve())
+        n_workers = min(3, len(target_days), os.cpu_count() or 1) if (is_default_repo and len(target_days) >= 2) else 1
+    else:
+        n_workers = max(1, min(req_workers, len(target_days)))
+
+    print(
+        f"[Law #8 Raw Replay] Replaying {len(target_days)} day(s) on CURRENT app version "
+        f"(workers={n_workers}): {', '.join(target_days)}"
+    )
     results: List[Dict[str, Any]] = []
-    for d in target_days:
-        res = replay_single_day(
-            d, root_dir=root_dir, data_dir=data_dir, every_s=max(10, int(args.every)), window_str=args.window
-        )
-        results.append(res)
+    if n_workers > 1 and len(target_days) > 1:
+        tasks = [(d, str(root_dir), str(data_dir), every_s, args.window) for d in target_days]
+        try:
+            with concurrent.futures.ProcessPoolExecutor(max_workers=n_workers) as pool:
+                results = list(pool.map(_replay_worker, tasks))
+        except Exception:
+            results = [
+                replay_single_day(d, root_dir=root_dir, data_dir=data_dir, every_s=every_s, window_str=args.window)
+                for d in target_days
+            ]
+    else:
+        for d in target_days:
+            results.append(
+                replay_single_day(d, root_dir=root_dir, data_dir=data_dir, every_s=every_s, window_str=args.window)
+            )
+
+    for res in results:
+        d = res["day"]
         if res.get("ok"):
             day_html = build_day_decisions_html(res)
             out_day_html = data_dir / f"current_version_decisions_{d}.html"

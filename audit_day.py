@@ -2073,6 +2073,103 @@ def test_7_what_if(day, ticks, decisions, log_path):
                        "numbers are descriptive, not a recommendation to change the configured gate")
         else:
             why.append("gate comparison is descriptive only; it does not authorize lowering or changing the execution threshold")
+
+    # Stage 1: Timeframe-linked 1..4-bar (+3/+6/+9/+12m on M3) path & market-trick check
+    import bisect as _bisect
+    bar_min = max(1, int(round(bar_seconds / 60.0)))
+    bar_horizons_min = [bar_min, 2 * bar_min, 3 * bar_min, 4 * bar_min]
+    t_pairs = []
+    for _dt_t, _px_t, _sz_t in ticks:
+        if isinstance(_dt_t, datetime):
+            _u_dt = _dt_t if _dt_t.tzinfo else _dt_t.replace(tzinfo=timezone.utc)
+            try:
+                _ep_t = _u_dt.timestamp()
+                _pv_t = float(_px_t)
+                if math.isfinite(_ep_t) and math.isfinite(_pv_t) and _pv_t > 0:
+                    t_pairs.append((_ep_t, _pv_t))
+            except (TypeError, ValueError, OverflowError, OSError):
+                continue
+    t_pairs.sort(key=lambda x: x[0])
+    t_eps = [x[0] for x in t_pairs]
+    tol_s = max(90.0, bar_seconds * 0.75)
+
+    def _px_after_ep(when_ep, mins):
+        target = when_ep + mins * 60.0
+        idx = _bisect.bisect_left(t_eps, target)
+        best_p = best_d = None
+        for ci in (idx - 1, idx):
+            if 0 <= ci < len(t_pairs):
+                dd = abs(t_pairs[ci][0] - target)
+                if best_d is None or dd < best_d:
+                    best_d, best_p = dd, t_pairs[ci][1]
+        return best_p if (best_d is not None and best_d <= tol_s) else None
+
+    def _classify_path(mv_list, db=0.30):
+        vals = [x for x in mv_list if x is not None]
+        if len(vals) < 2:
+            return "NO_TAPE"
+        m1, early, end = vals[0], vals[:2], vals[-1]
+        if min(early) <= -db and end >= db:
+            return "FAKEOUT_WIN"
+        if max(early) >= db and end <= -db:
+            return "TRAP_REVERSAL"
+        if m1 > 0 and end >= db and min(early) > -db:
+            return "CLEAN_FOLLOW"
+        if m1 <= 0 and end <= -db and max(early) < db:
+            return "CLEAN_AGAINST"
+        return "FLAT_CHOP"
+
+    step_moves = {hm: [] for hm in bar_horizons_min}
+    trick_all = Counter()
+    trick_skipped = Counter()
+    for decision in cands:
+        d_dt = decision.get("_dt")
+        if not isinstance(d_dt, datetime):
+            continue
+        d_ep = (d_dt if d_dt.tzinfo else d_dt.replace(tzinfo=timezone.utc)).timestamp()
+        d_px = _signal_price(decision)
+        is_buy_d = decision["signal_direction"].upper() == "BUY"
+        mvs = []
+        for hm in bar_horizons_min:
+            pfut = _px_after_ep(d_ep, hm)
+            mv = ((pfut - d_px) if is_buy_d else (d_px - pfut)) if pfut is not None else None
+            if mv is not None:
+                step_moves[hm].append(mv)
+            mvs.append(mv)
+        tc = _classify_path(mvs)
+        if tc != "NO_TAPE":
+            trick_all[tc] += 1
+            if str(decision.get("exec_status") or "").upper() != "EXECUTED":
+                trick_skipped[tc] += 1
+
+    h_lbls = "/".join(f"+{hm}m" for hm in bar_horizons_min)
+    step_parts = []
+    for bi, hm in enumerate(bar_horizons_min, 1):
+        arr = step_moves[hm]
+        if arr:
+            hit_p = 100.0 * sum(1 for v in arr if v > 0) / len(arr)
+            avg_v = sum(arr) / len(arr)
+            step_parts.append(f"+{hm}m ({bi}b): {avg_v:+.2f} pts ({hit_p:.0f}% right, n={len(arr)})")
+    if step_parts:
+        why.append(f"bar-by-bar {timeframe} path ({h_lbls}): " + " | ".join(step_parts))
+    if sum(trick_all.values()) > 0:
+        why.append(
+            f"market trick check (4x{timeframe}=+{bar_horizons_min[-1]}m): "
+            f"clean follow {trick_all['CLEAN_FOLLOW']} | "
+            f"shakeout->win {trick_all['FAKEOUT_WIN']} | "
+            f"bait trap->reversal {trick_all['TRAP_REVERSAL']} | "
+            f"straight against {trick_all['CLEAN_AGAINST']} | "
+            f"flat {trick_all['FLAT_CHOP']}"
+        )
+    if sum(trick_skipped.values()) > 0:
+        why.append(
+            f"skipped/unexecuted trick check (n={sum(trick_skipped.values())}): "
+            f"traps/against saved {trick_skipped['TRAP_REVERSAL'] + trick_skipped['CLEAN_AGAINST']} "
+            f"({trick_skipped['TRAP_REVERSAL']} bait traps + {trick_skipped['CLEAN_AGAINST']} straight against) vs "
+            f"missed winners {trick_skipped['CLEAN_FOLLOW'] + trick_skipped['FAKEOUT_WIN']} "
+            f"({trick_skipped['FAKEOUT_WIN']} after early shakeout)"
+        )
+
     grade = "PASS" if total > 0 and no_atr == 0 and no_forward == 0 else "WARN"
     r.add(grade, "WHAT-IF CHECK",
           "timeframe-aligned hypothetical replay (not actual P&L)", why)
@@ -2081,6 +2178,8 @@ def test_7_what_if(day, ticks, decisions, log_path):
                          "profit_factor": (round(pf, 2) if pf != float("inf") else 999.0),
                          "max_drawdown_pts": round(drawdown, 1),
                          "timeframe": timeframe, "bar_seconds": bar_seconds,
+                         "bar_horizons_min": bar_horizons_min,
+                         "market_tricks": dict(trick_all),
                          "max_hold_min": max_hold_min,
                          "effective_max_hold_min": round(effective_hold_min, 3),
                          "atr_method": "Wilder ATR(14)"}
@@ -5770,7 +5869,8 @@ def main(argv=None):
             print("[fail] the insight layer is missing - re-copy tools/insight.py from the kit")
             return 1
         series = _minute_prices(day)
-        text = ins.explain(day, args.explain, decisions, diary, series)
+        _exp_bs, _ = _audit_bar_seconds(day, _load_run_config(day))
+        text = ins.explain(day, args.explain, decisions, diary, series, bar_seconds=_exp_bs)
         print(text)
         out = DATA_DIR() / f"explain_{day:%Y-%m-%d}_{args.explain.replace(':', '')}.txt"
         try:
@@ -6090,7 +6190,10 @@ def main(argv=None):
                 series = _minute_prices(day)
                 if series:
                     dp = DATA_DIR() / f"decisions_{day:%Y-%m-%d}.html"
-                    _PAGE_PARTS["decisions"] = ins2.decisions_page(day, decisions, diary, series)
+                    _dec_bs, _ = _audit_bar_seconds(day, _load_run_config(day))
+                    _PAGE_PARTS["decisions"] = ins2.decisions_page(
+                        day, decisions, diary, series, bar_seconds=_dec_bs
+                    )
                     dp.write_text(_PAGE_PARTS["decisions"], encoding="utf-8")
                     print(f"[saved] {dp}   <- every decision with the panel behind it and what happened next")
                     outs, _op = _outcomes_for_day(day)
