@@ -5916,7 +5916,8 @@ def analyze_market(market_data: Dict[str, Any],
         judge_panel = []
         notes.append(f"judge panel error: {_je}")
 
-    # 2026-10-30 U-02: Family Independence Gate (shadow candidate by default; Law #5)
+    # 2026-10-30 U-02 -> 2026-11-02 Stage 3a: Family Independence Gate (Law #5: proven on 5-day M3
+    # raw replay: >=2 Agreeing Families = +580.0 FIX / +127.9 C3 / +169.9 TR vs <2 Families = -2,697.9 FIX)
     _fg_shadow_payload: Dict[str, Any] = {}
     try:
         from judge_families import family_gate as _family_gate_fn
@@ -5925,14 +5926,29 @@ def analyze_market(market_data: Dict[str, Any],
             judge_panel, direction, min_families=_fg_min,
             retired=getattr(config, "RETIRED_JUDGES", None),
         )
+        _fg_live = bool(getattr(config, "FAMILY_GATE_LIVE_ENABLED", False))
         _fg_shadow_payload = dict(_fg)
+        _fg_shadow_payload["raw_confidence"] = float(confidence)
+        _fg_shadow_payload["live_capped"] = False
         notes.append(
-            f"FAMILY_GATE shadow={'PASS' if _fg.get('ok') else 'FAIL'} "
+            f"FAMILY_GATE {'live' if _fg_live else 'shadow'}={'PASS' if _fg.get('ok') else 'FAIL'} "
             f"agree={len(_fg.get('agree_families') or [])}/{_fg_min} "
             f"families={','.join(_fg.get('agree_families') or []) or 'none'}"
         )
-        if bool(getattr(config, "FAMILY_GATE_LIVE_ENABLED", False)) and not _fg.get("ok", True):
-            confidence = min(confidence, max(0.0, float(getattr(config, "CONFIDENCE_THRESHOLD", 55.0)) - 5.0))
+        if _fg_live and direction in ("BUY", "SELL") and not _fg.get("ok", True):
+            _thr_cfg = getattr(config, "CONFIDENCE_THRESHOLD", None)
+            if _thr_cfg is None or isinstance(_thr_cfg, bool):
+                _thr_cfg = getattr(config, "AI_CONFIDENCE_THRESHOLD", 70.0)
+            _cap_conf = max(0.0, min(float(_thr_cfg) - 5.0, 30.0))
+            if confidence > _cap_conf:
+                _pre_fg_conf = confidence
+                confidence = round(_cap_conf, 2)
+                _fg_shadow_payload["live_capped"] = True
+                notes.append(
+                    f"FAMILY_GATE live cap: <{_fg_min} agreeing families "
+                    f"({','.join(_fg.get('agree_families') or []) or 'none'}) -> "
+                    f"confidence {_pre_fg_conf:.1f}%->{confidence:.1f}%"
+                )
     except Exception:
         pass
 

@@ -1886,6 +1886,14 @@ def _shooting_execution_gate(decision, snapshot):
         return False, (
             f"decision confidence {_live_confidence:.1f} is below owner-configured "
             f"threshold {_live_threshold:.1f}")
+    if bool(getattr(config, "FAMILY_GATE_LIVE_ENABLED", False)):
+        _fg_gate = (getattr(snapshot, "shadow_candidates", None) or {}).get("family_gate")
+        if isinstance(_fg_gate, dict) and _fg_gate.get("ok") is False:
+            _fg_ag = len(_fg_gate.get("agree_families") or [])
+            _fg_req = int(_fg_gate.get("min_families", getattr(config, "FAMILY_GATE_MIN_FAMILIES", 2)) or 2)
+            return False, (
+                f"Family Independence Gate failed ({_fg_ag}/{_fg_req} agreeing families)"
+            )
     plan = getattr(snapshot, "shot", None) or {}
     power = getattr(snapshot, "power", None) or {}
     if not isinstance(plan, dict):

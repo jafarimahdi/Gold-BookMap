@@ -467,7 +467,8 @@ def _refresh() -> None:
     g["A2_ALLOW_NEUTRAL_PANEL"] = _fget("A2_ALLOW_NEUTRAL_PANEL", "0") == "1"
     g["LEGACY_GHOST_VOTES_ENABLED"] = _fget("LEGACY_GHOST_VOTES_ENABLED", "0") == "1"
     g["FAMILY_GATE_SHADOW_ENABLED"] = _fget("FAMILY_GATE_SHADOW_ENABLED", "1") == "1"
-    g["FAMILY_GATE_LIVE_ENABLED"] = _fget("FAMILY_GATE_LIVE_ENABLED", "0") == "1"
+    g["FAMILY_GATE_LIVE_ENABLED"] = _fget("FAMILY_GATE_LIVE_ENABLED", "1") == "1"
+    g["FAMILY_GATE_MIN_FAMILIES"] = max(1, _fint("FAMILY_GATE_MIN_FAMILIES", 2))
     g["L3_NEAR_TOUCH_USD"] = max(0.5, _ffloat("L3_NEAR_TOUCH_USD", 2.50))
     g["QUEUE_FLOW_WINDOW_SECONDS"] = max(5.0, _ffloat("QUEUE_FLOW_WINDOW_SECONDS", 30.0))
     g["BOOK_PROBE_TILT"] = max(0.05, min(0.50, _ffloat("BOOK_PROBE_TILT", 0.12)))

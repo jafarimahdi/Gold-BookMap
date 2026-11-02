@@ -215,8 +215,12 @@ def _observe_passive_road_sample(signal_map: Any, power: Any, price: Any,
     if not valid_roads:
         return
 
-    now = time.time()
+    now = _epoch(ctx.get("now")) or time.time()
     window = max(300.0, _cfg(config, "SHOOT_ROAD_HISTORY_SECONDS", 2700.0))
+    if _ROAD_HISTORY and _ROAD_HISTORY[-1][0] > now + 60.0:
+        reanchored = [(now - 1.0, v) for _, v in _ROAD_HISTORY]
+        _ROAD_HISTORY.clear()
+        _ROAD_HISTORY.extend(reanchored)
     while _ROAD_HISTORY and now - _ROAD_HISTORY[0][0] > window:
         _ROAD_HISTORY.popleft()
     min_gap = max(0.0, _cfg(config, "SHOOT_ROAD_PASSIVE_SAMPLE_GAP_SECONDS", 5.0))
@@ -225,10 +229,14 @@ def _observe_passive_road_sample(signal_map: Any, power: Any, price: Any,
     _ROAD_HISTORY.append((now, sum(valid_roads) / len(valid_roads)))
 
 
-def _crowd_v2(door_size, road_lots, shot_lots, recent_volume, config):
+def _crowd_v2(door_size, road_lots, shot_lots, recent_volume, config, now=None):
     """Three Fair Questions.  Returns a verdict dict; every field is a receipt."""
-    now = time.time()
+    now = _epoch(now) or time.time()
     window = max(300.0, _cfg(config, "SHOOT_ROAD_HISTORY_SECONDS", 2700.0))
+    if _ROAD_HISTORY and _ROAD_HISTORY[-1][0] > now + 60.0:
+        reanchored = [(now - 1.0, v) for _, v in _ROAD_HISTORY]
+        _ROAD_HISTORY.clear()
+        _ROAD_HISTORY.extend(reanchored)
     while _ROAD_HISTORY and now - _ROAD_HISTORY[0][0] > window:
         _ROAD_HISTORY.popleft()
     if road_lots is not None and road_lots >= 0:
@@ -545,7 +553,8 @@ def plan_shot(signal_map: Dict[str, Any], power: Dict[str, Any],
     if shot_lots is None or shot_lots <= 0:
         shot_lots = _cfg(config, "LOT_SIZE", 1.0)
     crowd = _crowd_v2(target_size, road_lots, shot_lots,
-                      _num(ctx.get("recent_volume")), config)
+                      _num(ctx.get("recent_volume")), config,
+                      now=ctx.get("now"))
     road_ratio = (crowd["road_ratio"] if crowd["road_ratio"] is not None
                   else math.inf)
     if crowd["verdict"] != "PASS":

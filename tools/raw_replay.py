@@ -1406,8 +1406,16 @@ def _reset_step2_singletons() -> None:
     s2._PERSISTENT_L2_INSTRUMENT = None
     if hasattr(s2, "_A1_CACHE") and isinstance(s2._A1_CACHE, dict):
         s2._A1_CACHE.clear()
+    if hasattr(s2, "_A1_BAR_SERVICE_CACHE") and isinstance(s2._A1_BAR_SERVICE_CACHE, dict):
+        s2._A1_BAR_SERVICE_CACHE.clear()
     if hasattr(s2, "_POWER_STREAK_STATE") and isinstance(s2._POWER_STREAK_STATE, dict):
         s2._POWER_STREAK_STATE.update({"symbol": None, "direction": "NEITHER", "cycles": 0})
+    try:
+        import shooting_team as sh_mod
+        if hasattr(sh_mod, "_ROAD_HISTORY"):
+            sh_mod._ROAD_HISTORY.clear()
+    except Exception:
+        pass
     try:
         import signal_team as st_mod
         if hasattr(st_mod, "_BOOK"):
@@ -1766,11 +1774,14 @@ def replay_single_day(
                 fg = (getattr(snap, "shadow_candidates", None) or {}).get("family_gate") or {}
                 fg_ok = bool(fg.get("ok", False))
                 fg_fams = list(fg.get("agree_families") or [])
+                fg_live_capped = bool(fg.get("live_capped", False))
 
-                # Current-version gate classification (Step 2 -> Shooting -> Threshold)
+                # Current-version gate classification (Step 2 -> Family Gate -> Shooting -> Threshold)
                 pw_side = "BUY" if pw_dir == "UP" else ("SELL" if pw_dir == "DOWN" else "NEITHER")
                 if sig_dir not in ("BUY", "SELL"):
                     gate_stage = "NEUTRAL (no panel signal)"
+                elif sig_conf < conf_thr and fg_live_capped:
+                    gate_stage = "BLOCKED: <2 Families (Family Gate)"
                 elif sig_conf < conf_thr:
                     gate_stage = f"BLOCKED: Conf < {conf_thr:.0f}%"
                 elif shot_act == "GO":
@@ -2305,10 +2316,11 @@ def synthesize_multi_day(results: List[Dict[str, Any]]) -> Tuple[str, str, Dict[
 
             _acc_bucket(by_gate[c["gate_stage"]], c)
             _acc_bucket(by_conf[cb], c)
-            _acc_bucket(by_regime[f"{c['regime']} (Day:{r['day_type']})"], c)
-            _acc_bucket(by_dir_reg[f"{d} | {c['regime']}"], c)
-            _acc_bucket(by_hour[c["buda_hour"]], c)
             _acc_bucket(by_fams[fam_k], c)
+            if conf >= conf_thr:
+                _acc_bucket(by_regime[f"{c['regime']} (Day:{r['day_type']})"], c)
+                _acc_bucket(by_dir_reg[f"{d} | {c['regime']}"], c)
+                _acc_bucket(by_hour[c["buda_hour"]], c)
 
             _acc_trick(by_trick_lens["ALL DIRECTIONAL SIGNALS"], c)
             if c["shot_action"] == "GO":
@@ -2320,7 +2332,8 @@ def synthesize_multi_day(results: List[Dict[str, Any]]) -> Tuple[str, str, Dict[
                     _acc_trick(by_trick_lens["SKIPPED: Conf>=Thr but Shooting=WAIT"], c)
             if conf >= 65.0:
                 _acc_trick(by_trick_lens["HIGH CONVICTION (Conf >= 65%)"], c)
-            _acc_trick(by_trick_lens[f"REGIME: {c['regime']}"], c)
+            if conf >= conf_thr:
+                _acc_trick(by_trick_lens[f"REGIME: {c['regime']}"], c)
 
             if c["a2_fix_pts"] is not None and c["a2_atr_pts"] is not None:
                 a2_bm8["n"] += 1
@@ -2377,8 +2390,8 @@ def synthesize_multi_day(results: List[Dict[str, Any]]) -> Tuple[str, str, Dict[
     _fmt_bucket_table("[2] GATE WATERFALL (CURRENT VERSION)", by_gate)
     _fmt_bucket_table("[3] CONFIDENCE BUCKETS (CURRENT ACTIVE PANEL)", by_conf, ["<25%", "25-34%", "35-49%", "50-64%", ">=65%"])
     _fmt_bucket_table("[4] FAMILY INDEPENDENCE CHECK", by_fams)
-    _fmt_bucket_table("[5] DIRECTION x REGIME MATRIX", by_dir_reg)
-    _fmt_bucket_table("[6] BUDAPEST HOUR OF DAY (LOCAL CET/CEST)", {f"{h:02d}:00": by_hour[h] for h in sorted(by_hour)}, [f"{h:02d}:00" for h in sorted(by_hour)])
+    _fmt_bucket_table(f"[5] DIRECTION x REGIME MATRIX (ACTIONABLE Conf>={conf_thr:.0f}%)", by_dir_reg)
+    _fmt_bucket_table(f"[6] BUDAPEST HOUR OF DAY (LOCAL CET/CEST, Conf>={conf_thr:.0f}%)", {f"{h:02d}:00": by_hour[h] for h in sorted(by_hour)}, [f"{h:02d}:00" for h in sorted(by_hour)])
 
     jb1_hdr = f"+{h1}m(1b)"
     jb4_hdr = f"+{h4}m(4b)"

@@ -121,9 +121,9 @@ def test_u01_retired_judges_union_and_notes_preserved(monkeypatch):
 
 
 def test_u02_family_gate_shadow_default_and_v6_4teams_domain_partition(monkeypatch):
-    """U-02 + U-04: FAMILY_GATE is shadow-only by default; classical & V6_4TEAMS modes both work cleanly."""
+    """U-02 + Stage 3a + U-04: FAMILY_GATE promoted to live default after 5-day M3 proof; classical & V6_4TEAMS modes work cleanly."""
     assert config.FAMILY_GATE_SHADOW_ENABLED is True
-    assert config.FAMILY_GATE_LIVE_ENABLED is False
+    assert config.FAMILY_GATE_LIVE_ENABLED is True
     assert config.LEGACY_GHOST_VOTES_ENABLED is False
 
     eng = s2.SignalEngine()
