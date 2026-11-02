@@ -407,3 +407,67 @@ def test_stage5b_rig_memory_evening_gate_passes_12_of_12():
     res = subprocess.run([sys.executable, str(rig_path)], capture_output=True, text=True, check=False)
     assert res.returncode == 0, f"{res.stdout}\n{res.stderr}"
     assert "ALL PASS (12/12)" in res.stdout
+
+
+def test_stage_s1_a1_refresh_scout_uses_active_m3_candles_tf_for_atr_and_keeps_m3_doors(monkeypatch):
+    from datetime import datetime, timezone
+    import signal_team
+    import step2_market_analysis as s2
+
+    monkeypatch.setattr(config, "TIMEFRAME", "M3", raising=False)
+    monkeypatch.setattr(config, "A1_BASE_TF_MINUTES", 3, raising=False)
+    monkeypatch.setattr(config, "L3_WHALE_THRESHOLD", 10.0, raising=False)
+    signal_team._BOOK = None
+    try:
+        # Seed a real M3 outer whale door $16.00 above price (3.2x M3 ATR=5.0 -> inside 4*ATR=20.0 band,
+        # whereas under old M1 ATR=1.50 -> 10.7x ATR > 6.0*ATR eviction cutoff!).
+        book = signal_team.get_book()
+        l3_seed = SimpleNamespace(
+            order_book={"bids": [(3999.0, 8.0)], "asks": [(4016.0, 35.0), (4015.5, 5.0), (4016.5, 5.0)]},
+            spoof_levels={},
+            iceberg_levels={},
+            iceberg_meta={},
+            order_events=[],
+            large_order_events=1,
+            order_book_imbalance=-0.2,
+            ofi=-10.0,
+        )
+        smap0 = book.ingest(l3_seed, 4000.0, 5.0, config, spread=0.20)
+        assert any(abs(d["price"] - 4016.0) < 1e-6 for d in smap0["above"])
+
+        # Intra-bar A1 serve: `candles` are tight M1 bars (range=1.50), `candles_tf` are M3 bars (range=5.00)
+        m1_candles = {
+            "open": [4000.0] * 30,
+            "high": [4000.75] * 30,
+            "low": [3999.25] * 30,
+            "close": [4000.0] * 30,
+            "volume": [40.0] * 30,
+        }
+        m3_candles = {
+            "open": [4000.0] * 20,
+            "high": [4002.50] * 20,
+            "low": [3997.50] * 20,
+            "close": [4000.0] * 20,
+            "volume": [120.0] * 20,
+        }
+        served = SimpleNamespace(
+            timestamp=datetime(2026, 11, 3, 10, 4, 5, tzinfo=timezone.utc),
+            data_quality={},
+        )
+        md_srv = {
+            "symbol": "GCG6",
+            "candles": m1_candles,
+            "candles_is_m1": True,
+            "candles_tf": m3_candles,
+            "bid": 3999.9,
+            "ask": 4000.1,
+            "bid_depth": {3999.9: 8.0, 3999.0: 8.0},
+            "ask_depth": {4000.1: 8.0, 4015.5: 5.0, 4016.0: 35.0, 4016.5: 5.0},
+            "tick_data": [],
+            "order_events": [],
+        }
+        _notes, atr_live = s2._a1_refresh_scout(md_srv, served, 4000.0, 0.20)
+        assert atr_live >= 4.5, f"Expected M3 ATR (~5.0), got {atr_live}"
+        assert 4016.0 in signal_team.get_book().levels, "M3 outer door at 4016.0 must not be evicted by M1 ATR!"
+    finally:
+        signal_team._BOOK = None

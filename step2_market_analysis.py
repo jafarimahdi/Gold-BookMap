@@ -210,13 +210,32 @@ def _a1_refresh_scout(market_data, served, price, spread_now):
     signal engine) stays cached at bar cadence. Mirrors analyze_market's own
     constructions verbatim. Returns (scout_notes, atr_live)."""
     open_, high, low, close, vol = _extract_candles(market_data)
+    # Law #11 (Stage S1, 2026-11-02): Mirror analyze_market's exact separation between
+    # pure session M1 profile bars (`open_..vol` for VWAP/POC/VA and 60/240m HTF POC)
+    # and active chart-timeframe bars (`tf_open..tf_vol` = M3 `candles_tf`) for ATR
+    # and order_blocks so `:01`/`:02` intra-bar serves never shrink ATR to M1 (~-42%)
+    # or evict M3 Scout doors mid-bar.
+    active_tf_min = _active_base_tf_minutes()
+    tf_open, tf_high, tf_low, tf_close, tf_vol = open_, high, low, close, vol
+    tf_is_m1_fallback = False
+    raw_ctf = market_data.get("candles_tf")
+    if isinstance(raw_ctf, dict) and len(_as_array(raw_ctf.get("close", []))) >= 2:
+        tf_open, tf_high, tf_low, tf_close, tf_vol = _extract_candles({"candles": raw_ctf})
+    elif active_tf_min > 1 and len(close) >= 15 * active_tf_min:
+        tf_open, tf_high, tf_low, tf_close, tf_vol = _aggregate_m1(
+            open_, high, low, close, vol, active_tf_min
+        )
+    elif active_tf_min > 1 and bool(market_data.get("candles_is_m1")):
+        tf_is_m1_fallback = True
     ta = TechnicalAnalyzer()
     atr_live = 0.0
-    if len(close) >= 2:
-        atr_live = ta.compute_atr(high, low, close)
+    if len(tf_close) >= 2:
+        atr_live = ta.compute_atr(tf_high, tf_low, tf_close)
         if atr_live <= 0:
-            atr_live = float(np.mean(np.asarray(high, dtype=float) -
-                                     np.asarray(low, dtype=float)))
+            atr_live = float(np.mean(np.asarray(tf_high, dtype=float) -
+                                     np.asarray(tf_low, dtype=float)))
+        if tf_is_m1_fallback and atr_live > 0:
+            atr_live = float(atr_live * np.sqrt(float(active_tf_min)))
     tick_data = market_data.get("tick_data") or []
     now = served.timestamp
 
@@ -270,7 +289,7 @@ def _a1_refresh_scout(market_data, served, price, spread_now):
         ob_enabled = getattr(_cfg, "ORDER_BLOCKS_ENABLED", True)
     except ImportError:
         ob_enabled = True
-    order_blocks = _detect_order_blocks(high, low, close, open_) if ob_enabled else []
+    order_blocks = _detect_order_blocks(tf_high, tf_low, tf_close, tf_open) if ob_enabled else []
 
     # notebook: ingest then remembered doors then render (as in analyze_market)
     scout_notes = []
