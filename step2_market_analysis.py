@@ -3267,16 +3267,40 @@ class SignalEngine:
             elif tf_dir == "DOWN" and _may_vote("mtf"):
                 votes.append((-1.0, w_tf))
 
-        if mtf_trends:
-            summary = " ".join(f"{k}:{v}" for k, v in sorted(mtf_trends.items()))
-            notes.append(f"MTF {summary}")
-
-        # Institutional TREND seatbelt (Dalton 2013; Bouchaud et al. 2018):
-        # Short-horizon flow & mean-reversion judges must not fade a confirmed
-        # higher-timeframe TREND river. When mtf_trends/trend are neutral (e.g.
-        # standalone synthetic unit tests), _mtf_bias == 0 -> both sides allowed.
         _mtf_ups = sum(1 for v in mtf_trends.values() if v == "UP")
         _mtf_dns = sum(1 for v in mtf_trends.values() if v == "DOWN")
+        if mtf_trends:
+            summary = " ".join(f"{k}:{v}" for k, v in sorted(mtf_trends.items()))
+            if _mtf_ups != _mtf_dns:
+                _maj = max(_mtf_ups, _mtf_dns)
+                _min = min(_mtf_ups, _mtf_dns)
+                if _maj >= 3 and _min == 0:
+                    _mtf_note_w = 1.15
+                elif _maj >= 2 and _min == 0:
+                    _mtf_note_w = 0.90
+                else:
+                    _mtf_note_w = 0.65
+                notes.append(f"MTF {summary} w {_mtf_note_w:.2f}")
+            else:
+                notes.append(f"MTF {summary}")
+
+        # Institutional TREND & Stacked-HTF seatbelt (Dalton 2013; Bouchaud et al. 2018):
+        # Short-horizon flow & mean-reversion judges must not fade a confirmed
+        # higher-timeframe TREND river OR an unopposed stacked HTF waterfall/rally
+        # (even if base-TF ADX briefly pauses in NEUTRAL/RANGE for 1-2 bars).
+        # When mtf_trends/trend are neutral (standalone synthetic tests), _mtf_bias == 0.
+        _anchor_tf_dir = "NEUTRAL"
+        for _ak in ladder_names:
+            if mtf_trends.get(_ak) in ("UP", "DOWN"):
+                _anchor_tf_dir = str(mtf_trends[_ak])
+                break
+        if _anchor_tf_dir == "NEUTRAL":
+            for _ak in ("D1", "H4", "H1", "M36", "M15"):
+                if mtf_trends.get(_ak) in ("UP", "DOWN"):
+                    _anchor_tf_dir = str(mtf_trends[_ak])
+                    break
+        _mtf_stacked_up = (_mtf_ups >= 2 and _mtf_dns == 0)
+        _mtf_stacked_down = (_mtf_dns >= 2 and _mtf_ups == 0)
         if _mtf_ups > _mtf_dns:
             _mtf_bias = 1
         elif _mtf_dns > _mtf_ups:
@@ -3287,8 +3311,9 @@ class SignalEngine:
             _mtf_bias = -1
         else:
             _mtf_bias = 0
-        _allow_buy_in_regime = not (regime == "TREND" and _mtf_bias < 0)
-        _allow_sell_in_regime = not (regime == "TREND" and _mtf_bias > 0)
+        _allow_buy_in_regime = not ((regime == "TREND" and _mtf_bias < 0) or _mtf_stacked_down)
+        _allow_sell_in_regime = not ((regime == "TREND" and _mtf_bias > 0) or _mtf_stacked_up)
+        _has_c2 = recent_closes is not None and len(recent_closes) >= 2
         _has_ohlc = (
             recent_closes is not None
             and recent_highs is not None
@@ -3576,17 +3601,22 @@ class SignalEngine:
                 else:
                     notes.append(f"L3 whales balanced bid {total_whale_bid:.0f} ask {total_whale_ask:.0f} (no vote)")
 
-            # Large order events vote (Cont, Kukanov & Stoikov 2014: near-touch OFI + aggressive alignment + TREND seatbelt)
+            # Large order events vote (Cont, Kukanov & Stoikov 2014; Cartea, Jaimungal & Penalva 2015):
+            # Require sustained near-touch replenishment (>=4 large adds, |near_OFI|>=40) PLUS real
+            # aggressive tape follow-through (|aggr_net|>=15), bar agreement, and TREND/anchor seatbelt
+            # so passive limit adds with zero aggressive tape never bleed $0.50 spread.
             _near_lrg = int(getattr(level3, "near_large_order_events", level3.large_order_events) or 0)
             _near_ofi = float(getattr(level3, "near_touch_ofi", level3.ofi) or 0.0)
             _aggr_net = float(level3.aggressive_buy_volume - level3.aggressive_sell_volume)
-            _lrg_w = min(float(getattr(config, "SIGNAL_W_L3_OFI", 0.8)), 0.55)
-            if _near_lrg >= 3 and abs(_near_ofi) >= 25.0:
-                if _near_ofi > 0 and _aggr_net >= 0 and _allow_buy_in_regime:
+            _lrg_w = min(float(getattr(config, "SIGNAL_W_L3_OFI", 0.8)), 0.50)
+            _lrg_up_bar = not _has_c2 or float(recent_closes[-1]) >= float(recent_closes[-2])
+            _lrg_dn_bar = not _has_c2 or float(recent_closes[-1]) <= float(recent_closes[-2])
+            if _near_lrg >= 4 and abs(_near_ofi) >= 40.0:
+                if _near_ofi > 0 and _aggr_net >= 15.0 and _lrg_up_bar and _allow_buy_in_regime and _anchor_tf_dir != "DOWN":
                     if _may_vote("l3_large_ofi"):
                         votes.append((+1.0, _lrg_w))
                     notes.append(f"L3 large orders {_near_lrg} OFI +{_near_ofi:.0f} w {_lrg_w:.2f} -> BUY")
-                elif _near_ofi < 0 and _aggr_net <= 0 and _allow_sell_in_regime:
+                elif _near_ofi < 0 and _aggr_net <= -15.0 and _lrg_dn_bar and _allow_sell_in_regime and _anchor_tf_dir != "UP":
                     if _may_vote("l3_large_ofi"):
                         votes.append((-1.0, _lrg_w))
                     notes.append(f"L3 large orders {_near_lrg} OFI {_near_ofi:.0f} w {_lrg_w:.2f} -> SELL")
@@ -3645,27 +3675,54 @@ class SignalEngine:
                 except Exception as pe:
                     notes.append(f"iceberg persistence vote error: {pe}")
 
-            # v5.8 Spoof INVERT vote: spoof = trap, opposite signal
+            # v5.8 Spoof INVERT vote (Cont, Kukanov & Stoikov 2014; Cartea et al. 2015):
+            # Only near-touch layered spoofing (<= max(1.5*ATR, $2.00), >=2 spoof cancels on
+            # trap side, 0 on opposite near-touch side) confirmed by squeeze delta + bar +
+            # TREND/anchor seatbelt. Far-book quote pulls $10-$20 away are routine MM requotes,
+            # NOT institutional traps.
             try:
-                spoof_w = float(getattr(config, "SIGNAL_W_SPOOF", 0.8))
-                if level3.spoof_events >= 1:
-                    spoof_bid = sum(1 for p in (level3.spoof_levels or {}) if p < price)
-                    spoof_ask = sum(1 for p in (level3.spoof_levels or {}) if p > price)
-                    if spoof_bid > 0 and spoof_ask == 0:
+                spoof_w = min(float(getattr(config, "SIGNAL_W_SPOOF", 0.8)) * spoof_invert_w, 0.55)
+                if level3.spoof_events >= 1 and price > 0:
+                    _sp_max_d = max(1.5 * float(volatility.atr or 1.5), 2.00)
+                    _sp_lvls = level3.spoof_levels or {}
+                    spoof_bid = 0
+                    spoof_ask = 0
+                    if isinstance(_sp_lvls, dict):
+                        for _sp_p, _sp_c in _sp_lvls.items():
+                            _pf = float(_sp_p or 0.0)
+                            _cf = int(_sp_c or 0)
+                            if _cf <= 0 or _pf <= 0:
+                                continue
+                            if 0 < (price - _pf) <= _sp_max_d:
+                                spoof_bid += _cf
+                            elif 0 < (_pf - price) <= _sp_max_d:
+                                spoof_ask += _cf
+                    _sp_dlt = float(getattr(order_flow, "delta", 0.0) or 0.0)
+                    _sp_up_bar = not _has_c2 or float(recent_closes[-1]) >= float(recent_closes[-2])
+                    _sp_dn_bar = not _has_c2 or float(recent_closes[-1]) <= float(recent_closes[-2])
+                    if (
+                        spoof_bid >= 2 and spoof_ask == 0
+                        and _sp_dlt < 0.0 and _sp_dn_bar
+                        and _allow_sell_in_regime and _anchor_tf_dir != "UP"
+                    ):
                         if _may_vote("spoof_invert"):
-                            votes.append((-1.0, spoof_w * spoof_invert_w))
-                        notes.append(f"SPOOF_INVERT fake bids {spoof_bid} (support trap) w {spoof_w*spoof_invert_w:.1f} -> SELL")
-                    elif spoof_ask > 0 and spoof_bid == 0:
+                            votes.append((-1.0, spoof_w))
+                        notes.append(f"SPOOF_INVERT fake bids {spoof_bid} (support trap) w {spoof_w:.2f} -> SELL")
+                    elif (
+                        spoof_ask >= 2 and spoof_bid == 0
+                        and _sp_dlt > 0.0 and _sp_up_bar
+                        and _allow_buy_in_regime and _anchor_tf_dir != "DOWN"
+                    ):
                         if _may_vote("spoof_invert"):
-                            votes.append((+1.0, spoof_w * spoof_invert_w))
-                        notes.append(f"SPOOF_INVERT fake asks {spoof_ask} (resistance trap) w {spoof_w*spoof_invert_w:.1f} -> BUY")
-                    elif spoof_bid > spoof_ask:
+                            votes.append((+1.0, spoof_w))
+                        notes.append(f"SPOOF_INVERT fake asks {spoof_ask} (resistance trap) w {spoof_w:.2f} -> BUY")
+                    elif spoof_bid > spoof_ask and spoof_bid >= 2:
                         if _may_vote("spoof_invert_loose"):
-                            votes.append((-1.0, spoof_w * spoof_invert_w * 0.8))
+                            votes.append((-1.0, spoof_w * 0.8))
                         notes.append(f"SPOOF_INVERT more fake bids {spoof_bid} vs asks {spoof_ask} -> SELL")
-                    elif spoof_ask > spoof_bid:
+                    elif spoof_ask > spoof_bid and spoof_ask >= 2:
                         if _may_vote("spoof_invert_loose"):
-                            votes.append((+1.0, spoof_w * spoof_invert_w * 0.8))
+                            votes.append((+1.0, spoof_w * 0.8))
                         notes.append(f"SPOOF_INVERT more fake asks {spoof_ask} vs bids {spoof_bid} -> BUY")
             except Exception as se:
                 notes.append(f"spoof vote error: {se}")
@@ -3771,53 +3828,107 @@ class SignalEngine:
                        float(getattr(config, "SIGNAL_W_VWAP", 1.0)) * vwap_mult))
             try:
                 if recent_closes is not None and len(recent_closes) >= 3:
-                    vwap_trend = 1 if price > volume_profile.vwap and recent_closes[-1] > recent_closes[-2] else -1 if price < volume_profile.vwap and recent_closes[-1] < recent_closes[-2] else 0
-                    if vwap_trend != 0 and regime == "TREND":
+                    _vwap_px = float(volume_profile.vwap)
+                    _atr_vw = float(volatility.atr or (price * 0.002))
+                    _vwap_sep = abs(float(price) - _vwap_px) >= 0.20 * _atr_vw
+                    if (
+                        regime == "TREND" and _vwap_sep
+                        and float(price) > _vwap_px
+                        and float(recent_closes[-2]) >= _vwap_px
+                        and float(recent_closes[-1]) > float(recent_closes[-2])
+                        and _allow_buy_in_regime and _anchor_tf_dir != "DOWN"
+                    ):
+                        _vw_w = 0.45
                         if _may_vote("vwap_trend"):
-                            votes.append((float(vwap_trend), 0.65 * vwap_mult))
-                        notes.append(f"VWAP trend {'UP' if vwap_trend>0 else 'DOWN'} price {price:.1f} vs VWAP {volume_profile.vwap:.1f} w {0.65*vwap_mult:.2f}")
+                            votes.append((+1.0, _vw_w))
+                        notes.append(f"VWAP trend UP price {price:.1f} vs VWAP {_vwap_px:.1f} w {_vw_w:.2f}")
+                    elif (
+                        regime == "TREND" and _vwap_sep
+                        and float(price) < _vwap_px
+                        and float(recent_closes[-2]) <= _vwap_px
+                        and float(recent_closes[-1]) < float(recent_closes[-2])
+                        and _allow_sell_in_regime and _anchor_tf_dir != "UP"
+                    ):
+                        _vw_w = 0.45
+                        if _may_vote("vwap_trend"):
+                            votes.append((-1.0, _vw_w))
+                        notes.append(f"VWAP trend DOWN price {price:.1f} vs VWAP {_vwap_px:.1f} w {_vw_w:.2f}")
             except Exception:
                 pass
         if volume_profile.poc:
             if _may_vote("poc_day"):
                 votes.append((np.sign(price - volume_profile.poc), 0.6 * vwap_mult))
             notes.append(f"POC day {volume_profile.poc:.1f} price {price:.1f} -> {'above' if price>volume_profile.poc else 'below'}")
-        # Dalton (2013) Market Profile Value Area Law:
-        # - In TREND (Initiative): follow accepted breakouts outside VAH/VAL; NEVER fade near_vah/near_val!
-        # - In RANGE/NEUTRAL (Responsive): fade tests of VAH/VAL back toward POC; NEVER chase 1-tick pokes outside VA!
+        # Dalton (2013) & Steidlmayer (1986) Market Profile Value Area Law:
+        # - In TREND (Initiative): follow accepted breakouts (>=0.15*ATR outside VAH/VAL,
+        #   advancing bar, TREND + anchor-HTF aligned) at calm weight 0.50 so mtf leads MAP.
+        # - In strict RANGE (ADX<20 ONLY — never NEUTRAL developing trends!): fade tight
+        #   extremes (<=0.45*ATR of VAH/VAL) ONLY with bar rejection + non-opposing delta +
+        #   non-opposing MTF bias at calm weight 0.45.
         if volume_profile.value_area_high and volume_profile.value_area_low:
             vah = float(volume_profile.value_area_high)
             val = float(volume_profile.value_area_low)
             atr_v = float(volatility.atr or (price * 0.002))
             va_mid = 0.5 * (vah + val)
             if regime == "TREND":
-                _acc_up = price > vah and (not _has_c2 or float(recent_closes[-1]) > vah) and _allow_buy_in_regime
-                _acc_dn = price < val and (not _has_c2 or float(recent_closes[-1]) < val) and _allow_sell_in_regime
+                _acc_up = (
+                    price > vah + 0.15 * atr_v
+                    and (not _has_c2 or (float(recent_closes[-1]) > vah and float(recent_closes[-1]) > float(recent_closes[-2])))
+                    and _allow_buy_in_regime and _anchor_tf_dir != "DOWN"
+                )
+                _acc_dn = (
+                    price < val - 0.15 * atr_v
+                    and (not _has_c2 or (float(recent_closes[-1]) < val and float(recent_closes[-1]) < float(recent_closes[-2])))
+                    and _allow_sell_in_regime and _anchor_tf_dir != "UP"
+                )
                 if _acc_up:
-                    _va_w = 0.60 * vwap_mult
+                    _va_w = 0.50
                     if _may_vote("value_area"):
                         votes.append((+1.0, _va_w))
                     notes.append(f"price {price:.1f} above VAH {vah:.1f} breakout w {_va_w:.2f} -> BUY")
                 elif _acc_dn:
-                    _va_w = 0.60 * vwap_mult
+                    _va_w = 0.50
                     if _may_vote("value_area"):
                         votes.append((-1.0, _va_w))
                     notes.append(f"price {price:.1f} below VAL {val:.1f} breakdown w {_va_w:.2f} -> SELL")
-            else:
-                _near_vah = (price >= va_mid) and (abs(vah - price) <= 0.8 * atr_v) and (not _has_c2 or float(recent_closes[-1]) <= vah + 0.2 * atr_v)
-                _near_val = (price <= va_mid) and (abs(price - val) <= 0.8 * atr_v) and (not _has_c2 or float(recent_closes[-1]) >= val - 0.2 * atr_v)
+            elif regime == "RANGE" and (vah - val) >= 0.8 * atr_v:
+                _va_dlt = float(getattr(order_flow, "delta", 0.0) or 0.0)
+                _va_rej_dn = (
+                    (not _has_c2 or float(recent_closes[-1]) < float(recent_closes[-2]))
+                    and _va_dlt <= 0.0
+                    and (not _has_ohlc or _last_clv <= 0.55)
+                    and _allow_sell_in_regime and _mtf_bias <= 0
+                )
+                _va_rej_up = (
+                    (not _has_c2 or float(recent_closes[-1]) > float(recent_closes[-2]))
+                    and _va_dlt >= 0.0
+                    and (not _has_ohlc or _last_clv >= 0.45)
+                    and _allow_buy_in_regime and _mtf_bias >= 0
+                )
+                _near_vah = (
+                    (price >= va_mid)
+                    and (abs(vah - price) <= 0.45 * atr_v)
+                    and (not _has_c2 or float(recent_closes[-1]) <= vah + 0.15 * atr_v)
+                    and _va_rej_dn
+                )
+                _near_val = (
+                    (price <= va_mid)
+                    and (abs(price - val) <= 0.45 * atr_v)
+                    and (not _has_c2 or float(recent_closes[-1]) >= val - 0.15 * atr_v)
+                    and _va_rej_up
+                )
                 if _near_vah and _near_val:
                     if abs(vah - price) <= abs(price - val):
                         _near_val = False
                     else:
                         _near_vah = False
                 if _near_vah:
-                    _va_w = 0.65 * vwap_mult
+                    _va_w = 0.45
                     if _may_vote("value_area"):
                         votes.append((-1.0, _va_w))
                     notes.append(f"near VAH {vah:.1f} (VHL) resistance w {_va_w:.2f} -> SELL")
                 elif _near_val:
-                    _va_w = 0.65 * vwap_mult
+                    _va_w = 0.45
                     if _may_vote("value_area"):
                         votes.append((+1.0, _va_w))
                     notes.append(f"near VAL {val:.1f} (VLL) support w {_va_w:.2f} -> BUY")
@@ -4001,15 +4112,36 @@ class SignalEngine:
         except Exception as he:
             notes.append(f"HTF POC vote error: {he}")
         _idx_struct_end = len(votes)
-        # CVD momentum: require meaningful windowed delta (>=22 lots), bar agreement & TREND seatbelt
+        # CVD momentum (Bouchaud 2018 Propagator; Easley, Lopez de Prado & O'Hara 2012):
+        # Scale delta conviction dynamically to active bar window (Law #11), require >=60%
+        # pressure dominance, Effort-with-Result bar displacement (CLV in winning 40% when
+        # OHLC present so absorbed market-order bursts into passive walls do not vote), and
+        # TREND + anchor-HTF seatbelt.
         try:
-            _cvd_up_ok = not _has_c2 or float(recent_closes[-1]) >= float(recent_closes[-2])
-            _cvd_dn_ok = not _has_c2 or float(recent_closes[-1]) <= float(recent_closes[-2])
-            if order_flow.delta >= 22.0 and order_flow.buying_pressure >= 55.0 and _cvd_up_ok and _allow_buy_in_regime:
+            _cvd_win_s = float(getattr(config, "ORDER_FLOW_WINDOW_SECONDS", 180.0) or 180.0)
+            _cvd_tf_scale = min(2.5, max(0.75, _cvd_win_s / 180.0))
+            _cvd_dlt_thr = 35.0 * _cvd_tf_scale
+            _cvd_up_ok = (
+                (not _has_c2 or float(recent_closes[-1]) > float(recent_closes[-2]))
+                and (not _has_ohlc or _last_clv >= 0.60)
+            )
+            _cvd_dn_ok = (
+                (not _has_c2 or float(recent_closes[-1]) < float(recent_closes[-2]))
+                and (not _has_ohlc or _last_clv <= 0.40)
+            )
+            if (
+                order_flow.delta >= _cvd_dlt_thr
+                and order_flow.buying_pressure >= 60.0
+                and _cvd_up_ok and _allow_buy_in_regime and _anchor_tf_dir != "DOWN"
+            ):
                 if _may_vote("cvd_momentum"):
                     votes.append((+1.0, 0.45))
                 notes.append(f"CVD rising delta +{order_flow.delta:.0f} CVD {order_flow.cvd:.0f} w 0.45 -> BUY momentum")
-            elif order_flow.delta <= -22.0 and order_flow.selling_pressure >= 55.0 and _cvd_dn_ok and _allow_sell_in_regime:
+            elif (
+                order_flow.delta <= -_cvd_dlt_thr
+                and order_flow.selling_pressure >= 60.0
+                and _cvd_dn_ok and _allow_sell_in_regime and _anchor_tf_dir != "UP"
+            ):
                 if _may_vote("cvd_momentum"):
                     votes.append((-1.0, 0.45))
                 notes.append(f"CVD falling delta {order_flow.delta:.0f} CVD {order_flow.cvd:.0f} w 0.45 -> SELL momentum")
