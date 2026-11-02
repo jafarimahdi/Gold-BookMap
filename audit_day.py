@@ -1107,13 +1107,13 @@ JUDGE_HORIZON = {
 }
 
 _J = [
-    ("footprint_delta",   r"footprint delta ([+-][\d.]+) dominant ([\d.]+) strength ([\d.]+) -> (BUY|SELL)"),
-    ("footprint_levels",  r"footprint (buying|selling) levels (\d+) > (?:selling|buying) (\d+) -> (BUY|SELL)"),
+    ("footprint_delta",   r"footprint delta ([+-][\d.]+) dominant ([\d.]+) strength ([\d.]+)(?: w [\d.]+)? -> (BUY|SELL)"),
+    ("footprint_levels",  r"footprint (buying|selling) levels (\d+) > (?:selling|buying) (\d+)(?: w [\d.]+)? -> (BUY|SELL)"),
     ("l3_imbalance",      r"(?:v6\.0 )?L3 (?:distance-weighted )?imbalance ([+-][\d.]+)(?:.*?-> (BUY|SELL))?"),
-    ("l3_aggr_limit",     r"Aggressive vs limit: (buy|sell) ratio ([\d.]+) vol ([\d.]+) -> (BUY|SELL) power"),
+    ("l3_aggr_limit",     r"Aggressive vs limit: (buy|sell) ratio ([\d.]+) vol ([\d.]+)(?: w [\d.]+)? -> (BUY|SELL) power"),
     ("l3_ofi_streak",     r"L3 OFI time-weighted recent streak B(\d+)/S(\d+)"),
     ("l3_net_flow",       r"L3 NET FLOW (BUY|SELL) ([+-][\d.]+) \(buys ([\d.]+) vs sells ([\d.]+)\) w ([\d.]+)"),
-    ("l3_large_ofi",      r"L3 large orders (\d+) OFI ([+-][\d.]+) -> (BUY|SELL)"),
+    ("l3_large_ofi",      r"L3 large orders (\d+) OFI ([+-][\d.]+)(?: w [\d.]+)? -> (BUY|SELL)"),
     ("iceberg",           r"ICEBERG_(SUPPORT|RESISTANCE)[^\n]*?w ([\d.]+)"),
     ("iceberg_noise",     r"ICEBERG weak (support|resistance) @ ([\d.]+)"),
     ("iceberg_legacy",    r"L3 icebergs (\d+) imb ([+-][\d.]+) w ([\d.]+) -> (BUY|SELL)"),

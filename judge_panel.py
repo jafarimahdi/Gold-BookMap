@@ -36,13 +36,13 @@ _JUDGE_DEFAULT_W = {
 
 _JUDGE_PATTERNS = [
     # (judge, regex)  groups: (dir)(weight)  - "no vote" lines still score, dir=0
-    ("footprint_delta",   r"footprint delta ([+-][\d.]+) dominant ([\d.]+) strength ([\d.]+) -> (BUY|SELL)"),
-    ("footprint_levels",  r"footprint (buying|selling) levels (\d+) > (?:selling|buying) (\d+) -> (BUY|SELL)"),
+    ("footprint_delta",   r"footprint delta ([+-][\d.]+) dominant ([\d.]+) strength ([\d.]+)(?: w [\d.]+)? -> (BUY|SELL)"),
+    ("footprint_levels",  r"footprint (buying|selling) levels (\d+) > (?:selling|buying) (\d+)(?: w [\d.]+)? -> (BUY|SELL)"),
     ("l3_imbalance",      r"(?:v6\.0 )?L3 (?:distance-weighted )?imbalance ([+-][\d.]+)(?:.*?-> (BUY|SELL))?"),
-    ("l3_aggr_limit",     r"Aggressive vs limit: (buy|sell) ratio ([\d.]+) vol ([\d.]+) -> (BUY|SELL) power"),
+    ("l3_aggr_limit",     r"Aggressive vs limit: (buy|sell) ratio ([\d.]+) vol ([\d.]+)(?: w [\d.]+)? -> (BUY|SELL) power"),
     ("l3_ofi_streak",     r"L3 OFI time-weighted recent streak B(\d+)/S(\d+).*?-> weight ([\d.]+) ([+-][\d.]+)"),
     ("l3_net_flow",       r"L3 NET FLOW (BUY|SELL) ([+-][\d.]+) \(buys ([\d.]+) vs sells ([\d.]+)\) w ([\d.]+)"),
-    ("l3_large_ofi",      r"L3 large orders (\d+) OFI ([+-][\d.]+) -> (BUY|SELL)"),
+    ("l3_large_ofi",      r"L3 large orders (\d+) OFI ([+-][\d.]+)(?: w [\d.]+)? -> (BUY|SELL)"),
     ("iceberg",           r"ICEBERG_(SUPPORT|RESISTANCE) @?[ ]?([\d.]*)?.*?(?:refills (\d+))?.*?w ([\d.]+)(?: -> (BUY|SELL))?"),
     ("iceberg_noise",     r"ICEBERG weak (support|resistance) @ ([\d.]+).*?no vote"),
     ("iceberg_legacy",    r"L3 icebergs (\d+) imb ([+-][\d.]+) w ([\d.]+) -> (BUY|SELL)"),
@@ -53,7 +53,7 @@ _JUDGE_PATTERNS = [
     ("queue_pos",         r"QUEUE_POS good (bid|ask) ratio ([\d.]+)"),
     ("microprice",        r"microprice ([\d.]+) vs mid ([\d.]+) dev ([+-][\d.]+)bps -> (BUY|SELL)"),
     ("absorption",        r"absorption (?:net )?([+-][\d.]+).*?-> (BUY|SELL)"),
-    ("sweep",             r"v6\.0 SWEEP (BULLISH|BEARISH).*?w([+-]?[\d.]+)"),
+    ("sweep",             r"v6\.0 SWEEP (BULLISH|BEARISH).*?w\s*([+-]?[\d.]+)"),
     ("vwap_trend",        r"VWAP trend (UP|DOWN) price ([\d.]+) vs VWAP ([\d.]+)"),
     ("vwap_bands",        r"v6\.0 VWAP (\+\d\.\d|\+\d|\+2\.5|\+2|\+1|-2\.5|-2|-1)\u03c3?.*?-> (BUY|SELL)"),
     ("vwap_zscore",       r"VWAP z-score ([+-]?[\d.]+)"),

@@ -850,16 +850,18 @@ def _evaluate_retired_and_previous_bench(
         if abs(net_hp) > 1e-6:
             _emit("htf_poc", "RETIRED", 120, net_hp)
 
-        # --- 6. htf_poc[fix] (REPAIRED: silent inside 0.6 ATR; RANGE >=2 ATR fade; TREND H1+H4 migration) ---
-        if h1_p > 0:
-            dh1 = abs(px - h1_p) / atr_live
-            if regime == "RANGE" and dh1 >= 2.0:
-                _emit("htf_poc[fix]", "REPAIRED", 60, -1.0 if px > h1_p else 1.0)
-            elif regime == "TREND" and h4_p > 0 and dh1 >= 0.8:
-                if px > h1_p and px > h4_p and mtf_bias >= 0:
-                    _emit("htf_poc[fix]", "REPAIRED", 60, 1.0)
-                elif px < h1_p and px < h4_p and mtf_bias <= 0:
-                    _emit("htf_poc[fix]", "REPAIRED", 60, -1.0)
+        # --- 6. htf_poc[fix] (Dalton Value Migration vs H4 Balance Magnet) ---
+        if regime == "TREND" and h1_p > 0 and h4_p > 0:
+            if px > h1_p >= h4_p and mtf_bias >= 0:
+                _emit("htf_poc[fix]", "REPAIRED", 60, 1.0)
+            elif px < h1_p <= h4_p and mtf_bias <= 0:
+                _emit("htf_poc[fix]", "REPAIRED", 60, -1.0)
+        elif regime != "TREND" and h4_p > 0:
+            dh4_b = (px - h4_p) / atr_live
+            if dh4_b >= 1.8:
+                _emit("htf_poc[fix]", "REPAIRED", 60, -1.0)
+            elif dh4_b <= -1.8:
+                _emit("htf_poc[fix]", "REPAIRED", 60, 1.0)
 
     # --- 7 & 8. whale_walls [legacy] vs whale_walls[fix] (live book only, no BID_CANCEL, <=2 ATR, no spoof) ---
     whale_bid_any = False
@@ -1283,17 +1285,26 @@ def _evaluate_retired_and_previous_bench(
         except Exception:
             o3 = c3 = None
 
-    # 32. volume_roc[fix]: closed M3 RVOL >= 1.8x 20-bar median + body >= 0.45*(H-L) + CLV >=0.65 / <=0.35
+    # 32. volume_roc[fix] (Wyckoff Effort-vs-Result; Coulling 2013 VPA):
+    # Separates Stopping/Climax absorption reversal from unstretched TREND initiation.
     if c3 is not None and len(c3) >= 12:
         med_v3 = max(float(np.median(v3[-min(21, len(v3)) : -1])), 1.0)
         rng3 = float(h3_a[-1] - l3_a[-1])
-        body3 = abs(float(c3[-1] - o3[-1]))
-        if float(v3[-1]) >= 1.8 * med_v3 and rng3 >= 0.30 and body3 >= 0.45 * rng3:
+        rvol3 = float(v3[-1]) / med_v3
+        vw_z3 = float(getattr(vp, "vwap_zscore", 0.0) or 0.0) if vp is not None else 0.0
+        if rvol3 >= 1.8 and rng3 >= 0.30:
             clv3 = float(c3[-1] - l3_a[-1]) / rng3
-            if clv3 >= 0.65:
+            pushed_hi = float(h3_a[-1]) >= float(np.max(h3_a[-6:-1]))
+            pushed_lo = float(l3_a[-1]) <= float(np.min(l3_a[-6:-1]))
+            if pushed_lo and clv3 >= 0.65 and (regime != "TREND" or vw_z3 <= -1.5) and not (regime == "TREND" and mtf_bias < 0):
                 _emit("volume_roc[fix]", "ACT_FIX", 30, 1.0)
-            elif clv3 <= 0.35:
+            elif pushed_hi and clv3 <= 0.35 and (regime != "TREND" or vw_z3 >= 1.5) and not (regime == "TREND" and mtf_bias > 0):
                 _emit("volume_roc[fix]", "ACT_FIX", 30, -1.0)
+            elif regime == "TREND" and abs(vw_z3) < 1.8:
+                if pushed_hi and clv3 >= 0.75 and mtf_bias >= 0:
+                    _emit("volume_roc[fix]", "ACT_FIX", 30, 1.0)
+                elif pushed_lo and clv3 <= 0.25 and mtf_bias <= 0:
+                    _emit("volume_roc[fix]", "ACT_FIX", 30, -1.0)
 
     # 33. sweep[fix]: cures V6_SWEEP_THRESHOLD_PCT=0.10 ($4/1m) bug -> closed M3, poke>=max(0.30,0.25*ATR), 1.5x vol
     if c3 is not None and len(c3) >= 22:

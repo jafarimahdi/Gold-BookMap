@@ -723,9 +723,9 @@ def _refresh() -> None:
     # v6.0 BANK-GRADE M5 SCALPER - 5 upgrades + 4 Teams
     g["V6_SWEEP_ENABLED"] = _fget("V6_SWEEP_ENABLED", "1") == "1"
     g["V6_SWEEP_LOOKBACK"] = _fint("V6_SWEEP_LOOKBACK", 20)
-    g["V6_SWEEP_THRESHOLD_PCT"] = _ffloat("V6_SWEEP_THRESHOLD_PCT", 0.10)
-    g["V6_SWEEP_VOLUME_ROC"] = _ffloat("V6_SWEEP_VOLUME_ROC", 3.0)
-    g["V6_SWEEP_WEIGHT"] = _ffloat("V6_SWEEP_WEIGHT", 1.5)
+    g["V6_SWEEP_THRESHOLD_PCT"] = _ffloat("V6_SWEEP_THRESHOLD_PCT", 0.03)
+    g["V6_SWEEP_VOLUME_ROC"] = _ffloat("V6_SWEEP_VOLUME_ROC", 1.5)
+    g["V6_SWEEP_WEIGHT"] = _ffloat("V6_SWEEP_WEIGHT", 0.85)
 
     g["V6_VWAP_BANDS_ENABLED"] = _fget("V6_VWAP_BANDS_ENABLED", "1") == "1"
     g["V6_VWAP_BAND_1SIG_WEIGHT"] = _ffloat("V6_VWAP_BAND_1SIG_WEIGHT", 0.8)
