@@ -223,9 +223,13 @@ def _observe_passive_road_sample(signal_map: Any, power: Any, price: Any,
         str(power.get("direction", "") or "").upper()
         if isinstance(power, Mapping) else ""
     )
-    candidate_dirs = (direction,) if direction in {"UP", "DOWN"} else ("UP", "DOWN")
+    ordered_dirs = (
+        (direction, "DOWN" if direction == "UP" else "UP")
+        if direction in {"UP", "DOWN"}
+        else ("UP", "DOWN")
+    )
     valid_roads = []
-    for side_dir in candidate_dirs:
+    for side_dir in ordered_dirs:
         door = _nearest_door(signal_map, side_dir, p)
         if not door:
             continue
@@ -233,6 +237,38 @@ def _observe_passive_road_sample(signal_map: Any, power: Any, price: Any,
         rl = _num(door.get("lots_between"))
         if rc is not None and rl is not None and rc >= 0 and rl >= 0:
             valid_roads.append(float(rl))
+            if direction in {"UP", "DOWN"} and side_dir == direction:
+                break
+    # Stage 3e (2026-11-02): During smooth MBO quoting stretches where no >=2.5x whale
+    # outlier door happens to qualify on that specific minute (`39+` cycles starved at
+    # `8/12..11/12` in replay-9), sample the real resting order-book corridor from
+    # `signal_map["ladder"]` across a standard `2*ATR` reach (same formula as `road_to`).
+    if not valid_roads:
+        raw_ladder = signal_map.get("ladder")
+        if isinstance(raw_ladder, (list, tuple)) and len(raw_ladder) >= 4:
+            map_atr = _num(signal_map.get("atr")) or 0.0
+            reach = max(sp * 10.0, 2.0 * map_atr if map_atr > 0 else p * 0.0008)
+            above_lots = 0.0
+            below_lots = 0.0
+            has_ab = False
+            has_bl = False
+            for row in raw_ladder:
+                if not isinstance(row, (list, tuple)) or len(row) < 2:
+                    continue
+                lp = _num(row[0])
+                ls = _num(row[1])
+                if lp is None or ls is None or ls <= 0:
+                    continue
+                if p < lp < p + reach:
+                    above_lots += float(ls)
+                    has_ab = True
+                elif p - reach < lp < p:
+                    below_lots += float(ls)
+                    has_bl = True
+            if has_ab:
+                valid_roads.append(above_lots)
+            if has_bl:
+                valid_roads.append(below_lots)
     if not valid_roads:
         return
 
@@ -569,6 +605,7 @@ def plan_shot(signal_map: Dict[str, Any], power: Dict[str, Any],
 
     target_door = _nearest_door(signal_map or {}, direction, p)
     if not target_door:
+        _observe_passive_road_sample(signal_map, power, price, spread, ctx, config)
         return _wait(f"no valid Scout door on the POWER v2 {direction} side", p,
                      power=power, context=ctx, config=config, atr=a, spread=sp,
                      plan_ttl=plan_ttl)

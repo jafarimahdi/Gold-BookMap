@@ -2528,8 +2528,16 @@ def synthesize_multi_day(results: List[Dict[str, Any]]) -> Tuple[str, str, Dict[
     ]
     wait_reasons: Dict[str, int] = defaultdict(int)
     for wc in wait_cycles:
-        raw_r = str(wc.get("shot_reason") or "unspecified").split(";")[0].strip()[:88]
-        wait_reasons[raw_r or "unspecified"] += 1
+        parts_r = [p_s.strip() for p_s in str(wc.get("shot_reason") or "unspecified").split(";") if p_s.strip()]
+        chosen_r = parts_r[0] if parts_r else "unspecified"
+        if (
+            chosen_r.upper().startswith("PASSIVE:")
+            and len(parts_r) > 1
+            and parts_r[1].upper().startswith("AGGRESSIVE:")
+            and not bool(getattr(config, "LIMIT_ORDER_ENABLED", False))
+        ):
+            chosen_r = parts_r[1]
+        wait_reasons[chosen_r[:88] or "unspecified"] += 1
     lines.append(f"\n[8b] SHOOTING CORRIDOR & SCOUT-BRACKET DIAGNOSTIC (Conf>={conf_thr:.0f}%)")
     lines.append(
         f"  Active Scout/Shooting Config: L3_WHALE_THRESHOLD={getattr(config, 'L3_WHALE_THRESHOLD', 10.0)} | "

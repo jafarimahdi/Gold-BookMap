@@ -406,6 +406,50 @@ def _a1_try_serve(market_data, now, price):
 
     # ---- live scout chain (full notebook feed), EVERY serve ----------------
     scout_notes, _atr = _a1_refresh_scout(market_data, served, price, _spread_now)
+    # Stage 3e (2026-11-02): Keep Crowd v2 Q2's rolling road-history baseline fed on
+    # intra-bar A1 serve cycles (which represent 2/3 of M3 1m cycles & 94% of live 10s
+    # cycles!). Without this, _ROAD_HISTORY only received 1 sample per 3m bar close
+    # (max 15 in 45m), dropping to 8/12..11/12 whenever 4 bar-closes had crossed quotes.
+    try:
+        if bid > 0.0 and ask > bid and _spread_now > 0.0:
+            from shooting_team import _observe_passive_road_sample as _a1_obs_road
+            _a1_td = market_data.get("tick_data") or []
+            _a1_has_d = market_data.get("has_data")
+            if _a1_has_d is None:
+                _a1_has_d = bool(_a1_td or (served.signal_map or {}).get("ladder"))
+            _a1_age = market_data.get("last_data_age_seconds")
+            if _a1_age is None:
+                _a1_age = market_data.get("last_trade_age_seconds")
+            if _a1_age is None:
+                _a1_age = market_data.get("quote_age_seconds")
+            if _a1_age is None:
+                _a1_age = 0.0
+            _md_dq = market_data.get("data_quality")
+            _a1_q_valid = (
+                str(_md_dq.get("quote", "valid")).lower() == "valid"
+                if isinstance(_md_dq, dict) and "quote" in _md_dq
+                else True
+            )
+            _a1_dq_ok = market_data.get("data_quality_ok")
+            if _a1_dq_ok is None:
+                _a1_dq_ok = bool(_a1_has_d and _a1_q_valid)
+            _a1_obs_road(
+                served.signal_map,
+                getattr(served, "power_v2", None) or {},
+                price,
+                _spread_now,
+                {
+                    "bid": bid,
+                    "ask": ask,
+                    "has_data": bool(_a1_has_d),
+                    "data_quality_ok": bool(_a1_dq_ok),
+                    "last_data_age_seconds": _a1_age,
+                    "now": now,
+                },
+                config,
+            )
+    except Exception:
+        pass
     # ---- live pair: paper-entry simulator + Escort, re-run EVERY serve -----
     pair_notes = []
     _escort_plan = {}
@@ -6412,6 +6456,55 @@ def analyze_market(market_data: Dict[str, Any],
     _s3d_sniper_reason = ""
     _s3d_verified_quality: Optional[bool] = None
     _s3d_verified_age: Optional[float] = None
+    # Stage 3e (2026-11-02): Verify real live feed quality on EVERY cycle (not only
+    # when `confidence >= 50%`) so calm 3-minute M3 pre-breakout bars (<12 prints in 180s)
+    # with fresh quotes keep feeding `shooting_team._observe_passive_road_sample` and
+    # prevent Crowd v2 Q2 road-history starvation (`8/12..11/12`) mid-day.
+    try:
+        _pw_ctx_all = dict(_power_v2.get("context") or {})
+        _pw_rg_all = dict(_power_v2.get("regime_diagnostics") or _regime_v2 or {})
+        _max_age_all = float(getattr(config, "POWER_MAX_TICK_AGE_SECONDS", 60.0) or 60.0)
+        _age_all = market_data.get("last_data_age_seconds")
+        if _age_all is None:
+            _age_all = market_data.get("last_trade_age_seconds")
+        if _age_all is None:
+            _age_all = _pw_rg_all.get("latest_tick_age_seconds")
+        _dq_all = market_data.get("data_quality_ok")
+        if _dq_all is None:
+            _dq_all = bool(_pw_ctx_all.get("data_quality_ok", False))
+            if (
+                not _dq_all
+                and not bool(_pw_ctx_all.get("force_unreliable", False))
+                and tick_data
+                and _age_all is not None
+                and 0.0 <= float(_age_all) <= _max_age_all
+            ):
+                _b_all = float(market_data.get("bid") or 0.0)
+                _a_all = float(market_data.get("ask") or 0.0)
+                _dq_map_all = market_data.get("data_quality")
+                _q_ok_all = (
+                    _b_all > 0.0
+                    and _a_all > _b_all
+                    and (
+                        str(_dq_map_all.get("quote", "valid")).lower() == "valid"
+                        if isinstance(_dq_map_all, dict) and "quote" in _dq_map_all
+                        else True
+                    )
+                )
+                _min_td_all = max(12, int(round(20.0 * (float(_power_bar_seconds) / 300.0))))
+                _rec_td_all = tick_data[-min(len(tick_data), max(36, 3 * _min_td_all)):]
+                _dir_ok_all = sum(
+                    1 for r in _rec_td_all
+                    if isinstance(r, dict) and r.get("is_direct", True) is not False
+                    and str(r.get("side", "")).upper() in ("BUY", "SELL", "BID", "ASK")
+                ) >= max(1, int(0.80 * len(_rec_td_all)))
+                if _q_ok_all and _dir_ok_all:
+                    _dq_all = True
+        _s3d_verified_quality = bool(_dq_all)
+        _s3d_verified_age = float(_age_all) if _age_all is not None else None
+    except Exception:
+        pass
+
     try:
         _s3d_live = bool(getattr(config, "STAGE3D_SNIPER_GATE_LIVE_ENABLED", False))
         _s3d_blk_climax = bool(getattr(config, "STAGE3D_BLOCK_POWER_CLIMAX", True))
@@ -6459,52 +6552,11 @@ def analyze_market(market_data: Dict[str, Any],
             _pw_ctx_raw = dict(_power_v2.get("context") or {})
             _pw_rg_raw = dict(_power_v2.get("regime_diagnostics") or _regime_v2 or {})
             _max_age_s3d = float(getattr(config, "POWER_MAX_TICK_AGE_SECONDS", 60.0) or 60.0)
-            _age_pre = market_data.get("last_data_age_seconds")
-            if _age_pre is None:
-                _age_pre = market_data.get("last_trade_age_seconds")
-            if _age_pre is None:
-                _age_pre = _pw_rg_raw.get("latest_tick_age_seconds")
-            _dq_ok_pre = market_data.get("data_quality_ok")
-            if _dq_ok_pre is None:
-                _dq_ok_pre = bool(_pw_ctx_raw.get("data_quality_ok", False))
-                # Law #11 (Active Chart Timeframe = M3 / _power_bar_seconds):
-                # During a calm 3-minute M3 bar (<12 prints in 180s, e.g. quiet pre-breakout
-                # pocket across :00/:03/:06/:09.. M3 boundaries), power_m5_adapter marks
-                # data_quality_ok=False solely from low bar print count even when the live
-                # BookMap feed is 1s-fresh with valid uncrossed BBO quotes and direct-side ticks.
-                if (
-                    not _dq_ok_pre
-                    and not bool(_pw_ctx_raw.get("force_unreliable", False))
-                    and tick_data
-                    and _age_pre is not None
-                    and 0.0 <= float(_age_pre) <= _max_age_s3d
-                ):
-                    _b_chk = float(market_data.get("bid") or 0.0)
-                    _a_chk = float(market_data.get("ask") or 0.0)
-                    _dq_map = market_data.get("data_quality")
-                    _q_ok = (
-                        _b_chk > 0.0
-                        and _a_chk > _b_chk
-                        and (
-                            str(_dq_map.get("quote", "valid")).lower() == "valid"
-                            if isinstance(_dq_map, dict) and "quote" in _dq_map
-                            else True
-                        )
-                    )
-                    _min_bar_td = max(12, int(round(20.0 * (float(_power_bar_seconds) / 300.0))))
-                    _recent_td = tick_data[-min(len(tick_data), max(36, 3 * _min_bar_td)):]
-                    _dir_ok = sum(
-                        1 for r in _recent_td
-                        if isinstance(r, dict) and r.get("is_direct", True) is not False
-                        and str(r.get("side", "")).upper() in ("BUY", "SELL", "BID", "ASK")
-                    ) >= max(1, int(0.80 * len(_recent_td)))
-                    if _q_ok and _dir_ok:
-                        _dq_ok_pre = True
+            _age_pre = _s3d_verified_age if _s3d_verified_age is not None else _pw_rg_raw.get("latest_tick_age_seconds")
+            _dq_ok_pre = bool(_s3d_verified_quality) if _s3d_verified_quality is not None else bool(_pw_ctx_raw.get("data_quality_ok", False))
             _stale_pre = bool(_pw_ctx_raw.get("feed_stale", False))
             if _age_pre is not None and 0.0 <= float(_age_pre) <= _max_age_s3d:
                 _stale_pre = False
-            _s3d_verified_quality = bool(_dq_ok_pre)
-            _s3d_verified_age = float(_age_pre) if _age_pre is not None else None
             _up_sh = round(min(95.0, max(50.0, float(confidence))), 1) if direction == "BUY" else round(100.0 - min(95.0, max(50.0, float(confidence))), 1)
             _dn_sh = round(100.0 - _up_sh, 1)
             _s3d_power_envelope = {

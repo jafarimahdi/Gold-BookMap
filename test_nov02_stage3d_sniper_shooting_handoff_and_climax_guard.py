@@ -88,6 +88,7 @@ def _make_clean_m3_market_data(
 
 
 def _configure_stage3d_env(monkeypatch, tmp_path):
+    monkeypatch.delenv("DATA_SOURCE", raising=False)
     monkeypatch.delenv("AGGRESSIVE_ENTRY_ENABLED", raising=False)
     monkeypatch.delenv("LIMIT_ORDER_ENABLED", raising=False)
     monkeypatch.delenv("SCOUT_MIN_TARGET_USD", raising=False)
@@ -95,7 +96,10 @@ def _configure_stage3d_env(monkeypatch, tmp_path):
     monkeypatch.delenv("L3_WHALE_THRESHOLD", raising=False)
     for mod in {config, getattr(s2, "config", config), getattr(main, "config", config)}:
         monkeypatch.setattr(mod, "DATA_DIR", tmp_path, raising=False)
+        monkeypatch.setattr(mod, "DATA_SOURCE", "replay", raising=False)
         monkeypatch.setattr(mod, "TIMEFRAME", "M3", raising=False)
+        monkeypatch.setattr(mod, "BASE_TF_MINUTES", 3, raising=False)
+        monkeypatch.setattr(mod, "A1_BASE_TF_MINUTES", 3, raising=False)
         monkeypatch.setattr(mod, "CONFIDENCE_THRESHOLD", 35.0, raising=False)
         monkeypatch.setattr(mod, "FAMILY_GATE_LIVE_ENABLED", True, raising=False)
         monkeypatch.setattr(mod, "STAGE3B_GATE_LIVE_ENABLED", True, raising=False)
@@ -453,3 +457,59 @@ def test_stage3d_sniper_keeps_scout_geometry_even_when_env_aggressive_a2_enabled
     assert rc == 0
     assert out_custom.exists()
     assert "[8b] SHOOTING CORRIDOR & SCOUT-BRACKET DIAGNOSTIC" in out_custom.read_text(encoding="utf-8")
+
+
+def test_stage3e_passive_road_warmup_stays_warm_on_calm_ladder_without_whale_doors(monkeypatch, tmp_path):
+    """Stage 3e: 12 calm live cycles with smooth ladder (0 whale outlier doors & <12 prints
+    in M3 bar) still keep Crowd v2 Q2 road history warm (`12/12`) so cycle 13 fires GO!"""
+    _configure_stage3d_env(monkeypatch, tmp_path)
+    signal_team._BOOK = None
+    s2._A1_BAR_SERVICE_CACHE.clear()
+    s2._PERSISTENT_L2 = None
+    shooting_team._ROAD_HISTORY.clear()
+
+    import power_v2_shadow
+    monkeypatch.setattr(
+        power_v2_shadow,
+        "run_power_v2",
+        lambda *a, **k: {
+            "team": "POWER",
+            "version": "2.2.0",
+            "timeframe": "M3",
+            "direction": "NEITHER",
+            "up_power_pct": 50.0,
+            "down_power_pct": 50.0,
+            "power_total_pct": 100.0,
+            "reason_code": "BAD_DATA_QUALITY",
+            "shadow_only": False,
+            # Simulate calm 3m bar (<12 prints -> data_quality_ok=False in adapter)
+            "context": {"market_regime": "RANGE", "feed_stale": False, "data_quality_ok": False},
+            "regime_diagnostics": {"market_regime": "RANGE", "latest_tick_age_seconds": 1.0},
+        },
+    )
+
+    # First 12 minutes: NEUTRAL panel + smooth 3-lot ladder (no outlier whale door!)
+    monkeypatch.setattr(
+        s2.SignalEngine,
+        "aggregate",
+        lambda self, *a, **k: (0.0, "NEUTRAL", 15.0, ["quiet tape"]),
+    )
+    base_dt = datetime(2026, 10, 29, 10, 0, tzinfo=timezone.utc)
+    for m in range(12):
+        t_dt = base_dt + timedelta(minutes=m)
+        # Smooth ladder (door_size=3.0 == regular 3.0 lot levels -> 0 outlier whale doors!)
+        md_smooth = _make_clean_m3_market_data(
+            t_dt, drift=-0.10, price=4000.0, door_price=3995.0, door_side="bids", door_size=3.0
+        )
+        s2.analyze_market(md_smooth, now=t_dt)
+
+    assert len(shooting_team._ROAD_HISTORY) >= 12
+
+    # Next M3 bar close (`10:15`): Real 120-lot whale door appears + Stage-3 Sniper Panel fires SELL @ 74%!
+    monkeypatch.setattr(s2.SignalEngine, "aggregate", _mock_sell_aggregate)
+    t_fire = base_dt + timedelta(minutes=15)
+    md_fire = _make_clean_m3_market_data(
+        t_fire, drift=-0.40, price=4000.0, door_price=3995.0, door_side="bids", door_size=120.0
+    )
+    snap = s2.analyze_market(md_fire, now=t_fire)
+    assert snap.shot["shot"] == "GO", f"Expected GO after 12-cycle calm ladder warm-up, got {snap.shot}"
