@@ -1423,6 +1423,15 @@ def _reset_step2_singletons() -> None:
     except Exception:
         pass
     try:
+        import aggressive_trigger as at_mod
+        if hasattr(at_mod, "EYES") and at_mod.EYES is not None:
+            at_mod.EYES.samples.clear()
+            at_mod.EYES.panel.clear()
+            at_mod.EYES.last_fire = None
+            at_mod.EYES._last_note = None
+    except Exception:
+        pass
+    try:
         import aggressive_trigger as ag_mod
         if hasattr(ag_mod, "EYES") and hasattr(ag_mod.EYES, "reset"):
             ag_mod.EYES.reset()
@@ -2068,11 +2077,21 @@ def replay_single_day(
     }
 
 
-def _replay_worker(task: Tuple[str, str, str, int, str]) -> Dict[str, Any]:
-    """Top-level multiprocessing worker for parallel multi-day replay."""
-    day_s, root_s, data_s, every_s, win_s = task
+def _replay_worker(task: Tuple[Any, ...]) -> Dict[str, Any]:
+    """Top-level multiprocessing worker for parallel multi-day replay (Windows spawn safe)."""
+    day_s, root_s, data_s, every_s, win_s = task[:5]
+    state_snap = task[5] if len(task) > 5 and isinstance(task[5], dict) else None
+    root_p = Path(root_s)
+    if state_snap is not None:
+        for k, v in (state_snap.get("env") or {}).items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = str(v)
+        for k, v in (state_snap.get("cfg") or {}).items():
+            setattr(config, k, v)
     return replay_single_day(
-        day_s, root_dir=Path(root_s), data_dir=Path(data_s), every_s=every_s, window_str=win_s
+        day_s, root_dir=root_p, data_dir=Path(data_s), every_s=every_s, window_str=win_s
     )
 
 
@@ -2512,6 +2531,14 @@ def synthesize_multi_day(results: List[Dict[str, Any]]) -> Tuple[str, str, Dict[
         raw_r = str(wc.get("shot_reason") or "unspecified").split(";")[0].strip()[:88]
         wait_reasons[raw_r or "unspecified"] += 1
     lines.append(f"\n[8b] SHOOTING CORRIDOR & SCOUT-BRACKET DIAGNOSTIC (Conf>={conf_thr:.0f}%)")
+    lines.append(
+        f"  Active Scout/Shooting Config: L3_WHALE_THRESHOLD={getattr(config, 'L3_WHALE_THRESHOLD', 10.0)} | "
+        f"SCOUT_MIN_SPREADS={getattr(config, 'SCOUT_MIN_SPREADS', 10.0)} | "
+        f"SCOUT_MIN_TARGET_USD={getattr(config, 'SCOUT_MIN_TARGET_USD', 0.0)} | "
+        f"BOOK_DEPTH={getattr(config, 'BOOKMAP_MAX_DEPTH_LEVELS', 40)} | "
+        f"AGGR_A2={getattr(config, 'AGGRESSIVE_ENTRY_ENABLED', False)} | "
+        f"LIMIT={getattr(config, 'LIMIT_ORDER_ENABLED', False)}"
+    )
     if go_cycles:
         go_br = [c["shot_br_pts"] for c in go_cycles if c.get("shot_br_pts") is not None]
         go_tp = sum(1 for c in go_cycles if c.get("shot_br_out") == "TP")
@@ -2635,12 +2662,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     ap.add_argument("--date", default=None, help="Single YYYY-MM-DD date to replay")
     ap.add_argument("--dates", default=None, help="Comma-separated YYYY-MM-DD dates")
+    ap.add_argument("--start", default=None, help="Start date YYYY-MM-DD (inclusive, used with --end)")
+    ap.add_argument("--end", default=None, help="End date YYYY-MM-DD (inclusive, used with --start)")
     ap.add_argument("--days", type=int, default=11, help="Auto-discover last N raw-data days (default: 11)")
     ap.add_argument("--every", type=int, default=60, help="Seconds between evaluation cycles (default: 60)")
     ap.add_argument("--window", default="08:00-23:00", help="Budapest local window (default: 08:00-23:00)")
     ap.add_argument("--workers", type=int, default=0, help="Parallel worker processes across days (0=auto up to 3, 1=sequential)")
     ap.add_argument("--root-dir", default=str(ROOT), help="Project root directory")
     ap.add_argument("--data-dir", default=None, help="Data/output directory (default: <root>/data)")
+    ap.add_argument("--out", default=None, help="Optional custom output .txt path (also saves standard current_version_replay.txt)")
     ap.add_argument("--no-browser", action="store_true", help="Do not auto-open HTML report in browser")
     args = ap.parse_args(argv)
 
@@ -2652,6 +2682,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         target_days = [args.date.strip()]
     elif args.dates:
         target_days = [d.strip() for d in args.dates.split(",") if d.strip()]
+    elif args.start or args.end:
+        avail = set(discover_available_days(root_dir, data_dir, max_days=366))
+        s_dt = date.fromisoformat(args.start.strip()) if args.start else min(date.fromisoformat(x) for x in avail)
+        e_dt = date.fromisoformat(args.end.strip()) if args.end else max(date.fromisoformat(x) for x in avail)
+        if e_dt < s_dt:
+            s_dt, e_dt = e_dt, s_dt
+        span_days: List[str] = []
+        cur_dt = s_dt
+        while cur_dt <= e_dt:
+            ds = cur_dt.isoformat()
+            if not avail or ds in avail:
+                span_days.append(ds)
+            cur_dt += timedelta(days=1)
+        target_days = span_days
     else:
         target_days = discover_available_days(root_dir, data_dir, max_days=args.days)
 
@@ -2674,7 +2718,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     results: List[Dict[str, Any]] = []
     if n_workers > 1 and len(target_days) > 1:
-        tasks = [(d, str(root_dir), str(data_dir), every_s, args.window) for d in target_days]
+        _env_keys = (
+            "TIMEFRAME", "A1_BASE_TF_MINUTES", "POWER_BAR_SECONDS", "CONFIDENCE_THRESHOLD",
+            "AGGRESSIVE_ENTRY_ENABLED", "LIMIT_ORDER_ENABLED", "SCOUT_MIN_SPREADS",
+            "SCOUT_MIN_TARGET_USD", "L3_WHALE_THRESHOLD", "RETIRED_JUDGES",
+        )
+        _cfg_keys = (
+            "TIMEFRAME", "BASE_TF_MINUTES", "POWER_BAR_SECONDS", "CONFIDENCE_THRESHOLD",
+            "AI_CONFIDENCE_THRESHOLD", "AGGRESSIVE_ENTRY_ENABLED", "LIMIT_ORDER_ENABLED",
+            "SCOUT_MIN_SPREADS", "SCOUT_MIN_TARGET_USD", "L3_WHALE_THRESHOLD",
+            "RETIRED_JUDGES", "FAMILY_GATE_LIVE_ENABLED", "STAGE3B_GATE_LIVE_ENABLED",
+            "STAGE3C_SESSION_GATE_LIVE_ENABLED", "STAGE3D_SNIPER_GATE_LIVE_ENABLED",
+            "STAGE3D_BLOCK_POWER_CLIMAX", "STAGE3D_SNIPER_ENTRY_ENABLED",
+        )
+        _state_snap = {
+            "env": {k: os.environ.get(k) for k in _env_keys},
+            "cfg": {k: getattr(config, k) for k in _cfg_keys if hasattr(config, k)},
+        }
+        tasks = [(d, str(root_dir), str(data_dir), every_s, args.window, _state_snap) for d in target_days]
         try:
             with concurrent.futures.ProcessPoolExecutor(max_workers=n_workers) as pool:
                 results = list(pool.map(_replay_worker, tasks))
@@ -2711,8 +2772,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     out_html = data_dir / "current_version_replay.html"
     out_txt.write_text(txt_rep + "\n", encoding="utf-8", newline="\n")
     out_html.write_text(html_rep, encoding="utf-8", newline="\n")
+    custom_txt: Optional[Path] = None
+    if args.out:
+        custom_txt = Path(args.out)
+        if not custom_txt.is_absolute():
+            custom_txt = (root_dir / custom_txt).resolve()
+        custom_txt.parent.mkdir(parents=True, exist_ok=True)
+        if custom_txt.resolve() != out_txt.resolve():
+            custom_txt.write_text(txt_rep + "\n", encoding="utf-8", newline="\n")
 
     print("\n" + txt_rep)
+    if custom_txt is not None and custom_txt.resolve() != out_txt.resolve():
+        print(f"[saved] {custom_txt}   <- share this single .txt file in chat!")
     print(f"[saved] {out_txt}   <- share this single .txt file in chat!")
     print(f"[saved] {out_html}  <- interactive overview + links to each day's 'Every decision' page")
 

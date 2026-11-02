@@ -88,6 +88,11 @@ def _make_clean_m3_market_data(
 
 
 def _configure_stage3d_env(monkeypatch, tmp_path):
+    monkeypatch.delenv("AGGRESSIVE_ENTRY_ENABLED", raising=False)
+    monkeypatch.delenv("LIMIT_ORDER_ENABLED", raising=False)
+    monkeypatch.delenv("SCOUT_MIN_TARGET_USD", raising=False)
+    monkeypatch.delenv("SCOUT_MIN_SPREADS", raising=False)
+    monkeypatch.delenv("L3_WHALE_THRESHOLD", raising=False)
     for mod in {config, getattr(s2, "config", config), getattr(main, "config", config)}:
         monkeypatch.setattr(mod, "DATA_DIR", tmp_path, raising=False)
         monkeypatch.setattr(mod, "TIMEFRAME", "M3", raising=False)
@@ -102,6 +107,17 @@ def _configure_stage3d_env(monkeypatch, tmp_path):
         monkeypatch.setattr(mod, "EXECUTION_MODE", "python", raising=False)
         monkeypatch.setattr(mod, "LIMIT_ORDER_ENABLED", False, raising=False)
         monkeypatch.setattr(mod, "AGGRESSIVE_ENTRY_ENABLED", False, raising=False)
+        monkeypatch.setattr(mod, "L3_WHALE_THRESHOLD", 10.0, raising=False)
+        monkeypatch.setattr(mod, "SCOUT_MIN_SPREADS", 10.0, raising=False)
+        monkeypatch.setattr(mod, "SCOUT_MIN_TARGET_USD", 0.0, raising=False)
+        monkeypatch.setattr(mod, "SCOUT_ATR_FLOOR_PCT", 0.0004, raising=False)
+        monkeypatch.setattr(mod, "SHOOT_DOOR_MARGIN", 3.0, raising=False)
+        monkeypatch.setattr(mod, "SHOOT_ROAD_NORMAL_MAX", 2.0, raising=False)
+        monkeypatch.setattr(mod, "SHOOT_PARTICIPATION_MAX", 0.10, raising=False)
+        monkeypatch.setattr(mod, "SHOOT_MIN_RR", 1.20, raising=False)
+        monkeypatch.setattr(mod, "SHOOT_MIN_REWARD_USD", 0.0, raising=False)
+        monkeypatch.setattr(mod, "SHOOT_EFFECTIVE_CFD_SPREAD_PTS", 0.0, raising=False)
+        monkeypatch.setattr(mod, "A2_MIN_CLEAR_WALL_PTS", 1.50, raising=False)
 
 
 def _mock_sell_aggregate(self, *a, **k):
@@ -116,13 +132,24 @@ def _mock_sell_aggregate(self, *a, **k):
     )
 
 
-def test_stage3d_defaults_and_pinned_legacy_flags_intact():
-    assert getattr(config, "STAGE3D_SNIPER_GATE_LIVE_ENABLED", False) is True
-    assert getattr(config, "STAGE3D_BLOCK_POWER_CLIMAX", False) is True
-    assert getattr(config, "STAGE3D_SNIPER_ENTRY_ENABLED", False) is True
-    # Pinned legacy flags MUST stay False by default
-    assert getattr(config, "AGGRESSIVE_ENTRY_ENABLED", None) is False
-    assert getattr(config, "LIMIT_ORDER_ENABLED", None) is False
+def test_stage3d_defaults_and_pinned_legacy_flags_intact(monkeypatch):
+    with monkeypatch.context() as mp:
+        for k in (
+            "STAGE3D_SNIPER_GATE_LIVE_ENABLED",
+            "STAGE3D_BLOCK_POWER_CLIMAX",
+            "STAGE3D_SNIPER_ENTRY_ENABLED",
+            "AGGRESSIVE_ENTRY_ENABLED",
+            "LIMIT_ORDER_ENABLED",
+        ):
+            mp.delenv(k, raising=False)
+        config._refresh()
+        assert getattr(config, "STAGE3D_SNIPER_GATE_LIVE_ENABLED", False) is True
+        assert getattr(config, "STAGE3D_BLOCK_POWER_CLIMAX", False) is True
+        assert getattr(config, "STAGE3D_SNIPER_ENTRY_ENABLED", False) is True
+        # Pinned legacy code defaults MUST stay False when unset in .env
+        assert getattr(config, "AGGRESSIVE_ENTRY_ENABLED", None) is False
+        assert getattr(config, "LIMIT_ORDER_ENABLED", None) is False
+    config._refresh()
 
 
 def test_stage3d_late_power_climax_caps_confidence_and_fails_closed_in_main(monkeypatch, tmp_path):
@@ -362,3 +389,67 @@ def test_stage3d_law11_m3_clock_and_min_trades_calibration(tmp_path, monkeypatch
     verdict_m5 = shooting_team._crowd_v2(door_size=25.0, road_lots=10.0, shot_lots=1.0, recent_volume=500.0, config=cfg_m5, now=100_300.0)
     assert verdict_m5["history_n"] >= 12
     assert verdict_m5["verdict"] == "PASS"
+
+
+def test_stage3d_sniper_keeps_scout_geometry_even_when_env_aggressive_a2_enabled(monkeypatch, tmp_path):
+    """When `.env` sets AGGRESSIVE_ENTRY_ENABLED=1, Stage-3d Sniper (POWER=NEITHER) must NOT
+    get hijacked into a 1.80/1.80 A2_BURST_FIXED stop; also test raw_replay --start/--end/--out."""
+    _configure_stage3d_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("AGGRESSIVE_ENTRY_ENABLED", "1")
+    monkeypatch.setattr(config, "AGGRESSIVE_ENTRY_ENABLED", True, raising=False)
+    signal_team._BOOK = None
+    s2._A1_BAR_SERVICE_CACHE.clear()
+    s2._PERSISTENT_L2 = None
+    now_dt = datetime(2026, 10, 29, 10, 15, tzinfo=timezone.utc)
+    now_ts = now_dt.timestamp()
+    shooting_team._ROAD_HISTORY.clear()
+    for k in range(15):
+        shooting_team._ROAD_HISTORY.append((now_ts - (15 - k) * 10.0, 25.0))
+
+    md = _make_clean_m3_market_data(
+        now_dt, drift=-0.40, price=4000.0, door_price=3995.0, door_side="bids", door_size=120.0
+    )
+    monkeypatch.setattr(s2.SignalEngine, "aggregate", _mock_sell_aggregate)
+    import power_v2_shadow
+    monkeypatch.setattr(
+        power_v2_shadow,
+        "run_power_v2",
+        lambda *a, **k: {
+            "team": "POWER",
+            "version": "2.2.0",
+            "timeframe": "M3",
+            "direction": "NEITHER",
+            "up_power_pct": 50.0,
+            "down_power_pct": 50.0,
+            "power_total_pct": 100.0,
+            "reason_code": "RANGE_NO_EDGE",
+            "shadow_only": False,
+            "context": {"market_regime": "RANGE", "feed_stale": False, "data_quality_ok": True},
+            "regime_diagnostics": {"market_regime": "RANGE", "latest_tick_age_seconds": 1.0},
+        },
+    )
+    snap = s2.analyze_market(md, now=now_dt)
+    assert snap.shot["shot"] == "GO"
+    assert snap.shot.get("a2_burst") is not True
+    # Target is anchored to the 3995.0 Scout door (~3995.40), NOT 4000 - 1.80 = 3998.10!
+    assert float(snap.shot["target"]) < 3996.0
+    assert abs(float(snap.shot["stop"]) - float(snap.shot["entry"])) > 2.0
+
+    # Also verify `--start`, `--end`, and `--out` flags in `tools/raw_replay.py`!
+    from test_stage1_timeframe_whatif_and_replay import _write_synthetic_raw_day
+    proj = tmp_path / "cli_proj"
+    data_dir = proj / "data"
+    _write_synthetic_raw_day(data_dir, "2026-10-29", start_px=4000.0, drift_per_min=0.30, minutes=140)
+    out_custom = data_dir / "current_version_replay-9.txt"
+    rc = rr.main([
+        "--start", "2026-10-29",
+        "--end", "2026-10-29",
+        "--every", "180",
+        "--root-dir", str(proj),
+        "--data-dir", str(data_dir),
+        "--out", str(out_custom),
+        "--no-browser",
+    ])
+    assert rc == 0
+    assert out_custom.exists()
+    assert "[8b] SHOOTING CORRIDOR & SCOUT-BRACKET DIAGNOSTIC" in out_custom.read_text(encoding="utf-8")

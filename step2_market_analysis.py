@@ -6596,8 +6596,11 @@ def analyze_market(market_data: Dict[str, Any],
             )
         try:
             from aggressive_trigger import evaluate_aggressive_trigger as _aggr_eval
+            # Keep A2 / v1 impulse trigger strictly bound to raw `_power_v2` so
+            # `AGGRESSIVE_ENTRY_ENABLED=1` in `.env` never overwrites Stage-3d Sniper
+            # Scout-door + 2*ATR brackets with 1.80/1.80 `A2_BURST_FIXED` stops.
             _aggr = _aggr_eval(
-                power=(_s3d_power_envelope or _power_v2),
+                power=_power_v2,
                 shot_context={
                     "bid": _raw_bid, "ask": _raw_ask,
                     "news_state": news.news_state,
@@ -6669,7 +6672,7 @@ def analyze_market(market_data: Dict[str, Any],
             # once plan_shot actually approves AGGRESSIVE_MARKET GO.
         }
         _a2_gate_out = (
-            _a2_gate(_aggr, (_s3d_power_envelope or _power_v2), order_flow, locals().get("direction"),
+            _a2_gate(_aggr, _power_v2, order_flow, locals().get("direction"),
                      now, config, notes, defer_commit=True)
             if _a2_gate is not None
             else {
