@@ -50,7 +50,12 @@ def _day_str(p: Path) -> str:
 
 
 def find_source_files(data_dir: Path, as_of: str, days_wanted: int):
-    """Newest K judge_panel files strictly BEFORE as_of. -> [(day, path)]"""
+    """Newest K judge_panel files strictly BEFORE as_of. -> [(day, path)]
+
+    Stage 5 Epoch Guard: once at least one post-surgery (d >= JUDGE_REPORT_CARD_EPOCH_DATE)
+    file exists before as_of, drop pre-epoch files so pre-surgery October grades never
+    mix into post-surgery Heart report cards.
+    """
     files = []
     if data_dir.is_dir():
         for p in data_dir.glob("judge_panel_*.csv"):
@@ -58,6 +63,16 @@ def find_source_files(data_dir: Path, as_of: str, days_wanted: int):
             if len(d) == 10 and d < as_of:
                 files.append((d, p))
     files.sort(reverse=True)
+    epoch = ""
+    try:
+        import config as _cfg
+        epoch = str(getattr(_cfg, "JUDGE_REPORT_CARD_EPOCH_DATE", "") or "").strip()
+    except Exception:
+        epoch = ""
+    if len(epoch) == 10 and as_of >= epoch:
+        post_epoch = [item for item in files if item[0] >= epoch]
+        if post_epoch:
+            files = post_epoch
     return files[:days_wanted]
 
 

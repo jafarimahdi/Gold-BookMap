@@ -263,8 +263,34 @@ def _refresh() -> None:
 
     g["ORDER_BLOCKS_ENABLED"] = _fget("ORDER_BLOCKS_ENABLED", "1") == "1"
 
-    g["COOLDOWN_MINUTES"] = _fint("COOLDOWN_MINUTES", 30)
+    _cd_legacy_raw = _fget("COOLDOWN_MINUTES", "").strip().lower()
+    if _cd_legacy_raw in ("", "auto", "timeframe", "tf"):
+        g["COOLDOWN_MINUTES"] = int(g["BASE_TF_MINUTES"])
+    else:
+        g["COOLDOWN_MINUTES"] = _fint("COOLDOWN_MINUTES", int(g["BASE_TF_MINUTES"]))
     g["MAX_TRADES_PER_DAY"] = _fint("MAX_TRADES_PER_DAY", 20)
+
+    # Stage 3R / 4R (2026-11-02, proven on 15-day M3 raw archive replay-14..16):
+    # - Stage 3R Unplugged-MBO Eye Guard: blocks blind-depth execution on BookMap
+    #   bridge when live trade prints flow while Level-3 MBO events are unavailable
+    #   or stale (e.g. 2026-10-15 MBO dropout -> -62.0 PM_TRAIL / 17.2 DD).
+    # - Stage 4R Post-Exit Cooldown (Law #11): defaults to 1x active chart bar
+    #   (3.0m on M3, 5.0m on M5) after position close instead of legacy M5 10m.
+    # - Stage 4R Daily-Loss Circuit Breaker: halts new intraday entries once net
+    #   realized local-day PnL reaches -STAGE4R_DAILY_MAX_LOSS_PTS (-12.0 pts,
+    #   ~2R; healthy losing days across 15d stopped at -4.0..-9.2 pts).
+    g["STAGE3R_MBO_FEED_GUARD_ENABLED"] = _fget("STAGE3R_MBO_FEED_GUARD_ENABLED", "1") == "1"
+    g["STAGE4R_POST_EXIT_COOLDOWN_ENABLED"] = _fget("STAGE4R_POST_EXIT_COOLDOWN_ENABLED", "1") == "1"
+    _cd_4r_raw = _fget("STAGE4R_POST_EXIT_COOLDOWN_MINUTES", "").strip().lower()
+    if _cd_4r_raw in ("", "auto", "timeframe", "tf"):
+        g["STAGE4R_POST_EXIT_COOLDOWN_MINUTES"] = float(g["BASE_TF_MINUTES"])
+    else:
+        try:
+            g["STAGE4R_POST_EXIT_COOLDOWN_MINUTES"] = max(0.0, float(_cd_4r_raw))
+        except ValueError:
+            g["STAGE4R_POST_EXIT_COOLDOWN_MINUTES"] = float(g["BASE_TF_MINUTES"])
+    g["STAGE4R_DAILY_LOSS_BREAKER_ENABLED"] = _fget("STAGE4R_DAILY_LOSS_BREAKER_ENABLED", "1") == "1"
+    g["STAGE4R_DAILY_MAX_LOSS_PTS"] = max(0.0, _ffloat("STAGE4R_DAILY_MAX_LOSS_PTS", 12.0))
 
     # ---- STEP 3 / STEP 4 thresholds -----------------------------------------
     g["AI_CONFIDENCE_THRESHOLD"] = _ffloat("CONFIDENCE_THRESHOLD", 70.0)
@@ -867,6 +893,11 @@ def _refresh() -> None:
     # ---- MT5 signal bridge -------------------------------------------------
     g["MT5_SIGNAL_FILE"] = _fget("MT5_SIGNAL_FILE", "")
     g["SIGNAL_MAX_AGE_SECONDS"] = _fint("SIGNAL_MAX_AGE_SECONDS", 180)
+    # Stage 5 Pre-DEMO Bridge (2026-11-02): post-surgery Judge Report Card epoch so
+    # pre-surgery October CSVs never label healed Heart judges as [WEAK] on live DEMO.
+    g["JUDGE_REPORT_CARD_EPOCH_DATE"] = str(
+        _fget("JUDGE_REPORT_CARD_EPOCH_DATE", "2026-11-03") or ""
+    ).strip()
 
 
 _load_dotenv(BASE_DIR / ".env")

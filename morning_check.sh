@@ -58,7 +58,7 @@ echo
 echo "== 1b. is the clock you trade on the clock the market uses? ==========="
 ml=$(date '+%H:%M:%S' 2>/dev/null); mu=$(date -u '+%H:%M:%S' 2>/dev/null)
 tz=$(date '+%z' 2>/dev/null)
-echo "   machine-local $ml  machine-utc $mu  offset $tz  (want offset +0200 for Budapest)"
+echo "   machine-local $ml  machine-utc $mu  offset $tz  (want +0100 CET winter / +0200 CEST summer for Budapest)"
 ru=""
 command -v curl >/dev/null 2>&1 && ru=$(curl -sI --max-time 5 https://www.google.com 2>/dev/null \
   | sed -n 's/^[Dd]ate: //p' | tr -d '\r')

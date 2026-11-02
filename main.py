@@ -465,6 +465,22 @@ def _preflight_data_reason(data, elapsed_since_acquire_seconds: float = 0.0):
                 return "BookMap L2 quote does not match bid/ask; no trading"
         except (TypeError, ValueError, OverflowError):
             return "BookMap L2 quote diagnostics invalid; no trading"
+        if (
+            bool(getattr(config, "STAGE3R_MBO_FEED_GUARD_ENABLED", True))
+            and str(quality.get("trade_prints", "")).lower() == "available"
+        ):
+            l3_ev_status = str(quality.get("level3_events", "")).lower()
+            try:
+                from step2_market_analysis import _snapshot_data_quality
+                snap_q = _snapshot_data_quality(data, data.get("tick_data") or [])
+                l3_ev_status = str(snap_q.get("level3_events", l3_ev_status)).lower()
+            except Exception:
+                pass
+            if l3_ev_status in {"unavailable", "stale_or_unverifiable"}:
+                return (
+                    f"BookMap MBO Level-3 feed unplugged/stale ({l3_ev_status}) "
+                    "while trades print; no blind-depth trading"
+                )
     return None
 
 
@@ -1352,6 +1368,10 @@ def _evaluate_standing_ai_slip(snapshot, now: float, min_interval: float,
     live_pdir = str(pw.get("direction", "") or "").upper()
     if (act == "BUY" and live_pdir == "DOWN") or (act == "SELL" and live_pdir == "UP"):
         return None
+    # 3b) Explicit Step-2 signal direction flip check (when populated on snapshot)
+    live_sig_dir = str(getattr(snapshot, "signal_direction", "") or "").upper()
+    if live_sig_dir in ("BUY", "SELL", "NEUTRAL") and live_sig_dir != act:
+        return None
     # 4) Price excursion check (<= 2.0 * ATR or 0.3% fallback)
     slip_px = float(slip.get("price", 0.0) or 0.0)
     live_px = float(getattr(snapshot, "price", 0.0) or 0.0)
@@ -1911,6 +1931,12 @@ def _shooting_execution_gate(decision, snapshot):
         if isinstance(_s3d_gate, dict) and _s3d_gate.get("ok") is False:
             return False, (
                 f"Stage 3d Climax Gate failed ({_s3d_gate.get('reason', 'late_power_climax')})"
+            )
+    if bool(getattr(config, "STAGE3R_MBO_FEED_GUARD_ENABLED", False)):
+        _s3r_gate = (getattr(snapshot, "shadow_candidates", None) or {}).get("stage3r_gate")
+        if isinstance(_s3r_gate, dict) and _s3r_gate.get("ok") is False:
+            return False, (
+                f"Stage 3R MBO Feed Gate failed ({_s3r_gate.get('reason', 'unplugged_mbo')})"
             )
     plan = getattr(snapshot, "shot", None) or {}
     power = getattr(snapshot, "power", None) or {}
@@ -3462,7 +3488,10 @@ def _ensure_judge_report_card_ready() -> None:
             try:
                 existing = json.loads(card_path.read_text(encoding="utf-8"))
                 src_days = [str(d) for d in (existing.get("source_days") or [])]
+                epoch_date = str(getattr(config, "JUDGE_REPORT_CARD_EPOCH_DATE", "2026-11-03") or "").strip()
                 if not src_days or any(d >= today_utc for d in src_days):
+                    needs_build = True
+                elif len(epoch_date) == 10 and today_utc >= epoch_date and any(d < epoch_date for d in src_days):
                     needs_build = True
                 else:
                     from datetime import date as _dt_date

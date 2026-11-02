@@ -339,8 +339,12 @@ def _judge_report_card_block(snapshot=None):
 
         card = json.loads(card_path.read_text(encoding="utf-8"))
         days = [str(d) for d in (card.get("source_days") or [])]
+        epoch_date = str(getattr(config, "JUDGE_REPORT_CARD_EPOCH_DATE", "2026-11-03") or "").strip()
+        epoch_ok = True
+        if len(epoch_date) == 10 and today >= epoch_date:
+            epoch_ok = bool(days) and all(d >= epoch_date for d in days)
         block = ""
-        if days and all(d and d < today for d in days):
+        if epoch_ok and days and all(d and d < today for d in days):
             max_stale = _knob("AI_CARD_MAX_STALE_DAYS", 4)
             min_scored = _knob("AI_CARD_MIN_SCORED", 20)
             try:
@@ -404,14 +408,14 @@ class AIDecisionEngine:
         f"You are Captain 5 of Gold-BookMap v7.0 {_TF_LABEL} scalper — the Institutional Meta-Labeling Doorman Gate.\n"
         "YOUR ROLE (Lopez de Prado Meta-Labeling): Primary quantitative microstructure (signal_direction, active_family_summary across 5 independent families TAPE/BOOK/HIDDEN/MAP/WORLD, POWER v2, and SHOOTING plan) proposes the directional side. Your job is to APPROVE that side or VETO to HOLD.\n"
         "HARD DOORMAN RULES:\n"
-        "1) SIDE DISCIPLINE: If signal_direction is BUY or SELL, output ONLY that same action (approve) or \"HOLD\" (veto). NEVER flip BUY->SELL or SELL->BUY. Weak, mixed, or <2 agreeing families MUST return \"HOLD\" (never output BUY/SELL on weak confluence).\n"
-        "2) SYMMETRIC REGIME LAW (TREND vs LAKE/RANGE): When regime is TREND or power.direction is UP (UPWARD_FORCE_DOMINATES / M5 UP), NEVER treat price above VWAP +1sigma/+2sigma, above Day POC, or resting top_asks as bearish SELL resistance (resting asks above an uptrend are normal limit targets). Symmetrically, when power.direction is DOWN (DOWNWARD_FORCE_DOMINATES / M5 DOWN), NEVER treat price below VWAP -1sigma/-2sigma, below Day POC, or resting top_bids as bullish BUY support. Mean-reversion fades at VWAP +-2sigma / VAH / VAL apply ONLY in RANGE (LAKE) regime when confirmed by sweep, passive absorption, or institutional iceberg.\n"
+        "1) SIDE & SNIPER DISCIPLINE: If signal_direction is BUY or SELL, output ONLY that same action (approve) or \"HOLD\" (veto). NEVER flip BUY->SELL or SELL->BUY. Weak, mixed, or <2 agreeing families MUST return \"HOLD\". When shot.shot == \"GO\" and shot.authorized_by == \"STAGE3D_SNIPER\", power.direction == \"NEITHER\" is the expected pre-climax entry window (never veto a STAGE3D_SNIPER GO merely because power is NEITHER).\n"
+        "2) SYMMETRIC REGIME LAW (TREND vs LAKE/RANGE): When regime is TREND or power.direction is UP (UPWARD_FORCE_DOMINATES), NEVER treat price above VWAP +1sigma/+2sigma, above Day POC, or resting top_asks as bearish SELL resistance (resting asks above an uptrend are normal limit targets). Symmetrically, when power.direction is DOWN (DOWNWARD_FORCE_DOMINATES), NEVER treat price below VWAP -1sigma/-2sigma, below Day POC, or resting top_bids as bullish BUY support. Mean-reversion fades at VWAP +-2sigma / VAH / VAL apply ONLY in RANGE (LAKE) regime when confirmed by sweep, passive absorption, or institutional iceberg.\n"
         "3) INSTITUTIONAL L3 & BRIDGE: Weigh top_icebergs by age_sec and score (INSTITUTIONAL age_sec>=1800 or refills>=5 = real hidden liquidity; RECENT age_sec<180 = noise). Check recent_bars OHLCV momentum, execution_bridge (GC vs CFD basis/spread; veto HOLD if cfd_spread_pts>0.60), and recent_closed_trades WIN/LOSS streak (avoid repeating consecutive losing fades).\n"
         "4) NEWS & MACRO: HIGH impact news <30min or BLACKOUT -> HOLD. Geopolitical risk-off/dovish/falling real yields -> bullish Gold; hawkish/rising real yields -> bearish Gold; if headlines stale, rely on live MBO flow & regime.\n"
         "Output strict JSON only: {\"vote\": -1.0 to +1.0, \"action\": \"BUY\"|\"SELL\"|\"HOLD\", \"confidence\": 0-100, \"rationale\": \"<=28 words citing active families, POWER, L3/icebergs, and regime\", \"key_signals\": [\"...\"], \"risk_notes\": \"<=12 words\"}\n"
         "Balanced Examples:\n"
-        "- BUY approve: signal_direction BUY, active_family_summary 3 families BUY (TAPE+BOOK+HIDDEN), power UP (UPWARD_FORCE_DOMINATES), recent_bars +4.2pts 10/15 up, iceberg bid @3990.5 refills=6 age_sec=2400 INSTITUTIONAL -> {\"vote\": 1.0, \"action\": \"BUY\", \"confidence\": 78, \"rationale\": \"3 families BUY + POWER UP + institutional bid iceberg @3990.5 + bullish M1 bar impulse in TREND -> BUY\", \"key_signals\": [\"3_families_buy\", \"power_up\", \"inst_iceberg_bid\"], \"risk_notes\": \"normal spread\"}\n"
-        "- SELL approve: signal_direction SELL, active_family_summary 3 families SELL (TAPE+HIDDEN+MAP), power DOWN (DOWNWARD_FORCE_DOMINATES), bearish sweep high + negative near_touch_ofi -> {\"vote\": -1.0, \"action\": \"SELL\", \"confidence\": 78, \"rationale\": \"3 families SELL + POWER DOWN + bearish liquidity sweep + negative MBO near-touch OFI -> SELL\", \"key_signals\": [\"3_families_sell\", \"power_down\", \"bear_sweep\"], \"risk_notes\": \"normal spread\"}\n"
+        "- BUY approve: signal_direction BUY, active_family_summary 3 families BUY (TAPE+BOOK+HIDDEN), power UP (UPWARD_FORCE_DOMINATES), recent_bars +4.2pts 10/15 up, iceberg bid @3990.5 refills=6 age_sec=2400 INSTITUTIONAL -> {\"vote\": 1.0, \"action\": \"BUY\", \"confidence\": 78, \"rationale\": \"3 families BUY + POWER UP + institutional bid iceberg @3990.5 + bullish bar impulse in TREND -> BUY\", \"key_signals\": [\"3_families_buy\", \"power_up\", \"inst_iceberg_bid\"], \"risk_notes\": \"normal spread\"}\n"
+        "- SELL approve: signal_direction SELL, active_family_summary 3 families SELL (TAPE+HIDDEN+MAP), power DOWN (DOWNWARD_FORCE_DOMINATES) or STAGE3D_SNIPER GO, bearish sweep high + negative near_touch_ofi -> {\"vote\": -1.0, \"action\": \"SELL\", \"confidence\": 78, \"rationale\": \"3 families SELL + Sniper/POWER confluence + bearish liquidity sweep + negative MBO near-touch OFI -> SELL\", \"key_signals\": [\"3_families_sell\", \"bear_sweep\"], \"risk_notes\": \"normal spread\"}\n"
         "- HOLD veto: signal_direction BUY or NEUTRAL, <2 families agree, mixed OFI vs imbalance, or counter-trend VWAP band fade inside TREND -> {\"vote\": 0.0, \"action\": \"HOLD\", \"confidence\": 20, \"rationale\": \"Confluence fail (<2 families agree) and mixed MBO flow -> HOLD veto\", \"key_signals\": [\"confluence_fail\"], \"risk_notes\": \"mixed flow\"}\n"
         "Temperature 0.2 deterministic."
     )
@@ -656,7 +660,7 @@ class AIDecisionEngine:
         if isinstance(payload.get("shot"), dict):
             sh = payload["shot"]
             vis = sh.get("visibility") if isinstance(sh.get("visibility"), dict) else {}
-            payload["shot"] = {
+            shot_slim: Dict[str, Any] = {
                 "shot": sh.get("shot"),
                 "side": sh.get("side"),
                 "entry_style": sh.get("entry_style"),
@@ -666,10 +670,26 @@ class AIDecisionEngine:
                 "rr": sh.get("rr"),
                 "reason": vis.get("primary_reason") or sh.get("reason") or sh.get("why"),
             }
+            if sh.get("authorized_by"):
+                shot_slim["authorized_by"] = sh.get("authorized_by")
+            if sh.get("sniper_pebble_bypass"):
+                shot_slim["sniper_pebble_bypass"] = True
+            payload["shot"] = shot_slim
 
         # 2) Filter retired toxic judges out of judge_votes and notes, and build active_family_summary
         if "judge_votes" in payload:
             active_jv, fam_summary = self._filter_active_judges_and_families(payload.get("judge_votes"))
+            snap_shadows = getattr(snapshot, "shadow_candidates", None) or {}
+            fg_shadow = snap_shadows.get("family_gate") if isinstance(snap_shadows, dict) else None
+            if isinstance(fg_shadow, dict):
+                canon_fams = [str(f) for f in (fg_shadow.get("agree_families") or []) if f]
+                fam_summary["family_gate_ok"] = bool(fg_shadow.get("ok", False))
+                fam_summary["canonical_agreeing_families"] = canon_fams
+                sig_dir_up = str(payload.get("signal_direction") or "").upper()
+                if sig_dir_up == "BUY" and len(canon_fams) > int(fam_summary.get("agreeing_families_buy", 0)):
+                    fam_summary["agreeing_families_buy"] = len(canon_fams)
+                elif sig_dir_up == "SELL" and len(canon_fams) > int(fam_summary.get("agreeing_families_sell", 0)):
+                    fam_summary["agreeing_families_sell"] = len(canon_fams)
             payload["judge_votes"] = active_jv
             payload["active_family_summary"] = fam_summary
         if isinstance(payload.get("notes"), list):
@@ -799,8 +819,13 @@ class AIDecisionEngine:
             payload["recent_closed_trades"] = recent_trades
 
         payload["session_context"] = session_context(now=getattr(snapshot, "timestamp", None))
+        live_tf = str(getattr(config, "TIMEFRAME", self._TF_LABEL) or self._TF_LABEL).upper()
+        sys_prompt = (
+            self.SYSTEM_PROMPT.replace(f"v7.0 {self._TF_LABEL} scalper", f"v7.0 {live_tf} scalper", 1)
+            if live_tf != self._TF_LABEL else self.SYSTEM_PROMPT
+        )
         return (
-            self.SYSTEM_PROMPT + "\n\n"
+            sys_prompt + "\n\n"
             "TRADING SESSION CONTEXT (use this to judge volatility/liquidity):\n"
             + json.dumps(payload["session_context"], separators=(",", ":")) + "\n\n"
             + _judge_report_card_block(snapshot)
