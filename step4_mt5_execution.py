@@ -974,22 +974,29 @@ class MT5Executor:
             and str(shot_plan.get("side", "")).upper() == str(action).upper()
             and str(shot_plan.get("stop_source", "")).upper() == "A2_BURST_FIXED"
         )
+        is_stage4a_shot_order = (
+            not is_a2_burst_order
+            and bool(getattr(config, "STAGE4A_WAVE_BRACKET_ENABLED", False))
+            and isinstance(shot_plan, dict)
+            and str(shot_plan.get("shot", "")).upper() == "GO"
+            and str(shot_plan.get("side", "")).upper() == str(action).upper()
+            and float(shot_plan.get("risk") or 0.0) > 0.0
+            and float(shot_plan.get("reward") or 0.0) > 0.0
+        )
         sl, tp, struct_notes = None, None, []
         if is_a2_burst_order:
             try:
                 pt_scale = (price / src_price) if src_price > 0 else 1.0
-                a2_sl_pts = self._normalize_price(
-                    max(0.1, float(getattr(config, "A2_BURST_SL_PTS", 1.8) or 1.8)) * pt_scale,
-                    info,
-                )
-                a2_tp_pts = self._normalize_price(
-                    max(0.1, float(getattr(config, "A2_BURST_TP_PTS", 1.8) or 1.8)) * pt_scale,
-                    info,
-                )
+                _plan_r = float(shot_plan.get("risk") or 0.0)
+                _plan_w = float(shot_plan.get("reward") or 0.0)
+                base_sl_pts = _plan_r if _plan_r > 0.0 else max(0.1, float(getattr(config, "A2_BURST_SL_PTS", 1.8) or 1.8))
+                base_tp_pts = _plan_w if _plan_w > 0.0 else max(0.1, float(getattr(config, "A2_BURST_TP_PTS", 1.8) or 1.8))
+                a2_sl_pts = self._normalize_price(base_sl_pts * pt_scale, info)
+                a2_tp_pts = self._normalize_price(base_tp_pts * pt_scale, info)
                 sl = self._normalize_price((price - a2_sl_pts) if is_buy else (price + a2_sl_pts), info)
                 tp = self._normalize_price((price + a2_tp_pts) if is_buy else (price - a2_tp_pts), info)
                 struct_notes = [
-                    f"A2 burst fixed bracket: TP {tp:.2f} ({a2_tp_pts:.2f} pts), "
+                    f"A2 burst bracket: TP {tp:.2f} ({a2_tp_pts:.2f} pts), "
                     f"SL {sl:.2f} ({a2_sl_pts:.2f} pts)"
                 ]
                 # C3 Wall-Aware Burst Cap: if a trusted opposing BookMap wall sits closer
@@ -1010,12 +1017,28 @@ class MT5Executor:
                 logger.exception("A2 burst bracket failed - falling back to wall brackets")
                 sl, tp = None, None
                 is_a2_burst_order = False
+        elif is_stage4a_shot_order:
+            try:
+                pt_scale = (price / src_price) if src_price > 0 else 1.0
+                sh_sl_pts = self._normalize_price(float(shot_plan["risk"]) * pt_scale, info)
+                sh_tp_pts = self._normalize_price(float(shot_plan["reward"]) * pt_scale, info)
+                sl = self._normalize_price((price - sh_sl_pts) if is_buy else (price + sh_sl_pts), info)
+                tp = self._normalize_price((price + sh_tp_pts) if is_buy else (price - sh_tp_pts), info)
+                struct_notes = [
+                    f"Stage 4a Shooting plan bracket: TP {tp:.2f} ({sh_tp_pts:.2f} pts), "
+                    f"SL {sl:.2f} ({sh_sl_pts:.2f} pts, src={shot_plan.get('stop_source', 'SHOOT')})"
+                ]
+            except Exception:
+                logger.exception("Stage 4a shot bracket scaling failed - falling back to wall brackets")
+                sl, tp = None, None
+        used_wall_brackets = False
         if sl is None or tp is None:
             try:
                 from wall_brackets import compute_wall_brackets
                 sl, tp, wb_notes = compute_wall_brackets(
                     action, price, atr, snapshot, cfd_spread=cfd_tick_spread)
                 struct_notes = list(wb_notes or [])
+                used_wall_brackets = (sl is not None and tp is not None)
             except Exception:
                 logger.exception("wall brackets failed - structural fallback")
         if sl is None or tp is None:
@@ -1030,15 +1053,9 @@ class MT5Executor:
             sl = self._normalize_price(sl, info)
         if tp is not None:
             tp = self._normalize_price(tp, info)
-        if struct_notes:
-            try:
-                if abs(self._last_basis) > 5:
-                    struct_notes.append(f"basis {self._last_basis:.2f} futures {self._last_futures:.2f}")
-            except Exception:
-                pass
-            logger.info("STEP 4: stops: %s", "; ".join(struct_notes))
         # v8 VALUE GATE (user requirement): reward must beat risk and be worth
-        # taking. Not worth it -> skip the trade and say why.
+        # taking. Stage 4a: if `compute_wall_brackets` returned a sub-R:R front pebble,
+        # let `compute_structural_stops` fall back cleanly before skipping!
         try:
             from wall_brackets import value_gate
             if is_a2_burst_order:
@@ -1049,8 +1066,24 @@ class MT5Executor:
                 )
             else:
                 vg_ok, vg_reason = value_gate(action, price, sl, tp, atr, config)
+                if not vg_ok and used_wall_brackets and bool(getattr(config, "STAGE4A_WAVE_BRACKET_ENABLED", False)):
+                    from position_manager import compute_structural_stops
+                    sl_fb, tp_fb, notes_fb = compute_structural_stops(action, price, atr, snapshot, news_state)
+                    sl_fb = self._normalize_price(sl_fb, info) if sl_fb is not None else None
+                    tp_fb = self._normalize_price(tp_fb, info) if tp_fb is not None else None
+                    ok_fb, why_fb = value_gate(action, price, sl_fb, tp_fb, atr, config)
+                    if ok_fb:
+                        sl, tp, struct_notes = sl_fb, tp_fb, list(notes_fb or [])
+                        vg_ok, vg_reason = ok_fb, why_fb
         except Exception:
             vg_ok, vg_reason = True, ""
+        if struct_notes:
+            try:
+                if abs(self._last_basis) > 5:
+                    struct_notes.append(f"basis {self._last_basis:.2f} futures {self._last_futures:.2f}")
+            except Exception:
+                pass
+            logger.info("STEP 4: stops: %s", "; ".join(struct_notes))
         if not vg_ok:
             logger.info("STEP 4: SKIPPED — %s", vg_reason)
             return ExecutionResult(status="SKIPPED", reason=vg_reason,

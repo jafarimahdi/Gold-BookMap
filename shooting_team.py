@@ -292,7 +292,7 @@ def _observe_passive_road_sample(signal_map: Any, power: Any, price: Any,
     _ROAD_HISTORY.append((now, sum(valid_roads) / len(valid_roads)))
 
 
-def _crowd_v2(door_size, road_lots, shot_lots, recent_volume, config, now=None):
+def _crowd_v2(door_size, road_lots, shot_lots, recent_volume, config, now=None, *, record_sample=True):
     """Three Fair Questions.  Returns a verdict dict; every field is a receipt."""
     now = _epoch(now) or time.time()
     hist_min = max(1, int(_cfg(config, "SHOOT_ROAD_HISTORY_MIN", 12)))
@@ -308,7 +308,7 @@ def _crowd_v2(door_size, road_lots, shot_lots, recent_volume, config, now=None):
         _ROAD_HISTORY.extend(reanchored)
     while _ROAD_HISTORY and now - _ROAD_HISTORY[0][0] > window:
         _ROAD_HISTORY.popleft()
-    if road_lots is not None and road_lots >= 0:
+    if record_sample and road_lots is not None and road_lots >= 0:
         _ROAD_HISTORY.append((now, float(road_lots)))
     road_normal = None
     if len(_ROAD_HISTORY) >= hist_min:
@@ -472,7 +472,7 @@ def _power_gate(power: Any, entry_context: Mapping[str, Any], config: Any) -> Op
     return None
 
 
-def _nearest_door(signal_map: Mapping[str, Any], side: str, price: float) -> Optional[Dict[str, Any]]:
+def _sorted_side_doors(signal_map: Mapping[str, Any], side: str, price: float) -> list[tuple[float, Dict[str, Any]]]:
     key = "above" if side == "UP" else "below"
     candidates = []
     for raw in (signal_map.get(key) or []):
@@ -486,7 +486,38 @@ def _nearest_door(signal_map: Mapping[str, Any], side: str, price: float) -> Opt
             candidates.append((door_price - price, dict(raw)))
         elif side == "DOWN" and door_price < price:
             candidates.append((price - door_price, dict(raw)))
-    return min(candidates, key=lambda item: item[0])[1] if candidates else None
+    candidates.sort(key=lambda item: item[0])
+    return candidates
+
+
+def _nearest_door(signal_map: Mapping[str, Any], side: str, price: float) -> Optional[Dict[str, Any]]:
+    candidates = _sorted_side_doors(signal_map, side, price)
+    return candidates[0][1] if candidates else None
+
+
+def _compute_stop(entry: float, is_buy: bool, shelter: Optional[Mapping[str, Any]],
+                  atr: float, buffer: float, config: Any) -> tuple[Optional[float], str, Optional[Dict[str, Any]], Optional[str]]:
+    """Stage 4a: Resolve structural stop with [SHOOT_MIN_SL_ATR, SHOOT_MAX_SL_ATR] bounds
+    so near-touch 6-12 lot BBO quotes $0.40 behind entry never create sub-dollar stop-hunts."""
+    sl_mult = _cfg(config, "STOP_LOSS_ATR_MULT", 2.0)
+    min_sl_atr = _cfg(config, "SHOOT_MIN_SL_ATR", 0.0) if config is not None else 0.0
+    max_sl_atr = _cfg(config, "SHOOT_MAX_SL_ATR", 0.0) if config is not None else 0.0
+    if shelter:
+        shelter_price = _num(shelter.get("price"))
+        if shelter_price is None or shelter_price <= 0:
+            return None, "BOOK_SHELTER", None, "shelter price is invalid"
+        cand_stop = shelter_price - buffer if is_buy else shelter_price + buffer
+        cand_risk = abs(entry - cand_stop)
+        on_safe_side = (cand_stop < entry) if is_buy else (cand_stop > entry)
+        in_atr_bounds = (
+            on_safe_side
+            and (min_sl_atr <= 0 or atr <= 0 or cand_risk >= min_sl_atr * atr)
+            and (max_sl_atr <= 0 or atr <= 0 or cand_risk <= max_sl_atr * atr)
+        )
+        if in_atr_bounds:
+            return cand_stop, "BOOK_SHELTER", dict(shelter), None
+    stop = entry - sl_mult * atr if is_buy else entry + sl_mult * atr
+    return stop, "ATR_FALLBACK", None, None
 
 
 def _geometry(entry: float, side: str, door: Mapping[str, Any], shelter: Optional[Mapping[str, Any]],
@@ -497,15 +528,11 @@ def _geometry(entry: float, side: str, door: Mapping[str, Any], shelter: Optiona
     buffer = max(spread * 2.0, _cfg(config, "PM_TP_BUFFER_ATR", 0.15) * atr)
     is_buy = side == "UP"
     target = door_price - buffer if is_buy else door_price + buffer
-    stop_source = "BOOK_SHELTER" if shelter else "ATR_FALLBACK"
-    if shelter:
-        shelter_price = _num(shelter.get("price"))
-        if shelter_price is None or shelter_price <= 0:
-            return {"eligible": False, "reason": "shelter price is invalid"}
-        stop = shelter_price - buffer if is_buy else shelter_price + buffer
-    else:
-        # Explicitly approved fallback: two ATR behind the entry.
-        stop = entry - 2.0 * atr if is_buy else entry + 2.0 * atr
+    stop, stop_source, used_shelter, stop_err = _compute_stop(
+        entry, is_buy, shelter, atr, buffer, config
+    )
+    if stop_err or stop is None:
+        return {"eligible": False, "reason": stop_err or "shelter price is invalid"}
 
     correct = (target > entry and stop < entry) if is_buy else (target < entry and stop > entry)
     if not correct:
@@ -514,7 +541,7 @@ def _geometry(entry: float, side: str, door: Mapping[str, Any], shelter: Optiona
     rr = reward / risk if risk > 1e-12 else 0.0
     return {"eligible": True, "entry": entry, "target": target, "stop": stop,
             "reward": reward, "risk": risk, "rr": rr, "stop_source": stop_source,
-            "shelter": dict(shelter) if shelter else None}
+            "shelter": used_shelter}
 
 
 def plan_shot(signal_map: Dict[str, Any], power: Dict[str, Any],
@@ -683,12 +710,21 @@ def plan_shot(signal_map: Dict[str, Any], power: Dict[str, Any],
                 ),
             }
         elif _a2_sl and _a2_sl > 0 and _a2_tp and _a2_tp > 0:
-            _a2_stop = aggressive_entry - _a2_sl if is_buy else aggressive_entry + _a2_sl
-            _a2_target = aggressive_entry + _a2_tp if is_buy else aggressive_entry - _a2_tp
+            # Bookmark #8 (Stage 4a, 2026-11-02): Volatility-adaptive ATR floor on A2 sprint
+            # stops (`max(1.80, A2_BURST_ATR_FLOOR_MULT * ATR)`), preventing high-volatility
+            # trend days from hunting rigid $1.80 stops inside single-candle noise.
+            _a2_atr_fl = _num(_cfg(config, "A2_BURST_ATR_FLOOR_MULT", 0.0)) or 0.0
+            _eff_a2_sl = max(_a2_sl, round(_a2_atr_fl * a, 4)) if _a2_atr_fl > 0 else _a2_sl
+            _eff_a2_tp = (
+                max(_a2_tp, round(_a2_atr_fl * a * (_a2_tp / _a2_sl), 4))
+                if _a2_atr_fl > 0 else _a2_tp
+            )
+            _a2_stop = aggressive_entry - _eff_a2_sl if is_buy else aggressive_entry + _eff_a2_sl
+            _a2_target = aggressive_entry + _eff_a2_tp if is_buy else aggressive_entry - _eff_a2_tp
             aggressive = {**aggressive, "eligible": True, "reason": None,
                           "stop": _a2_stop, "target": _a2_target,
-                          "risk": _a2_sl, "reward": _a2_tp,
-                          "rr": _a2_tp / _a2_sl, "stop_source": "A2_BURST_FIXED"}
+                          "risk": _eff_a2_sl, "reward": _eff_a2_tp,
+                          "rr": _eff_a2_tp / _eff_a2_sl, "stop_source": "A2_BURST_FIXED"}
     min_rr = (_cfg(config, "A2_MIN_RR", 1.0) if ctx.get("a2_burst") is True
               else _cfg(config, "SHOOT_MIN_RR", 1.2))
     min_reward_usd = _cfg(config, "SHOOT_MIN_REWARD_USD", 0.0)
@@ -712,6 +748,158 @@ def plan_shot(signal_map: Dict[str, Any], power: Dict[str, Any],
 
     passive_geometry_reason = cost_check(passive)
     aggressive_reason = cost_check(aggressive)
+
+    # Stage 4a (2026-11-02, Frey & Sandas 2017 liquidity-magnet / Dalton 2013 wave horizon):
+    # When the nearest front-porch quote is closer than `min_rr * risk` (`108` Sniper waves in
+    # replay-10!), scan past routine <40-lot quotes to (1) a viable further Scout door,
+    # (2) a viable structural memory door (`POC/VAH/VAL/H1_POC/OB`), or (3) on verified
+    # Stage-3d Sniper waves with a clean front corridor (`route_clear` & `Crowd v2 PASS`),
+    # the `SHOOT_WAVE_TP_ATR_MULT * ATR` (`3.5x ATR`) wave target — failing closed whenever
+    # a major opposing wall (`>= SHOOT_MAJOR_WALL_BLOCK_LOTS` or active `iceberg`) blocks!
+    if (
+        aggressive_reason is not None
+        and ctx.get("a2_burst") is not True
+        and bool(getattr(config, "STAGE4A_WAVE_BRACKET_ENABLED", False))
+    ):
+        _buf_w = max(sp * 2.0, _cfg(config, "PM_TP_BUFFER_ATR", 0.15) * a)
+        _base_stop, _base_src, _base_sh, _base_err = _compute_stop(
+            aggressive_entry, is_buy, aggressive_shelter, a, _buf_w, config
+        )
+        if _base_err is None and _base_stop is not None:
+            _base_risk = abs(aggressive_entry - _base_stop)
+            _min_req_dist = max(eff_sp * 3.01, min_rr * _base_risk) + _buf_w
+            _major_lots = _cfg(config, "SHOOT_MAJOR_WALL_BLOCK_LOTS", 40.0)
+            _wave_tp_mult = _cfg(config, "SHOOT_WAVE_TP_ATR_MULT", 3.5)
+            _all_doors = _sorted_side_doors(signal_map or {}, direction, p)
+
+            def _is_major_blocker(d_item: Mapping[str, Any]) -> bool:
+                if str(d_item.get("burn_word") or "") == "melting-fast":
+                    return False
+                d_srcs = d_item.get("sources") or []
+                if "iceberg" in d_srcs:
+                    return True
+                return (_num(d_item.get("size")) or 0.0) >= _major_lots
+
+            _blocking_major = None
+            for _, _d_chk in _all_doors:
+                _d_px = _num(_d_chk.get("price"))
+                if _d_px is None:
+                    continue
+                _dist_entry = (_d_px - aggressive_entry) if is_buy else (aggressive_entry - _d_px)
+                if _dist_entry <= _min_req_dist and _is_major_blocker(_d_chk):
+                    _blocking_major = _d_chk
+                    break
+
+            if _blocking_major is not None:
+                _b_px = _num(_blocking_major.get("price")) or 0.0
+                _b_sz = _num(_blocking_major.get("size")) or 0.0
+                aggressive_reason = (
+                    f"{aggressive_reason} (major opposing wall {_b_sz:.0f} lots at {_b_px:.2f} blocks wave target)"
+                )
+            elif route_clear:
+                # (1) Scan further live Scout doors on the trade side
+                for _, _cand_d in _all_doors[1:]:
+                    _c_px = _num(_cand_d.get("price"))
+                    if _c_px is None:
+                        continue
+                    # Stop scanning if a major wall stood between price and this candidate
+                    _maj_between = any(
+                        _is_major_blocker(_prev_d)
+                        and (
+                            (p < (_num(_prev_d.get("price")) or 0.0) < _c_px)
+                            if is_buy
+                            else (_c_px < (_num(_prev_d.get("price")) or 0.0) < p)
+                        )
+                        for _, _prev_d in _all_doors
+                    )
+                    if _maj_between:
+                        break
+                    _c_crowd = _crowd_v2(
+                        _num(_cand_d.get("size")) or 0.0,
+                        _num(_cand_d.get("lots_between")) if _num(_cand_d.get("lots_between")) is not None else road_lots,
+                        shot_lots,
+                        _num(ctx.get("recent_volume")),
+                        config,
+                        now=ctx.get("now"),
+                        record_sample=False,
+                    )
+                    if _c_crowd["verdict"] != "PASS":
+                        continue
+                    _c_aggr = _geometry(aggressive_entry, direction, _cand_d, aggressive_shelter, a, sp, config)
+                    if cost_check(_c_aggr) is None:
+                        target_door = _cand_d
+                        target_px = _c_px
+                        target_size = _num(_cand_d.get("size")) or 0.0
+                        road_count = int(_num(_cand_d.get("doors_between")) or road_count)
+                        road_lots = _num(_cand_d.get("lots_between")) if _num(_cand_d.get("lots_between")) is not None else road_lots
+                        crowd = _c_crowd
+                        road_ratio = crowd["road_ratio"] if crowd["road_ratio"] is not None else road_ratio
+                        aggressive = {**_c_aggr, "target_source": "SCOUT_VIABLE_DOOR"}
+                        passive = _geometry(passive_entry, direction, _cand_d, passive_shelter, a, sp, config)
+                        passive_geometry_reason = cost_check(passive)
+                        aggressive_reason = None
+                        break
+
+                # (2) On Stage-3d Sniper waves, check structural memory doors (POC/VA/HTF_POC/OB),
+                #     else project the ATR Wave Horizon target (`3.5x ATR`), capped before any major wall.
+                if aggressive_reason is not None and ctx.get("stage3d_sniper_authorized") is True:
+                    _max_wave_dist = _wave_tp_mult * a
+                    # Check if a major wall sits beyond _min_req_dist but inside _max_wave_dist
+                    _cap_major_px = None
+                    for _, _d_far in _all_doors:
+                        if _is_major_blocker(_d_far):
+                            _f_px = _num(_d_far.get("price"))
+                            if _f_px is not None:
+                                _f_dist = (_f_px - aggressive_entry) if is_buy else (aggressive_entry - _f_px)
+                                if _min_req_dist < _f_dist <= _max_wave_dist + _buf_w:
+                                    _cap_major_px = _f_px
+                                    break
+                    _chosen_tp = None
+                    _tp_src = "ATR_WAVE_TARGET"
+                    for _mem in ((signal_map or {}).get("memory_doors") or []):
+                        if not isinstance(_mem, Mapping):
+                            continue
+                        _m_px = _num(_mem.get("price"))
+                        if _m_px is None or _m_px <= 0:
+                            continue
+                        _m_dist = (_m_px - aggressive_entry) if is_buy else (aggressive_entry - _m_px)
+                        if _min_req_dist <= _m_dist <= _max_wave_dist + _buf_w:
+                            if _cap_major_px is not None:
+                                if (is_buy and _m_px > _cap_major_px) or ((not is_buy) and _m_px < _cap_major_px):
+                                    continue
+                            _chosen_tp = (_m_px - _buf_w) if is_buy else (_m_px + _buf_w)
+                            _tp_src = "STRUCTURAL_MEMORY_DOOR"
+                            break
+                    if _chosen_tp is None:
+                        if _cap_major_px is not None:
+                            _chosen_tp = (_cap_major_px - _buf_w) if is_buy else (_cap_major_px + _buf_w)
+                            _tp_src = "MAJOR_WALL_CAP"
+                        else:
+                            _chosen_tp = (
+                                (aggressive_entry + _max_wave_dist)
+                                if is_buy
+                                else (aggressive_entry - _max_wave_dist)
+                            )
+                            _tp_src = "ATR_WAVE_TARGET"
+                    _w_rew = abs(_chosen_tp - aggressive_entry)
+                    _w_rr = _w_rew / _base_risk if _base_risk > 1e-12 else 0.0
+                    _w_ok = (_chosen_tp > aggressive_entry and _base_stop < aggressive_entry) if is_buy else (_chosen_tp < aggressive_entry and _base_stop > aggressive_entry)
+                    _wave_plan = {
+                        "eligible": _w_ok,
+                        "entry": aggressive_entry,
+                        "target": _chosen_tp,
+                        "stop": _base_stop,
+                        "reward": _w_rew,
+                        "risk": _base_risk,
+                        "rr": _w_rr,
+                        "stop_source": _base_src,
+                        "target_source": _tp_src,
+                        "shelter": _base_sh,
+                    }
+                    if cost_check(_wave_plan) is None:
+                        aggressive = _wave_plan
+                        aggressive_reason = None
+                        target_px = _chosen_tp
     trigger = ctx.get("aggressive_trigger_confirmed") is True
     trigger_reason = str(ctx.get("aggressive_trigger_reason") or "").strip()
     aggressive_geometry_ok = aggressive_reason is None and route_clear
@@ -796,7 +984,8 @@ def plan_shot(signal_map: Dict[str, Any], power: Dict[str, Any],
             "fresh_non_climax_candidate": bool(power_streak <= shadow_streak_cap and not shadow_climax),
         }
     if not trigger:
-        aggressive_reason = "no separately confirmed aggressive-entry trigger is wired"
+        if not (ctx.get("stage3d_sniper_authorized") is True and aggressive_reason):
+            aggressive_reason = "no separately confirmed aggressive-entry trigger is wired"
     elif not trigger_reason:
         aggressive_allowed = False
         aggressive_reason = "aggressive trigger has no audit reason"

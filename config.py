@@ -478,6 +478,12 @@ def _refresh() -> None:
     g["STAGE3D_SNIPER_GATE_LIVE_ENABLED"] = _fget("STAGE3D_SNIPER_GATE_LIVE_ENABLED", "1") == "1"
     g["STAGE3D_BLOCK_POWER_CLIMAX"] = _fget("STAGE3D_BLOCK_POWER_CLIMAX", "1") == "1"
     g["STAGE3D_SNIPER_ENTRY_ENABLED"] = _fget("STAGE3D_SNIPER_ENTRY_ENABLED", "1") == "1"
+    g["STAGE4A_WAVE_BRACKET_ENABLED"] = _fget("STAGE4A_WAVE_BRACKET_ENABLED", "1") == "1"
+    g["SHOOT_MIN_SL_ATR"] = max(0.5, _ffloat("SHOOT_MIN_SL_ATR", 1.5))
+    g["SHOOT_MAX_SL_ATR"] = max(1.0, _ffloat("SHOOT_MAX_SL_ATR", 2.5))
+    g["SHOOT_WAVE_TP_ATR_MULT"] = max(1.5, _ffloat("SHOOT_WAVE_TP_ATR_MULT", 3.5))
+    g["SHOOT_MAJOR_WALL_BLOCK_LOTS"] = max(5.0, _ffloat("SHOOT_MAJOR_WALL_BLOCK_LOTS", 40.0))
+    g["A2_BURST_ATR_FLOOR_MULT"] = max(0.0, _ffloat("A2_BURST_ATR_FLOOR_MULT", 1.0))
     g["L3_NEAR_TOUCH_USD"] = max(0.5, _ffloat("L3_NEAR_TOUCH_USD", 2.50))
     g["QUEUE_FLOW_WINDOW_SECONDS"] = max(5.0, _ffloat("QUEUE_FLOW_WINDOW_SECONDS", 30.0))
     g["BOOK_PROBE_TILT"] = max(0.05, min(0.50, _ffloat("BOOK_PROBE_TILT", 0.12)))

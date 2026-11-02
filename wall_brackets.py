@@ -106,16 +106,44 @@ def compute_wall_brackets(action: str, price: float, atr: float,
               if d["size"] >= min_lots and (d["price"] < px if is_buy else d["price"] > px)]
     if not opposing:
         return None, None, ["wall brackets: no trusted opposing wall -> fallback"]
-    target_wall = min(opposing, key=lambda d: d["price"] - px if is_buy else px - d["price"])
-    tp = (target_wall["price"] - buf) if is_buy else (target_wall["price"] + buf)
 
-    if behind:
-        shelter = max(behind, key=lambda d: d["price"] if is_buy else -d["price"])
+    # Stage 4a (2026-11-02): Enforce structural SL floor (>= 1.2 * ATR when ATR > 0) so
+    # near-touch 5-12 lot BBO quotes $0.40 behind entry never create sub-dollar stop-hunt traps.
+    min_sl_dist = 1.2 * a if a > 0 else 0.0
+    valid_behind = [
+        d for d in behind
+        if abs(px - ((d["price"] - buf) if is_buy else (d["price"] + buf))) >= min_sl_dist
+    ]
+    if valid_behind:
+        shelter = max(valid_behind, key=lambda d: d["price"] if is_buy else -d["price"])
         sl = (shelter["price"] - buf) if is_buy else (shelter["price"] + buf)
         sl_src = f"wall {shelter['price']:.2f} ({shelter['size']:.0f} lots)"
     else:
         sl = (px - 2.0 * a) if is_buy else (px + 2.0 * a)
-        sl_src = "2xATR fallback (no wall behind)"
+        sl_src = "2xATR fallback (no structural wall >=1.2xATR behind)"
+
+    risk_dist = abs(px - sl)
+    opposing_sorted = sorted(
+        opposing, key=lambda d: (d["price"] - px) if is_buy else (px - d["price"])
+    )
+    target_wall = opposing_sorted[0]
+    # Stage 4a: When multiple opposing walls exist and the nearest wall is only a routine
+    # front-porch quote (< 40 lots) too close to satisfy R:R >= 1.2 & 1.0*ATR value_gate,
+    # scan forward to the nearest viable structural wall instead of choking at the pebble.
+    if len(opposing_sorted) > 1 and a > 0 and risk_dist > 0:
+        min_viable_rew = max(1.0 * a, 1.2 * risk_dist)
+        first_tp = (target_wall["price"] - buf) if is_buy else (target_wall["price"] + buf)
+        first_rew = (first_tp - px) if is_buy else (px - first_tp)
+        if first_rew < min_viable_rew and target_wall["size"] < 40.0:
+            for cand_w in opposing_sorted[1:]:
+                cand_tp = (cand_w["price"] - buf) if is_buy else (cand_w["price"] + buf)
+                cand_rew = (cand_tp - px) if is_buy else (px - cand_tp)
+                if cand_rew >= min_viable_rew:
+                    target_wall = cand_w
+                    break
+                if cand_w["size"] >= 40.0:
+                    break
+    tp = (target_wall["price"] - buf) if is_buy else (target_wall["price"] + buf)
 
     ok = (tp > px > sl) if is_buy else (tp < px < sl)
     if not ok:

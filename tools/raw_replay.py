@@ -606,6 +606,7 @@ def _walk_bracket(
     spread_cost: float,
     trail_atr: float = 0.0,
     trail_dist_mult: float = 0.0,
+    trail_trigger_r: float = 0.5,
 ) -> Tuple[str, float]:
     """Walk forward strictly after entry minute (`m > entry_min`). Conservative SL-first."""
     entry_min = int(entry_ep // 60) * 60
@@ -632,7 +633,7 @@ def _walk_bracket(
                 return "TP", round((tp_px - entry_px) - spread_cost, 2)
             if hi > hwm:
                 hwm = hi
-            if trail_atr > 0 and trail_dist_mult > 0 and init_risk > 0 and (hwm - entry_px) >= 0.5 * init_risk:
+            if trail_atr > 0 and trail_dist_mult > 0 and init_risk > 0 and (hwm - entry_px) >= trail_trigger_r * init_risk:
                 cand_sl = hwm - trail_dist_mult * trail_atr
                 if cand_sl > cur_sl:
                     cur_sl = cand_sl
@@ -643,7 +644,7 @@ def _walk_bracket(
                 return "TP", round((entry_px - tp_px) - spread_cost, 2)
             if lo < hwm:
                 hwm = lo
-            if trail_atr > 0 and trail_dist_mult > 0 and init_risk > 0 and (entry_px - hwm) >= 0.5 * init_risk:
+            if trail_atr > 0 and trail_dist_mult > 0 and init_risk > 0 and (entry_px - hwm) >= trail_trigger_r * init_risk:
                 cand_sl = hwm + trail_dist_mult * trail_atr
                 if cand_sl < cur_sl:
                     cur_sl = cand_sl
@@ -1926,6 +1927,12 @@ def replay_single_day(
                 tr10_out, tr10_pts = "NO_SIGNAL", 0.0
                 shot_br_out, shot_br_pts = "NO_SIGNAL", None
                 shot_rr_val = None
+                shot_sl_dist = shot_tp_dist = None
+                shot_tp_src = ""
+                shot_s15_out, shot_s15_pts = "NO_SIGNAL", None
+                shot_ch15_out, shot_ch15_pts = "NO_SIGNAL", None
+                shot_ch10_out, shot_ch10_pts = "NO_SIGNAL", None
+                shot_c3p_out, shot_c3p_pts = "NO_SIGNAL", None
                 a2_fix_pts = a2_atr_pts = None
 
                 if sig_dir in ("BUY", "SELL") and px > 0:
@@ -1988,11 +1995,36 @@ def replay_single_day(
                             sh_sl = float(shot.get("stop") or 0.0)
                             sh_tp = float(shot.get("target") or 0.0)
                             shot_rr_val = float(shot.get("rr") or 0.0)
+                            _eo = (shot.get("entry_options") or {}).get(shot_style) or {}
+                            shot_tp_src = str(_eo.get("target_source") or "SCOUT_DOOR")
                             if sh_sl > 0 and sh_tp > 0:
+                                shot_sl_dist = round(abs(px - sh_sl), 2)
+                                shot_tp_dist = round(abs(sh_tp - px), 2)
                                 shot_br_out, shot_br_pts = _walk_bracket(
                                     bar_keys, walk_bars, tc_ep, sig_dir, px,
                                     sh_sl, sh_tp, max_hold_min, spread_cost,
                                 )
+                                shot_ch15_out, shot_ch15_pts = _walk_bracket(
+                                    bar_keys, walk_bars, tc_ep, sig_dir, px,
+                                    sh_sl, sh_tp, max_hold_min, spread_cost,
+                                    trail_atr=atr_live, trail_dist_mult=1.5, trail_trigger_r=1.0,
+                                )
+                                shot_ch10_out, shot_ch10_pts = _walk_bracket(
+                                    bar_keys, walk_bars, tc_ep, sig_dir, px,
+                                    sh_sl, sh_tp, max_hold_min, spread_cost,
+                                    trail_atr=atr_live, trail_dist_mult=1.0, trail_trigger_r=1.0,
+                                )
+                                shot_c3p_out, shot_c3p_pts = _walk_bracket(
+                                    bar_keys, walk_bars, tc_ep, sig_dir, px,
+                                    sh_sl, sh_tp, max_hold_min, spread_cost,
+                                    trail_atr=atr_live, trail_dist_mult=0.5, trail_trigger_r=0.5,
+                                )
+                            _s15_sl = (px - 1.5 * atr_live) if is_b else (px + 1.5 * atr_live)
+                            _s15_tp = (px + 3.0 * atr_live) if is_b else (px - 3.0 * atr_live)
+                            shot_s15_out, shot_s15_pts = _walk_bracket(
+                                bar_keys, walk_bars, tc_ep, sig_dir, px,
+                                _s15_sl, _s15_tp, max_hold_min, spread_cost,
+                            )
                         except Exception:
                             shot_br_out, shot_br_pts = "NO_SIGNAL", None
 
@@ -2038,6 +2070,12 @@ def replay_single_day(
                     "tr10_out": tr10_out, "tr10_pts": tr10_pts,
                     "shot_br_out": shot_br_out, "shot_br_pts": shot_br_pts,
                     "shot_rr": shot_rr_val,
+                    "shot_sl_dist": shot_sl_dist, "shot_tp_dist": shot_tp_dist,
+                    "shot_tp_src": shot_tp_src,
+                    "shot_s15_out": shot_s15_out, "shot_s15_pts": shot_s15_pts,
+                    "shot_ch15_out": shot_ch15_out, "shot_ch15_pts": shot_ch15_pts,
+                    "shot_ch10_out": shot_ch10_out, "shot_ch10_pts": shot_ch10_pts,
+                    "shot_c3p_out": shot_c3p_out, "shot_c3p_pts": shot_c3p_pts,
                     "a2_fix_pts": a2_fix_pts, "a2_atr_pts": a2_atr_pts,
                 })
                 tc_ep += every_s
@@ -2568,6 +2606,41 @@ def synthesize_multi_day(results: List[Dict[str, Any]]) -> Tuple[str, str, Dict[
         lines.append(f"  SHOOTING WAIT REASONS ON ACTIONABLE SIGNALS (N={len(wait_cycles)}):")
         for wr_k, wr_n in sorted(wait_reasons.items(), key=lambda kv: -kv[1])[:6]:
             lines.append(f"    - {wr_n:>4}x  {wr_k}")
+
+    # [8c] Stage 4 Exit Ruler Scorecard on Executed SHOOTING GO Brackets
+    lines.append(f"\n[8c] STAGE 4 EXIT RULER SCORECARD (EXECUTED SHOOTING GO BRACKETS, N={len(go_cycles)})")
+    if go_cycles:
+        avg_sl_d = sum(float(c.get("shot_sl_dist") or 0.0) for c in go_cycles) / max(len(go_cycles), 1)
+        avg_tp_d = sum(float(c.get("shot_tp_dist") or 0.0) for c in go_cycles) / max(len(go_cycles), 1)
+        tp_srcs: Dict[str, int] = defaultdict(int)
+        for gc in go_cycles:
+            tp_srcs[str(gc.get("shot_tp_src") or "SCOUT_DOOR")] += 1
+        src_str = ", ".join(f"{k}={v}" for k, v in sorted(tp_srcs.items(), key=lambda kv: -kv[1]))
+        lines.append(f"  Planned Bracket Geometry: Avg SL={avg_sl_d:.2f} pts | Avg TP={avg_tp_d:.2f} pts | Target Sources: {src_str}")
+        lines.append(
+            f"  {'EXIT RULER':<44} {'N':>5} {'WIN/LOSS':>10} {'WR%':>7} {'TOT_PTS':>10} {'PTS/GO':>9}"
+        )
+        lines.append("  " + "-" * 90)
+        ruler_defs = [
+            ("Stage-4a Planned Shot (Pure SL/TP)", "shot_br_out", "shot_br_pts"),
+            ("Stage-4b Preview: Planned + 1.5xATR Trail@1R", "shot_ch15_out", "shot_ch15_pts"),
+            ("Stage-4b Preview: Planned + 1.0xATR Trail@1R", "shot_ch10_out", "shot_ch10_pts"),
+            ("Current PM C3: Planned + 0.5xATR Trail@0.5R", "shot_c3p_out", "shot_c3p_pts"),
+            ("Benchmark: 2.0x SL / 3.5x TP Fixed Wave", "fix_out", "fix_pts"),
+            ("Benchmark: 1.5x SL / 3.0x TP Live ATR", "shot_s15_out", "shot_s15_pts"),
+        ]
+        for r_lbl, out_k, pts_k in ruler_defs:
+            r_pts = [float(c[pts_k]) for c in go_cycles if c.get(pts_k) is not None]
+            r_w = sum(1 for c in go_cycles if c.get(pts_k) is not None and float(c[pts_k]) > 0)
+            r_l = sum(1 for c in go_cycles if c.get(pts_k) is not None and float(c[pts_k]) < 0)
+            r_wr = (100.0 * r_w / (r_w + r_l)) if (r_w + r_l) else 0.0
+            r_tot = sum(r_pts)
+            r_avg = r_tot / max(len(r_pts), 1)
+            lines.append(
+                f"  {r_lbl:<44} {len(r_pts):>5} {f'{r_w}/{r_l}':>10} {r_wr:>6.1f}% {r_tot:>+10.1f} {r_avg:>+9.2f}"
+            )
+    else:
+        lines.append("  0 SHOOTING GO cycles executed on this sample.")
 
     # [9] Stage 1: Timeframe-linked 1..4-bar path & Market Trick Detector
     lines.append(
