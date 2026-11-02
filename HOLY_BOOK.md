@@ -1134,3 +1134,22 @@ The committed `4f71043` follow-up supersedes the three audit-tool findings above
   5. **`volume_roc` (`SignalEngine` & `tools/raw_replay.py`, *Wyckoff's 3rd Law: Effort vs. Result; Coulling 2013 VPA*):** Replaced blind 1-bar `vol[-1]/vol[-2]` chasing with 20-bar `RVOL >= 1.8x` separating **(a) Climax / Stopping Volume absorption reversals** (`pushed_hi + CLV <= 0.35 -> SELL`; `pushed_lo + CLV >= 0.65 -> BUY`) from **(b) Unstretched `TREND`+`MTF` breakout initiation** (`CLV >= 0.75 / <= 0.25`).
   6. **`absorption` & `iceberg` (`OrderBookDepthAnalyzer` & `SignalEngine`, *Frey & Sandås 2009 / QJF 2017; Cont & Kukanov 2017*):** `_prune_absorption` tracks `wall_px` and immediately invalidates broken passive walls once `best_bid < wall_px - 0.25` or `best_ask > wall_px + 0.25`, requiring `|absorption_net| >= 2` + `TREND` seatbelt; `iceberg` restricts to fresh (`last_seen <= 180s`), tight (`<= max(1.0*ATR, $1.50)`), unbroken walls confirmed by holding delta + `TREND` seatbelt.
   7. **`footprint_levels`, `footprint_delta`, `l3_imbalance`, `l3_aggr_limit`, `cvd_momentum`, `sweep` (`config.py` `0.03`/`1.5` + ATR-adaptive wick snapback + `TREND` seatbelt), plus bench judges `_detect_order_blocks` (`supply_demand` unmitigated impulse zones), `whale_walls` (live resting book only, zero `BID_CANCEL` bug), and `htf_poc` (Dalton `H1/H4` value migration vs `H4` balance magnet):** All healed in `step2_market_analysis.py` with synced weight/note patterns across `judge_panel.py` & `audit_day.py`.
+
+---
+
+## Check-in stamp — `2026-11-02 02:47 CET` `current_version_replay-4.txt` Healed-Judges 5-Day Breakthrough & `Stage 2c` Choice-1 Bench (`oct31_stage2c_bench_7_underperformers.patch`)
+
+- **5-Day Healed-Judges Replay Receipt (`current_version_replay-4.txt`, Windows `f18cf60`, `2026-10-26..30`, `3,233` cycles, `2,847` signals, `M3`):**
+  - **6 Previously-Broken Active Judges Rescued into Standalone Net Winners (After `$0.50` Spread):**
+    1. **`value_area`:** `-1,708.2 -> +405.4` net (`+1,015.9` gross, `+2,113.6` pt swing!).
+    2. **`cvd_divergence`:** `-678.4 -> +384.1` net (`69.8%` right, `4/5` pos days, `+448.6` gross).
+    3. **`cvd_momentum`:** `-288.1 -> +154.3` net (`59.5%` right, `4/5` pos days, `+254.3` gross).
+    4. **`l3_large_ofi`:** `-677.4` (`0/5`d) `-> +44.5` net (`57.7%` right, `+0.94` at `+12m`).
+    5. **`sweep`:** `-9.1` (`6` calls) `-> +35.6` net (`21` calls, `66.7%` right, `+1.55` at `+12m`).
+    6. **`l3_aggr_limit`:** `-143.6 -> +10.5` net (`59.4%` right, `3/5` pos days, `+0.92` at `+12m`).
+    - Joined by existing winners **`vwap_trend`** (`+1,422.1` net, `58.6%`), **`mtf`** (`+1,060.3` net, `3/5`d), **`spoof_invert`** (`+29.8` net, `59.7%`, `3/5`d), and **`l3_net_flow`** (`+29.1` net, `59.3%`, `3/4`d) -> **10 Net-Positive Replay Winners + 2 Live Macro/News Judges (`macro_risk`, `news_sentiment`) = Pure 12-Judge Active Panel!**
+    - Trend-day performance surged: `10-27` `-3.5 -> +526.1 FIX_PTS`, `10-30` `+1,535.3 -> +2,186.0 FIX_PTS`, `Conf>=65%` `+238.5 -> +448.0 FIX_PTS` (`+59.3 C3_0.5A`, `+49.6 TR_1.0A`), and `[9]` `M3` forward path turned positive across every regime (`TREND +0.35`, `RANGE +0.28`, `NEUTRAL +0.07` at `+12m`).
+- **Owner Decision `Stage 2c` (Choice 1 — Strict Law #9 Step Order, Zero Gate/Stop Changes):**
+  - Moved the **7 healthy-code 5-day `M3` underperformers** onto the Bench (`config.RETIRED_JUDGES`, `audit_day.py`, `judge_families.family_gate(panel, config)`): **`footprint_delta`** (`-70.0`n, `0/5`d), **`iceberg`** (`-33.1`n, `0/2`d; kept as Scout Map door), **`volume_roc`** (`-12.6`n, `-0.53` at `+12m`), **`l3_imbalance`** (`-130.6`n, `1/5`d), **`footprint_levels`** (`-389.4`n, `1/5`d), **`absorption`** (`-444.3`n), and **`vwap_bands`** (`-204.1`n).
+  - Zero code deletion: all 7 continue emitting notes for Scout/Shooting and are automatically scored on `tools/raw_replay.py` Section `[7b]` (`RETIRED` category) for ongoing review.
+  - **Permanent Pre-Patch Verification Gate Added:** Every patch must pass `python -m pytest -q` under **both** clean default env (`M5`) **and** Windows `.env` simulation (`TIMEFRAME=M3 A1_BASE_TF_MINUTES=3 V6_4TEAMS_ENABLED=false CONFIDENCE_THRESHOLD=35`), fixing `test_retired_judges_bench_audit.py` bar-7 mitigation across all sub-bars.

@@ -190,11 +190,13 @@ def test_htf_poc_fix_and_unmitigated_supply_demand_fix():
     )
     assert v_unmit.get("supply_demand[fix]") == 1.0
 
-    # Now mitigate that demand zone on closed M5 bar 7 (close at 3988.0 < 3990.0 bottom) -> zone must be pruned!
+    # Now mitigate that demand zone across bar 7 (close at 3988.0 < 3990.0 bottom across all 5 M1 sub-bars,
+    # so mitigation holds identically whether TIMEFRAME is M3, M5, or M1!) -> zone must be pruned!
     closes_mit = list(closes)
     lows_mit = list(lows)
-    lows_mit[7 * 5 + 4] = 3987.5
-    closes_mit[7 * 5 + 4] = 3988.0
+    for sub in range(5):
+        lows_mit[7 * 5 + sub] = 3987.5
+        closes_mit[7 * 5 + sub] = 3988.0
     md_mit = {"candles": {"open": opens, "high": highs, "low": lows_mit, "close": closes_mit, "volume": vols}}
     v_mit = dict(
         (n, d) for n, _c, _k, d in rr._evaluate_retired_and_previous_bench(snap, md_mit, tc_dt, {}, {})

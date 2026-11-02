@@ -278,6 +278,7 @@ def test_fix5_6_8_judge_parsers_and_macro_dxy_complete_removal():
 
 
 def test_fix7_mt5_startup_warning_and_balance_deal_filter(monkeypatch, caplog):
+    logging.getLogger("position_manager").propagate = True
     pm = position_manager.PositionManager.__new__(position_manager.PositionManager)
     pm._mt5 = SimpleNamespace()
     pm._state = {}

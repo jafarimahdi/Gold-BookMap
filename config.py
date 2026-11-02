@@ -488,11 +488,12 @@ def _refresh() -> None:
     # order is 9 lots, max 46. The whale threshold (total size at a price) is a
     # different measurement and must not be reused here.
     g["L3_LARGE_ORDER_LOTS"] = _ffloat("L3_LARGE_ORDER_LOTS", 5.0)
-    # 24u + C1/C2 + 2026-10-30 10-day all-regime demotions:
-    # - poc_day (-6,983.3 pts/10d: -2,833.9 Trend, -3,184.0 Lake) -> Scout map door
-    # - supply_demand (-2,556.6 pts/10d: 4/4 Trend neg, 5/5 Lake neg) -> Scout memory door
-    # - microprice (-754.0 pts/10d: 8/10d neg) -> sub-sec execution metric, not 15m voter
-    # - queue_pos (-234.5 pts: execution fill-prob in Shooting, not 15m voter)
+    # 24u + C1/C2 + 2026-10-30 10-day audit + 2026-10-31 Stage-2c 5-day healed M3 trial:
+    # - 7 healthy-code M3 underperformers benched after full Stage-2a book healing
+    #   (replay-4, 3,233 cycles): footprint_delta (-70.0n, 0/5d), iceberg (-33.1n,
+    #   0/2d; stays Scout door), volume_roc (-12.6n, -0.53 @+12m), l3_imbalance
+    #   (-130.6n, 1/5d), footprint_levels (-389.4n, 1/5d), absorption (-444.3n),
+    #   vwap_bands (-204.1n; value_area +405.4n guards balance edges).
     # Union the full canonical retired set into non-empty .env RETIRED_JUDGES unless
     # explicitly overridden via UNRETIRE_JUDGES or RETIRED_JUDGES=none/0/off.
     _canonical_retired = {
@@ -500,6 +501,8 @@ def _refresh() -> None:
         "spoof_invert_loose", "iceberg_legacy", "l3_ofi_streak",
         "delta_pressure", "whale_walls", "htf_poc",
         "poc_day", "supply_demand", "microprice", "queue_pos",
+        "footprint_delta", "iceberg", "volume_roc", "l3_imbalance",
+        "footprint_levels", "absorption", "vwap_bands",
     }
     _retired_raw = _fget(
         "RETIRED_JUDGES",

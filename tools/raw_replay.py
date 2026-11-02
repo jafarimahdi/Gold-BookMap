@@ -1378,6 +1378,22 @@ def _evaluate_retired_and_previous_bench(
         elif fp_imb <= -0.18 and dp3_fp < 0.0:
             _emit("footprint_delta[fix]", "ACT_FIX", 15, -1.0)
 
+    # 39. Newly-benched Stage-2c judges (in config.RETIRED_JUDGES, emitted via snap.judge_votes notes):
+    # Keeps every benched judge visible on the non-voting [7b] bench for ongoing review.
+    emitted_names = {item[0] for item in out}
+    ret_cfg = getattr(config, "RETIRED_JUDGES", ()) or ()
+    for jv in (getattr(snap, "judge_votes", None) or []):
+        if not isinstance(jv, dict):
+            continue
+        jn = str(jv.get("judge") or "").strip()
+        jdir = float(jv.get("dir", 0.0) or 0.0)
+        if not jn or jdir == 0.0 or jn in emitted_names:
+            continue
+        if bool(jv.get("retired")) or jn in ret_cfg:
+            clk_m5 = int(ins.judge_clock(jn, bar_seconds=300))
+            _emit(jn, "RETIRED", clk_m5, jdir)
+            emitted_names.add(jn)
+
     return out
 
 

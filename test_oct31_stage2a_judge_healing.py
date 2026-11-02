@@ -37,16 +37,48 @@ def _panel_map(notes):
     return {row["judge"]: row["dir"] for row in jp.parse_judge_panel(notes)}
 
 
-def test_zero_active_judges_benched_prematurely():
-    """Owner workflow Step A: heal all judges first; bench ZERO active judges before 5-day raw test."""
-    active_19 = {
-        "mtf", "vwap_trend", "spoof_invert", "l3_net_flow",
-        "footprint_levels", "vwap_bands", "cvd_momentum", "absorption", "footprint_delta",
-        "value_area", "cvd_divergence", "l3_large_ofi", "volume_roc",
-        "l3_imbalance", "iceberg", "l3_aggr_limit", "sweep",
+def test_stage2c_pure_12_active_winners_and_7_healthy_benched(monkeypatch):
+    """Stage 2c (after 5-day healed M3 replay): 12 winners stay active; 7 healthy underperformers sit on bench."""
+    active_12 = {
+        "mtf", "vwap_trend", "value_area", "cvd_divergence", "cvd_momentum",
+        "l3_large_ofi", "sweep", "spoof_invert", "l3_net_flow", "l3_aggr_limit",
         "macro_risk", "news_sentiment",
     }
-    assert active_19.isdisjoint(config.RETIRED_JUDGES)
+    benched_7 = {
+        "footprint_delta", "iceberg", "volume_roc", "l3_imbalance",
+        "footprint_levels", "absorption", "vwap_bands",
+    }
+    assert active_12.isdisjoint(config.RETIRED_JUDGES)
+    assert benched_7.issubset(config.RETIRED_JUDGES)
+
+    # Even with an older .env RETIRED_JUDGES list, config._refresh() unions all 7 benched judges:
+    with monkeypatch.context() as mp:
+        mp.setenv("RETIRED_JUDGES", "macro_yield,macro_dxy,whale_walls,htf_poc")
+        mp.delenv("UNRETIRE_JUDGES", raising=False)
+        config._refresh()
+        assert active_12.isdisjoint(config.RETIRED_JUDGES)
+        assert benched_7.issubset(config.RETIRED_JUDGES)
+    config._refresh()
+
+    # Benched judges cast 0 active votes in SignalEngine while still emitting notes for [7b] & Scout Map:
+    eng = s2.SignalEngine()
+    _, d_benched, c_benched, notes_benched = eng.aggregate(
+        4200.0,
+        s2.VolatilityMetrics(atr=2.0),
+        s2.TrendMetrics(adx=15.0),
+        _mk_of(absorption_net=3),
+        s2.FootprintMetrics(delta_imbalance=0.35, dominant_level=4200.0, footprint_strength=0.8),
+        s2.Level3Events(order_book={"bids": [(4199.9, 45.0)], "asks": [(4200.1, 10.0)]}),
+        s2.VolumeProfileMetrics(vwap=4205.0, vwap_std=2.0),
+        s2.MacroMetrics(),
+        s2.NewsAndEvents(),
+        regime="RANGE",
+    )
+    assert d_benched == "NEUTRAL"
+    assert c_benched == 0.0
+    pm_benched = {row["judge"]: row for row in jp.parse_judge_panel(notes_benched)}
+    for bj in ("absorption", "footprint_delta", "l3_imbalance", "vwap_bands"):
+        assert bj in pm_benched and pm_benched[bj].get("retired") is True
 
 
 def test_analyze_market_initializes_l3_ref_mid_before_order_events(monkeypatch, tmp_path):

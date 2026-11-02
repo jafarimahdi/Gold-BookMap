@@ -93,6 +93,11 @@ def family_gate(judge_panel: List[Dict[str, Any]],
     if isinstance(config, str):
         target_dir = config.strip().upper()
     retired_set = set(RETIRED)
+    if config is not None and not isinstance(config, str):
+        try:
+            retired_set |= {str(x) for x in (getattr(config, "RETIRED_JUDGES", None) or ()) if x}
+        except Exception:
+            pass
     if retired is not None:
         try:
             retired_set |= {str(x) for x in retired if x}

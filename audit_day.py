@@ -2496,6 +2496,13 @@ RETIRED_JUDGES = {
     "supply_demand": "retired (2026-10-30 10d audit): 5,028 calls -2,556.6 pts (9/10d neg); stays Scout memory door",
     "microprice": "retired (2026-10-30 10d audit): 869 calls -754.0 pts (8/10d neg); sub-sec execution signal",
     "queue_pos": "retired (2026-10-30 10d audit): 344 calls -234.5 pts; execution fill-prob belongs to Shooting",
+    "footprint_delta": "benched (2026-10-31 Stage-2c 5d healed M3 trial): 67 calls 37.3% right, -70.0 net (0/5d)",
+    "iceberg": "benched (2026-10-31 Stage-2c 5d healed M3 trial): 9 calls 33.3% right, -33.1 net; stays Scout door",
+    "volume_roc": "benched (2026-10-31 Stage-2c 5d healed M3 trial): 105 calls 48.6% right, -12.6 net (-0.53 @+12m)",
+    "l3_imbalance": "benched (2026-10-31 Stage-2c 5d healed M3 trial): 279 calls -130.6 net (1/5d, sub-3m decay)",
+    "footprint_levels": "benched (2026-10-31 Stage-2c 5d healed M3 trial): 1,374 calls -389.4 net (1/5d)",
+    "absorption": "benched (2026-10-31 Stage-2c 5d healed M3 trial): 1,105 calls 47.4% right, -444.3 net",
+    "vwap_bands": "benched (2026-10-31 Stage-2c 5d healed M3 trial): 535 calls 43.7% right, -204.1 net",
 }
 
 
