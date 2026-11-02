@@ -1906,6 +1906,12 @@ def _shooting_execution_gate(decision, snapshot):
             return False, (
                 f"Stage 3c Session Gate failed ({_s3c_gate.get('reason', 'dead_zone')})"
             )
+    if bool(getattr(config, "STAGE3D_SNIPER_GATE_LIVE_ENABLED", False)):
+        _s3d_gate = (getattr(snapshot, "shadow_candidates", None) or {}).get("stage3d_gate")
+        if isinstance(_s3d_gate, dict) and _s3d_gate.get("ok") is False:
+            return False, (
+                f"Stage 3d Climax Gate failed ({_s3d_gate.get('reason', 'late_power_climax')})"
+            )
     plan = getattr(snapshot, "shot", None) or {}
     power = getattr(snapshot, "power", None) or {}
     if not isinstance(plan, dict):
@@ -1913,7 +1919,17 @@ def _shooting_execution_gate(decision, snapshot):
     if not isinstance(power, dict):
         return False, "POWER v2 receipt is malformed or missing"
     expected_power = "UP" if action == "BUY" else "DOWN"
-    if str(power.get("direction", "NEITHER")).upper() != expected_power:
+    _s3d_gate_dict = (getattr(snapshot, "shadow_candidates", None) or {}).get("stage3d_gate")
+    _s3d_auth_ok = (
+        bool(getattr(config, "STAGE3D_SNIPER_GATE_LIVE_ENABLED", False))
+        and bool(getattr(config, "STAGE3D_SNIPER_ENTRY_ENABLED", False))
+        and isinstance(_s3d_gate_dict, dict)
+        and _s3d_gate_dict.get("ok") is True
+        and _s3d_gate_dict.get("sniper_authorized") is True
+        and str(plan.get("authorized_by") or "") == "STAGE3D_SNIPER"
+        and str(plan.get("side") or "").upper() == action
+    )
+    if not _s3d_auth_ok and str(power.get("direction", "NEITHER")).upper() != expected_power:
         return False, "AI side does not agree with canonical POWER v2"
     if plan.get("shot") != "GO" or str(plan.get("side", "")).upper() != action:
         _why_list = plan.get("why") if isinstance(plan.get("why"), list) else []

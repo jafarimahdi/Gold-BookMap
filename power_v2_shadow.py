@@ -160,10 +160,16 @@ def run_power_v2(
         )
     except Exception:
         _min_big_lots = 2.0 if str(symbol or "").strip().upper().startswith("MGC") else 5.0
+    # Law #11: Scale minimum trade count proportionally with active bar_seconds
+    # (20 prints per 300s M5 = 4.0/min -> 12 prints per 180s M3 = 4.0/min).
+    _scaled_min_trades = max(
+        5, int(round(20.0 * (float(max(60, int(bar_seconds))) / 300.0)))
+    )
     built = build_m5_inputs(
         tick_data or [], now=evaluation_end, tick_size=tick_size,
+        min_trades=_scaled_min_trades,
         min_big_print_size=_min_big_lots,
-        bar_seconds=bar_seconds)  # fusionv1
+        bar_seconds=bar_seconds)  # fusionv1 + Law #11
     raw_pre_gain = {
         k: round(float(v.get("value", 0.0)), 4)
         for k, v in (built.get("judges") or {}).items()

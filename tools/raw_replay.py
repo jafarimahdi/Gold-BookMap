@@ -1152,7 +1152,7 @@ def _evaluate_retired_and_previous_bench(
             _emit("round_numbers_5st", "PREVIOUS", 30, -1.0 if px < lvl_rn else 1.0)
 
     # --- 26-29. POWER v1 & v2 Exclusive Instruments (never before graded side-by-side with Classroom) ---
-    pw = getattr(snap, "power", None) or {}
+    pw = getattr(snap, "power_v2", None) or getattr(snap, "power", None) or {}
     if isinstance(pw, dict) and pw:
         pw_d = str(pw.get("direction") or "NEITHER").upper()
         if pw_d == "UP":
@@ -1749,14 +1749,14 @@ def replay_single_day(
                 if atr_live <= 0:
                     atr_live = atr_const
 
-                pw = getattr(snap, "power", None) or {}
+                pw = getattr(snap, "power_v2", None) or getattr(snap, "power", None) or {}
                 pw_dir = str(pw.get("direction", "NEITHER") or "NEITHER").upper()
                 pw_reg = str((pw.get("regime_diagnostics") or {}).get("market_regime") or regime).upper()
                 pw_act = float(pw.get("activity", 0.0) or 0.0)
                 pw_bars = int(((pw.get("regime_diagnostics") or {}).get("bars_used") or 0))
 
-                shot = getattr(snap, "shooting_plan", None) or {}
-                # Stage 1 Fix: shooting_team.plan_shot() uses key "shot" ("GO" | "WAIT") + "why" list
+                shot = getattr(snap, "shooting_plan", None) or getattr(snap, "shot", None) or {}
+                # Stage 1 + Stage 3d Fix: MarketSnapshot stores `snap.shot` (`shot`="GO"|"WAIT", `why` list)
                 shot_act = str(shot.get("shot") or shot.get("action") or "WAIT").upper()
                 shot_style = str(shot.get("entry_style") or "NONE")
                 raw_why = shot.get("why")
@@ -1780,8 +1780,11 @@ def replay_single_day(
                 s3b_reason = str(s3b.get("reason") or "")
                 s3c = (getattr(snap, "shadow_candidates", None) or {}).get("stage3c_gate") or {}
                 s3c_live_capped = bool(s3c.get("live_capped", False))
+                s3d = (getattr(snap, "shadow_candidates", None) or {}).get("stage3d_gate") or {}
+                s3d_live_capped = bool(s3d.get("live_capped", False))
+                s3d_sniper_auth = bool(s3d.get("sniper_authorized", False))
 
-                # Current-version gate classification (Step 2 -> Family Gate -> Stage 3b -> Stage 3c -> Shooting)
+                # Current-version gate classification (Step 2 -> Family Gate -> Stage 3b -> Stage 3c -> Stage 3d -> Shooting)
                 pw_side = "BUY" if pw_dir == "UP" else ("SELL" if pw_dir == "DOWN" else "NEITHER")
                 if sig_dir not in ("BUY", "SELL"):
                     gate_stage = "NEUTRAL (no panel signal)"
@@ -1793,10 +1796,14 @@ def replay_single_day(
                     gate_stage = "BLOCKED: Conf < 50% (Stage 3b Conflict)"
                 elif sig_conf < conf_thr and s3c_live_capped:
                     gate_stage = "BLOCKED: Session Dead-Zone (Stage 3c)"
+                elif sig_conf < conf_thr and s3d_live_capped:
+                    gate_stage = "BLOCKED: Late POWER Climax (Stage 3d)"
                 elif sig_conf < conf_thr:
                     gate_stage = f"BLOCKED: Conf < {conf_thr:.0f}%"
                 elif shot_act == "GO":
                     gate_stage = f"SHOOTING GO ({shot_style})"
+                elif s3d_sniper_auth:
+                    gate_stage = f"CONF>={conf_thr:.0f}% + SNIPER AUTH (Shooting={shot_act})"
                 elif pw_side == sig_dir:
                     gate_stage = f"CONF>={conf_thr:.0f}% + POWER ALIGNED (Shooting={shot_act})"
                 else:
@@ -1908,6 +1915,8 @@ def replay_single_day(
                 fix_out, fix_pts = "NO_SIGNAL", 0.0
                 c3_out, c3_pts = "NO_SIGNAL", 0.0
                 tr10_out, tr10_pts = "NO_SIGNAL", 0.0
+                shot_br_out, shot_br_pts = "NO_SIGNAL", None
+                shot_rr_val = None
                 a2_fix_pts = a2_atr_pts = None
 
                 if sig_dir in ("BUY", "SELL") and px > 0:
@@ -1965,6 +1974,18 @@ def replay_single_day(
                             (px + datr) if is_b else (px - datr),
                             45, spread_cost,
                         )
+                    if shot_act == "GO":
+                        try:
+                            sh_sl = float(shot.get("stop") or 0.0)
+                            sh_tp = float(shot.get("target") or 0.0)
+                            shot_rr_val = float(shot.get("rr") or 0.0)
+                            if sh_sl > 0 and sh_tp > 0:
+                                shot_br_out, shot_br_pts = _walk_bracket(
+                                    bar_keys, walk_bars, tc_ep, sig_dir, px,
+                                    sh_sl, sh_tp, max_hold_min, spread_cost,
+                                )
+                        except Exception:
+                            shot_br_out, shot_br_pts = "NO_SIGNAL", None
 
                 dq = md.get("data_quality") or {}
                 l2d = md.get("l2_diagnostics") or {}
@@ -2006,6 +2027,8 @@ def replay_single_day(
                     "fix_out": fix_out, "fix_pts": fix_pts,
                     "c3_out": c3_out, "c3_pts": c3_pts,
                     "tr10_out": tr10_out, "tr10_pts": tr10_pts,
+                    "shot_br_out": shot_br_out, "shot_br_pts": shot_br_pts,
+                    "shot_rr": shot_rr_val,
                     "a2_fix_pts": a2_fix_pts, "a2_atr_pts": a2_atr_pts,
                 })
                 tc_ep += every_s
@@ -2473,6 +2496,43 @@ def synthesize_multi_day(results: List[Dict[str, Any]]) -> Tuple[str, str, Dict[
         lines.append(
             "\n[8] BOOKMARK #8 SPRINT STOP CHECK: 0 Shooting GO / A2 cycles fired on this sample."
         )
+
+    # [8b] Stage 3d Shooting Corridor & Scout-Bracket Diagnostic
+    go_cycles = [
+        c for r in ok_days for c in r["cycles"]
+        if not c.get("error") and c.get("confidence", 0.0) >= conf_thr and c.get("shot_action") == "GO"
+    ]
+    wait_cycles = [
+        c for r in ok_days for c in r["cycles"]
+        if not c.get("error") and c.get("direction") in ("BUY", "SELL")
+        and c.get("confidence", 0.0) >= conf_thr and c.get("shot_action") != "GO"
+    ]
+    wait_reasons: Dict[str, int] = defaultdict(int)
+    for wc in wait_cycles:
+        raw_r = str(wc.get("shot_reason") or "unspecified").split(";")[0].strip()[:88]
+        wait_reasons[raw_r or "unspecified"] += 1
+    lines.append(f"\n[8b] SHOOTING CORRIDOR & SCOUT-BRACKET DIAGNOSTIC (Conf>={conf_thr:.0f}%)")
+    if go_cycles:
+        go_br = [c["shot_br_pts"] for c in go_cycles if c.get("shot_br_pts") is not None]
+        go_tp = sum(1 for c in go_cycles if c.get("shot_br_out") == "TP")
+        go_sl = sum(1 for c in go_cycles if c.get("shot_br_out") == "SL")
+        go_wr = (100.0 * go_tp / (go_tp + go_sl)) if (go_tp + go_sl) else 0.0
+        go_rr_vals = [float(c["shot_rr"]) for c in go_cycles if c.get("shot_rr")]
+        avg_rr = (sum(go_rr_vals) / len(go_rr_vals)) if go_rr_vals else 0.0
+        go_fix = sum(float(c.get("fix_pts", 0.0) or 0.0) for c in go_cycles)
+        go_c3 = sum(float(c.get("c3_pts", 0.0) or 0.0) for c in go_cycles)
+        go_tr = sum(float(c.get("tr10_pts", 0.0) or 0.0) for c in go_cycles)
+        lines.append(
+            f"  SHOOTING GO: N={len(go_cycles)} | Scout Door Bracket: TP/SL={go_tp}/{go_sl} ({go_wr:.1f}% WR), "
+            f"PTS={sum(go_br):+.1f} ({(sum(go_br)/max(len(go_br),1)):+.2f}/go), Avg R:R={avg_rr:.2f} | "
+            f"FIX={go_fix:+.1f} | C3={go_c3:+.1f} | TR1.0={go_tr:+.1f}"
+        )
+    else:
+        lines.append("  SHOOTING GO: N=0")
+    if wait_reasons:
+        lines.append(f"  SHOOTING WAIT REASONS ON ACTIONABLE SIGNALS (N={len(wait_cycles)}):")
+        for wr_k, wr_n in sorted(wait_reasons.items(), key=lambda kv: -kv[1])[:6]:
+            lines.append(f"    - {wr_n:>4}x  {wr_k}")
 
     # [9] Stage 1: Timeframe-linked 1..4-bar path & Market Trick Detector
     lines.append(

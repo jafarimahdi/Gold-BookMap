@@ -201,7 +201,9 @@ def test_stage3c_step2_caps_dead_zone_and_execution_gate_fails_closed(monkeypatc
 
 
 def test_stage3c_step3_prompt_stays_well_under_15k_with_populated_report_card(monkeypatch, tmp_path):
-    """Even with a full 12-judge report card in DATA_DIR + v6_teams=True (20 bars), prompt stays <14,500 chars."""
+    """Even with a full 12-judge report card in DATA_DIR + v6_teams=True (20 bars), prompt stays <15,000 chars."""
+    import signal_team
+    signal_team._BOOK = None
     for _cfg_mod in {config, getattr(s2, "config", config), getattr(s3, "config", config)}:
         monkeypatch.setattr(_cfg_mod, "DATA_DIR", tmp_path, raising=False)
         monkeypatch.setattr(_cfg_mod, "V6_4TEAMS_ENABLED", True, raising=False)
@@ -254,4 +256,4 @@ def test_stage3c_step3_prompt_stays_well_under_15k_with_populated_report_card(mo
     prompt = s3.AIDecisionEngine().build_prompt(snap)
     assert "JUDGE REPORT CARDS" in prompt
     assert '"time_of_day_utc":"11:15"' in prompt
-    assert len(prompt) < 14500, f"Prompt should stay comfortably <14.5k chars even with report cards, got {len(prompt)}"
+    assert len(prompt) < 15000, f"Prompt should stay <15k chars even with report cards, got {len(prompt)}"

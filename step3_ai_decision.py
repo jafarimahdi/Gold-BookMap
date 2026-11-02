@@ -683,7 +683,7 @@ class AIDecisionEngine:
                 if ns.startswith("RETIRED (not voting):"):
                     continue
                 clean_notes.append(ns)
-            payload["notes"] = clean_notes[:15]
+            payload["notes"] = clean_notes[:12]
 
         # 3) Trim news, order blocks, footprint, and signal_map for high signal-to-noise
         if isinstance(payload.get("news"), dict):

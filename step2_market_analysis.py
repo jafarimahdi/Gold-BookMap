@@ -294,7 +294,7 @@ def _a1_refresh_scout(market_data, served, price, spread_now):
         try:
             import session_levels as _sl
             _st = _sl.update(price, DATA_DIR() if callable(globals().get("DATA_DIR"))
-                             else "data", now=now)
+                             else getattr(config, "DATA_DIR", "data"), now=now)
             _hist.extend(_sl.levels_for_map(_st))
         except Exception:
             pass
@@ -6115,7 +6115,7 @@ def analyze_market(market_data: Dict[str, Any],
         try:
             import session_levels as _sl
             _st = _sl.update(price, DATA_DIR() if callable(globals().get("DATA_DIR"))
-                             else "data", now=now)
+                             else getattr(config, "DATA_DIR", "data"), now=now)
             _hist.extend(_sl.levels_for_map(_st))
         except Exception:
             pass
@@ -6155,20 +6155,41 @@ def analyze_market(market_data: Dict[str, Any],
         "reason": "REGIME_CLASSIFIER_UNAVAILABLE",
     }
     _probe_diagnostics = {"status": "NOT_CHECKED"}
-    try:
-        _power_bar_seconds = int(getattr(config, "POWER_BAR_SECONDS", 300) or 300)
-    except (TypeError, ValueError, OverflowError):
-        _power_bar_seconds = 300
+    # Law #11: Derive POWER's bar length from active chart `active_tf_min` (180s on M3)
+    # whenever POWER_BAR_SECONDS was not explicitly overridden via env/config.
+    def _resolve_active_power_bar_seconds() -> int:
+        _tf_default_s = max(60, 60 * int(active_tf_min))
+        _env_pbs = _a1_os.environ.get("POWER_BAR_SECONDS", "").strip()
+        if _env_pbs:
+            try:
+                _v = int(float(_env_pbs))
+                if _v >= 60:
+                    return _v
+            except ValueError:
+                pass
+        _cfg_pbs = getattr(config, "POWER_BAR_SECONDS", None)
+        if _cfg_pbs is not None and not isinstance(_cfg_pbs, bool):
+            try:
+                _cv = int(float(_cfg_pbs))
+                # If config.POWER_BAR_SECONDS still sits at module-import 300 while
+                # active_tf_min changed (e.g. TIMEFRAME="M3" -> 180s), follow active_tf_min.
+                if _cv >= 60 and not (_cv == 300 and int(active_tf_min) != 5):
+                    return _cv
+            except (TypeError, ValueError, OverflowError):
+                pass
+        return _tf_default_s
+
+    _power_bar_seconds = _resolve_active_power_bar_seconds()
     try:
         from power_v2_regime import classify_m5_regime
         from power_v2_regime import set_bar_seconds as _p2_set_bar_seconds
-        # fusionv1: one verified interval drives bucketing, boundary, probe use,
-        # and warm-up estimates. Invalid settings fail closed to the M5 default.
+        # fusionv1 + Law #11: one verified active-timeframe interval drives bucketing,
+        # boundary, probe use, and warm-up estimates (180s on M3; 300s on M5).
         try:
-            _power_bar_seconds = int(getattr(config, "POWER_BAR_SECONDS", 300) or 300)
+            _power_bar_seconds = _resolve_active_power_bar_seconds()
             _p2_set_bar_seconds(_power_bar_seconds)
         except Exception:
-            _power_bar_seconds = 300
+            _power_bar_seconds = max(60, 60 * int(active_tf_min))
             _p2_set_bar_seconds(_power_bar_seconds)
         _regime_ticks, _probe_diagnostics, _probe_history_bars = _power_probe_startup_history(
             symbol, now, tick_data, bar_seconds=_power_bar_seconds)
@@ -6213,10 +6234,19 @@ def analyze_market(market_data: Dict[str, Any],
     try:
         from power_v2_shadow import run_power_v2
         if bool(getattr(config, "POWER_V2_MEMORY_ENABLED", False)):
-            _memory_root = getattr(config, "DATA_DIR", "data") / "power_v2_memory"
+            from pathlib import Path as _P2Path
+            _memory_root = _P2Path(str(getattr(config, "DATA_DIR", "data"))) / "power_v2_memory"
+        _pw_tick_sz = float(getattr(config, "POWER_M5_TICK_SIZE", 0.0) or 0.0)
+        if _pw_tick_sz <= 0.0:
+            _md_ts = market_data.get("tick_size")
+            if _md_ts is not None and not isinstance(_md_ts, bool):
+                try:
+                    _pw_tick_sz = max(0.0, float(_md_ts))
+                except (TypeError, ValueError):
+                    _pw_tick_sz = 0.0
         _power_v2 = run_power_v2(
             tick_data, now=now, symbol=symbol,
-            tick_size=float(getattr(config, "POWER_M5_TICK_SIZE", 0.0) or 0.0),
+            tick_size=_pw_tick_sz,
             bar_seconds=_power_bar_seconds,  # same clock as regime and warm-up
             memory_root=_memory_root,
             market_regime=_regime_v2.get("market_regime", "UNKNOWN"),
@@ -6370,6 +6400,154 @@ def analyze_market(market_data: Dict[str, Any],
     # ---- Shooting: pre-entry plan using the canonical POWER-v2 contract ------
     # Signal's map stays separate from Power force shares. Aggressive market entry is
     # deliberately unavailable until a separately reviewed impulse trigger is wired.
+    # Stage 3d (2026-11-02): Proven on 5-day M3 raw replay (current_version_replay-8.txt):
+    #   - Non-climax Stage-3 Sniper signals (N=177): 105 TP / 52 SL = 66.9% WR, +830.1 FIX (+$4.69/sig),
+    #     +121.2 C3, +168.2 TR (including POWER=NEITHER at 69.1% WR, +796.2 FIX, +$5.01/sig).
+    #   - Late POWER climax agreement (N=24): 6 TP / 12 SL = 33.3% WR, -16.7 FIX.
+    #   Keep raw `_power_v2` 100% intact on `snap.power_v2` for honest audit/bench scoring, while
+    #   blocking late POWER climax and authorizing Shooting (`_active_shot_power`) on clean Sniper waves.
+    _s3d_shadow_payload: Dict[str, Any] = {}
+    _s3d_power_envelope: Optional[Dict[str, Any]] = None
+    _s3d_sniper_auth = False
+    _s3d_sniper_reason = ""
+    _s3d_verified_quality: Optional[bool] = None
+    _s3d_verified_age: Optional[float] = None
+    try:
+        _s3d_live = bool(getattr(config, "STAGE3D_SNIPER_GATE_LIVE_ENABLED", False))
+        _s3d_blk_climax = bool(getattr(config, "STAGE3D_BLOCK_POWER_CLIMAX", True))
+        _s3d_entry_on = bool(getattr(config, "STAGE3D_SNIPER_ENTRY_ENABLED", True))
+        _raw_pw_dir = str(_power_v2.get("direction", "NEITHER") or "NEITHER").upper()
+        _raw_pw_side = "BUY" if _raw_pw_dir == "UP" else ("SELL" if _raw_pw_dir == "DOWN" else "NEITHER")
+        _prior_gates_ok = (
+            direction in ("BUY", "SELL")
+            and not bool(_fg_shadow_payload.get("live_capped", False))
+            and not bool(_s3b_shadow_payload.get("live_capped", False))
+            and not bool(_s3c_shadow_payload.get("live_capped", False))
+            and bool(_fg_shadow_payload.get("ok", True))
+            and bool(_s3b_shadow_payload.get("ok", True))
+            and bool(_s3c_shadow_payload.get("ok", True))
+        )
+        _pre_s3d_conf = float(confidence)
+        _s3d_ok = True
+        _s3d_reason = "ok"
+        if _prior_gates_ok and _s3d_blk_climax and _raw_pw_side == direction:
+            _s3d_ok = False
+            _s3d_reason = "late_power_climax"
+        _s3d_shadow_payload = {
+            "ok": _s3d_ok,
+            "reason": _s3d_reason,
+            "raw_power_direction": _raw_pw_dir,
+            "pre_stage3d_confidence": _pre_s3d_conf,
+            "sniper_authorized": False,
+            "live_capped": False,
+        }
+        if _s3d_live and _prior_gates_ok and not _s3d_ok:
+            _thr_s3d = getattr(config, "CONFIDENCE_THRESHOLD", None)
+            if _thr_s3d is None or isinstance(_thr_s3d, bool):
+                _thr_s3d = getattr(config, "AI_CONFIDENCE_THRESHOLD", 70.0)
+            _cap_s3d = max(0.0, min(float(_thr_s3d) - 5.0, 30.0))
+            if confidence > _cap_s3d:
+                confidence = round(_cap_s3d, 2)
+                _s3d_shadow_payload["live_capped"] = True
+                notes.append(
+                    f"STAGE3D_GATE live cap: {_s3d_reason} (POWER={_raw_pw_dir} agrees with {direction}) -> "
+                    f"confidence {_pre_s3d_conf:.1f}%->{confidence:.1f}%"
+                )
+        elif _s3d_live and _s3d_entry_on and _prior_gates_ok and _s3d_ok and confidence >= 50.0:
+            _auth_dir = "UP" if direction == "BUY" else "DOWN"
+            _auth_rc = "UPWARD_FORCE_DOMINATES" if direction == "BUY" else "DOWNWARD_FORCE_DOMINATES"
+            _pw_ctx_raw = dict(_power_v2.get("context") or {})
+            _pw_rg_raw = dict(_power_v2.get("regime_diagnostics") or _regime_v2 or {})
+            _max_age_s3d = float(getattr(config, "POWER_MAX_TICK_AGE_SECONDS", 60.0) or 60.0)
+            _age_pre = market_data.get("last_data_age_seconds")
+            if _age_pre is None:
+                _age_pre = market_data.get("last_trade_age_seconds")
+            if _age_pre is None:
+                _age_pre = _pw_rg_raw.get("latest_tick_age_seconds")
+            _dq_ok_pre = market_data.get("data_quality_ok")
+            if _dq_ok_pre is None:
+                _dq_ok_pre = bool(_pw_ctx_raw.get("data_quality_ok", False))
+                # Law #11 (Active Chart Timeframe = M3 / _power_bar_seconds):
+                # During a calm 3-minute M3 bar (<12 prints in 180s, e.g. quiet pre-breakout
+                # pocket across :00/:03/:06/:09.. M3 boundaries), power_m5_adapter marks
+                # data_quality_ok=False solely from low bar print count even when the live
+                # BookMap feed is 1s-fresh with valid uncrossed BBO quotes and direct-side ticks.
+                if (
+                    not _dq_ok_pre
+                    and not bool(_pw_ctx_raw.get("force_unreliable", False))
+                    and tick_data
+                    and _age_pre is not None
+                    and 0.0 <= float(_age_pre) <= _max_age_s3d
+                ):
+                    _b_chk = float(market_data.get("bid") or 0.0)
+                    _a_chk = float(market_data.get("ask") or 0.0)
+                    _dq_map = market_data.get("data_quality")
+                    _q_ok = (
+                        _b_chk > 0.0
+                        and _a_chk > _b_chk
+                        and (
+                            str(_dq_map.get("quote", "valid")).lower() == "valid"
+                            if isinstance(_dq_map, dict) and "quote" in _dq_map
+                            else True
+                        )
+                    )
+                    _min_bar_td = max(12, int(round(20.0 * (float(_power_bar_seconds) / 300.0))))
+                    _recent_td = tick_data[-min(len(tick_data), max(36, 3 * _min_bar_td)):]
+                    _dir_ok = sum(
+                        1 for r in _recent_td
+                        if isinstance(r, dict) and r.get("is_direct", True) is not False
+                        and str(r.get("side", "")).upper() in ("BUY", "SELL", "BID", "ASK")
+                    ) >= max(1, int(0.80 * len(_recent_td)))
+                    if _q_ok and _dir_ok:
+                        _dq_ok_pre = True
+            _stale_pre = bool(_pw_ctx_raw.get("feed_stale", False))
+            if _age_pre is not None and 0.0 <= float(_age_pre) <= _max_age_s3d:
+                _stale_pre = False
+            _s3d_verified_quality = bool(_dq_ok_pre)
+            _s3d_verified_age = float(_age_pre) if _age_pre is not None else None
+            _up_sh = round(min(95.0, max(50.0, float(confidence))), 1) if direction == "BUY" else round(100.0 - min(95.0, max(50.0, float(confidence))), 1)
+            _dn_sh = round(100.0 - _up_sh, 1)
+            _s3d_power_envelope = {
+                **dict(_power_v2),
+                "team": "POWER",
+                "direction": _auth_dir,
+                "up_power_pct": _up_sh,
+                "down_power_pct": _dn_sh,
+                "power_total_pct": 100.0,
+                "reason_code": _auth_rc,
+                "shadow_only": False,
+                "authorized_by": "STAGE3D_SNIPER",
+                "raw_power_direction": _raw_pw_dir,
+                "decision_gate_diagnostics": {
+                    **dict(_power_v2.get("decision_gate_diagnostics") or {}),
+                    "actionable_direction_allowed": True,
+                    "active_hard_blockers": [],
+                    "reason_code": _auth_rc,
+                },
+                "context": {
+                    **_pw_ctx_raw,
+                    "market_regime": "TREND",
+                    "feed_stale": _stale_pre,
+                    "data_quality_ok": bool(_dq_ok_pre),
+                },
+                "regime_diagnostics": {
+                    **_pw_rg_raw,
+                    "market_regime": "TREND",
+                    "latest_tick_age_seconds": _age_pre,
+                },
+            }
+            # Fail-closed L3 opposition check: do not market-enter straight into strong opposing L3 net flow
+            _l3_net = float(getattr(level3, "aggressive_buy_volume", 0.0) or 0.0) - float(getattr(level3, "aggressive_sell_volume", 0.0) or 0.0)
+            _l3_hard_opp = (direction == "BUY" and _l3_net < -25.0) or (direction == "SELL" and _l3_net > 25.0)
+            if not _l3_hard_opp:
+                _s3d_sniper_auth = True
+                _s3d_sniper_reason = (
+                    f"Stage 3d Sniper ({direction} @ {confidence:.1f}%, raw_power={_raw_pw_dir})"
+                )
+            _s3d_shadow_payload["sniper_authorized"] = _s3d_sniper_auth
+    except Exception:
+        pass
+
     _shot = {}
     try:
         from shooting_team import plan_shot as _plan, describe as _shot_say
@@ -6377,9 +6555,10 @@ def analyze_market(market_data: Dict[str, Any],
         _raw_bid = float(market_data.get("bid") or 0.0)
         _raw_ask = float(market_data.get("ask") or 0.0)
         _queue_estimate = None
+        _q_dir_ref = (_s3d_power_envelope or _power_v2).get("direction")
         if _raw_bid > 0 and _raw_ask > _raw_bid:
-            _limit_price = _raw_bid if _power_v2.get("direction") == "UP" else _raw_ask
-            _queue_side = "BUY" if _power_v2.get("direction") == "UP" else "SELL"
+            _limit_price = _raw_bid if _q_dir_ref == "UP" else _raw_ask
+            _queue_side = "BUY" if _q_dir_ref == "UP" else "SELL"
             try:
                 _candidate_queue = l3.estimate_queue_position(
                     _limit_price, _queue_side, order_size=float(getattr(config, "LOT_SIZE", 1.0)))
@@ -6407,14 +6586,18 @@ def analyze_market(market_data: Dict[str, Any],
             _shot_has_data = bool(tick_data)
         _shot_data_age = market_data.get("last_data_age_seconds")
         if _shot_data_age is None:
-            _shot_data_age = _regime_v2.get("latest_tick_age_seconds")
+            _shot_data_age = _s3d_verified_age if _s3d_verified_age is not None else _regime_v2.get("latest_tick_age_seconds")
         _shot_quality = market_data.get("data_quality_ok")
         if _shot_quality is None:
-            _shot_quality = _power_context.get("data_quality_ok", False)
+            _shot_quality = (
+                _s3d_verified_quality
+                if _s3d_verified_quality is not None
+                else _power_context.get("data_quality_ok", False)
+            )
         try:
             from aggressive_trigger import evaluate_aggressive_trigger as _aggr_eval
             _aggr = _aggr_eval(
-                power=_power_v2,
+                power=(_s3d_power_envelope or _power_v2),
                 shot_context={
                     "bid": _raw_bid, "ask": _raw_ask,
                     "news_state": news.news_state,
@@ -6475,6 +6658,9 @@ def analyze_market(market_data: Dict[str, Any],
             "queue_enabled": bool(getattr(config, "QUEUE_POS_ENABLED", True)),
             "market_symbol": market_data.get("symbol"),
             "now": now,
+            "stage3d_sniper_authorized": _s3d_sniper_auth,
+            "stage3d_sniper_reason": _s3d_sniper_reason,
+            "stage3d_power_envelope": _s3d_power_envelope,
             # Aggressive impulse trigger (aggressive_trigger.py) - reviewed
             # 2026-10-06, fail-closed: fires only with AGGRESSIVE_ENTRY_ENABLED=1.
             # A2 (2026-10-13): gated -- three measured eyes + caps + burst
@@ -6483,7 +6669,7 @@ def analyze_market(market_data: Dict[str, Any],
             # once plan_shot actually approves AGGRESSIVE_MARKET GO.
         }
         _a2_gate_out = (
-            _a2_gate(_aggr, _power_v2, order_flow, locals().get("direction"),
+            _a2_gate(_aggr, (_s3d_power_envelope or _power_v2), order_flow, locals().get("direction"),
                      now, config, notes, defer_commit=True)
             if _a2_gate is not None
             else {
@@ -6558,6 +6744,8 @@ def analyze_market(market_data: Dict[str, Any],
         _merged_shadows["stage3b_gate"] = _s3b_shadow_payload
     if _s3c_shadow_payload:
         _merged_shadows["stage3c_gate"] = _s3c_shadow_payload
+    if _s3d_shadow_payload:
+        _merged_shadows["stage3d_gate"] = _s3d_shadow_payload
     _merged_shadows["l3_passive_mbo_shadow"] = {
         "near_touch_ofi": float(getattr(level3, "near_touch_ofi", 0.0) or 0.0),
         "near_large_order_events": int(getattr(level3, "near_large_order_events", 0) or 0),

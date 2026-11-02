@@ -168,6 +168,27 @@ def _epoch(value: Any) -> Optional[float]:
 _ROAD_HISTORY: "deque" = deque(maxlen=4096)
 
 
+def _active_bar_seconds(config: Any) -> float:
+    """Law #11: Resolve active chart bar length in seconds (180s on M3; scales to any TIMEFRAME)."""
+    tf_raw = str(getattr(config, "TIMEFRAME", "") or "").strip().upper()
+    tf_min = None
+    if tf_raw.startswith("M") and tf_raw[1:].isdigit():
+        tf_min = max(1, int(tf_raw[1:]))
+    elif tf_raw in ("H1", "60M"):
+        tf_min = 60
+    else:
+        btf = getattr(config, "BASE_TF_MINUTES", None)
+        if btf is not None and not isinstance(btf, bool):
+            try:
+                tf_min = max(1, int(float(btf)))
+            except (TypeError, ValueError):
+                tf_min = None
+    pbs = _cfg(config, "POWER_BAR_SECONDS", 0.0)
+    if pbs >= 60.0 and not (pbs == 300.0 and tf_min is not None and tf_min != 5):
+        return float(pbs)
+    return float(max(60, 60 * (tf_min or 3)))
+
+
 def _observe_passive_road_sample(signal_map: Any, power: Any, price: Any,
                                  spread: Any, ctx: Mapping[str, Any],
                                  config: Any) -> None:
@@ -216,7 +237,13 @@ def _observe_passive_road_sample(signal_map: Any, power: Any, price: Any,
         return
 
     now = _epoch(ctx.get("now")) or time.time()
-    window = max(300.0, _cfg(config, "SHOOT_ROAD_HISTORY_SECONDS", 2700.0))
+    hist_min_obs = max(1, int(_cfg(config, "SHOOT_ROAD_HISTORY_MIN", 12)))
+    bar_sec_obs = _active_bar_seconds(config)
+    window = max(
+        300.0,
+        _cfg(config, "SHOOT_ROAD_HISTORY_SECONDS", 2700.0),
+        float(hist_min_obs + 3) * bar_sec_obs,
+    )
     if _ROAD_HISTORY and _ROAD_HISTORY[-1][0] > now + 60.0:
         reanchored = [(now - 1.0, v) for _, v in _ROAD_HISTORY]
         _ROAD_HISTORY.clear()
@@ -232,7 +259,13 @@ def _observe_passive_road_sample(signal_map: Any, power: Any, price: Any,
 def _crowd_v2(door_size, road_lots, shot_lots, recent_volume, config, now=None):
     """Three Fair Questions.  Returns a verdict dict; every field is a receipt."""
     now = _epoch(now) or time.time()
-    window = max(300.0, _cfg(config, "SHOOT_ROAD_HISTORY_SECONDS", 2700.0))
+    hist_min = max(1, int(_cfg(config, "SHOOT_ROAD_HISTORY_MIN", 12)))
+    bar_sec_cv2 = _active_bar_seconds(config)
+    window = max(
+        300.0,
+        _cfg(config, "SHOOT_ROAD_HISTORY_SECONDS", 2700.0),
+        float(hist_min + 3) * bar_sec_cv2,
+    )
     if _ROAD_HISTORY and _ROAD_HISTORY[-1][0] > now + 60.0:
         reanchored = [(now - 1.0, v) for _, v in _ROAD_HISTORY]
         _ROAD_HISTORY.clear()
@@ -241,7 +274,6 @@ def _crowd_v2(door_size, road_lots, shot_lots, recent_volume, config, now=None):
         _ROAD_HISTORY.popleft()
     if road_lots is not None and road_lots >= 0:
         _ROAD_HISTORY.append((now, float(road_lots)))
-    hist_min = max(1, int(_cfg(config, "SHOOT_ROAD_HISTORY_MIN", 12)))
     road_normal = None
     if len(_ROAD_HISTORY) >= hist_min:
         road_normal = statistics.median(v for _, v in _ROAD_HISTORY)
@@ -460,6 +492,11 @@ def plan_shot(signal_map: Dict[str, Any], power: Dict[str, Any],
     The current pipeline intentionally provides no such trigger yet.
     """
     ctx = dict(entry_context or {})
+    if (
+        ctx.get("stage3d_sniper_authorized") is True
+        and isinstance(ctx.get("stage3d_power_envelope"), Mapping)
+    ):
+        power = ctx["stage3d_power_envelope"]
     plan_ttl = max(1.0, _cfg(config, "SHOOT_PLAN_TTL_SECONDS", 30.0))
     bad_power = _power_gate(power, ctx, config)
     if bad_power:
@@ -649,6 +686,24 @@ def plan_shot(signal_map: Dict[str, Any], power: Dict[str, Any],
     passive_candidate_eligible = (passive_geometry_reason is None
                                   and not queue_blocks_limit)
     passive_allowed = passive_candidate_eligible and limit_order_enabled
+    # Stage 3d (2026-11-02): When the verified Stage-3 Sniper Panel (>=2 families, Conf>=50%,
+    # non-climax, outside dead zones) explicitly authorizes marketable entry and passive limits
+    # are policy-disabled, permit AGGRESSIVE_MARKET ONLY if full Scout-door + Shelter/ATR
+    # geometry (reward > 3x spread, R:R >= SHOOT_MIN_RR, Crowd v2 PASS, route_clear) passes.
+    if (
+        not passive_allowed
+        and not aggressive_allowed
+        and ctx.get("stage3d_sniper_authorized") is True
+    ):
+        if aggressive_geometry_ok:
+            trigger = True
+            trigger_reason = str(
+                ctx.get("stage3d_sniper_reason")
+                or "Stage 3d Sniper Panel authorized marketable entry"
+            ).strip()
+            aggressive_allowed = True
+        elif aggressive_reason is None and not route_clear:
+            aggressive_reason = "Scout has not confirmed a clear route for sniper marketable entry"
     if passive_geometry_reason:
         passive_reason = passive_geometry_reason
     elif queue_blocks_limit:
@@ -901,6 +956,7 @@ def plan_shot(signal_map: Dict[str, Any], power: Dict[str, Any],
                                "coverage": _num(power.get("coverage")),
                                "valid_families": list(power.get("valid_families") or []),
                                "reason_code": power.get("reason_code")},
+            "authorized_by": power.get("authorized_by") or "POWER_V2",
             "portfolio_risk_status": "NOT_ASSESSED",
             "execution_blockers": ["position size/account exposure not supplied",
                                     "margin and daily-loss limits not supplied",
