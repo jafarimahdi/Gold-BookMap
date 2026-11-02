@@ -1894,6 +1894,12 @@ def _shooting_execution_gate(decision, snapshot):
             return False, (
                 f"Family Independence Gate failed ({_fg_ag}/{_fg_req} agreeing families)"
             )
+    if bool(getattr(config, "STAGE3B_GATE_LIVE_ENABLED", False)):
+        _s3b_gate = (getattr(snapshot, "shadow_candidates", None) or {}).get("stage3b_gate")
+        if isinstance(_s3b_gate, dict) and _s3b_gate.get("ok") is False:
+            return False, (
+                f"Stage 3b Gate failed ({_s3b_gate.get('reason', 'blocked')})"
+            )
     plan = getattr(snapshot, "shot", None) or {}
     power = getattr(snapshot, "power", None) or {}
     if not isinstance(plan, dict):

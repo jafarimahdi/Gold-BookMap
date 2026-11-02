@@ -5952,6 +5952,90 @@ def analyze_market(market_data: Dict[str, Any],
     except Exception:
         pass
 
+    # 2026-11-02 Stage 3b: Multi-Family Conviction Floor (>=50%) & Non-Trend BUY Exhaustion Guard
+    # Proven on 5-day M3 raw replay (current_version_replay-6.txt):
+    #   (1) 35-49% (internally conflicted panel) lost -22.2 FIX / -2.7 C3 / -3.6 TR (33.3% WR),
+    #       whereas 50-64% won +236.0 FIX (69.0% WR, +4.92/sig) and >=65% won +405.5 FIX.
+    #   (2) In RANGE/NEUTRAL (ADX<25), SELL|NEUTRAL (+215.5, 63.2% WR) & SELL|RANGE (+160.4, 58.3% WR)
+    #       and BUY|TREND (+107.5) all won strongly, while mid-air/unconfirmed non-TREND BUYs
+    #       (BUY|NEUTRAL -26.3, 21.2% +12m%; BUY|RANGE -78.2, 19.0% WR) bled -104.5 FIX.
+    #       Genuine responsive non-TREND BUY requires discounted price (<=VWAP) + bottom seller-exhaustion
+    #       or passive absorption confirmation (cvd_divergence / sweep, or value_area near_val + L3/hidden)
+    #       with zero active specialist SELL dissent (Dalton 2013 Ch. 4; Lopez de Prado 2018 Ch. 10).
+    _s3b_shadow_payload: Dict[str, Any] = {}
+    try:
+        from judge_families import RETIRED as _JF_RETIRED
+        _s3b_live = bool(getattr(config, "STAGE3B_GATE_LIVE_ENABLED", False))
+        _s3b_min_conf = float(getattr(config, "STAGE3B_MIN_CONFIDENCE", 50.0) or 50.0)
+        _s3b_nt_buy_on = bool(getattr(config, "STAGE3B_NON_TREND_BUY_GUARD_ENABLED", True))
+        _fg_already_capped = bool(_fg_shadow_payload.get("live_capped", False))
+        _ret_all = set(_JF_RETIRED) | {
+            str(x).strip().lower()
+            for x in (getattr(config, "RETIRED_JUDGES", None) or ())
+            if str(x).strip()
+        }
+        _act_buy_j: List[str] = []
+        _act_sell_j: List[str] = []
+        for _jv in (judge_panel or []):
+            if not isinstance(_jv, dict) or bool(_jv.get("retired")):
+                continue
+            _jn = str(_jv.get("judge") or "").strip().lower()
+            if not _jn or _jn in _ret_all:
+                continue
+            _jd = float(_jv.get("dir", 0.0) or 0.0)
+            if _jd > 0:
+                _act_buy_j.append(_jn)
+            elif _jd < 0:
+                _act_sell_j.append(_jn)
+
+        _reg_up = str(regime or "NEUTRAL").upper()
+        _s3b_ok = True
+        _s3b_reason = "ok"
+        _pre_s3b_conf = float(confidence)
+        if direction in ("BUY", "SELL") and not _fg_already_capped and bool(_fg_shadow_payload.get("ok", True)):
+            if confidence < _s3b_min_conf:
+                _s3b_ok = False
+                _s3b_reason = f"conflicted_panel_below_{int(round(_s3b_min_conf))}"
+            elif _s3b_nt_buy_on and direction == "BUY" and _reg_up != "TREND":
+                _vwap_now = float(getattr(vp, "vwap", 0.0) or 0.0)
+                _discounted = (_vwap_now <= 0.0) or (float(price) <= _vwap_now)
+                _buy_set = set(_act_buy_j)
+                _has_bottom_reversal = bool(_buy_set & {"cvd_divergence", "sweep"})
+                _has_val_absorption = (
+                    "value_area" in _buy_set
+                    and bool(_buy_set & {"cvd_divergence", "sweep", "spoof_invert", "l3_aggr_limit"})
+                )
+                if not (_discounted and not _act_sell_j and (_has_bottom_reversal or _has_val_absorption)):
+                    _s3b_ok = False
+                    _s3b_reason = "non_trend_buy_unconfirmed"
+
+        _s3b_shadow_payload = {
+            "ok": _s3b_ok,
+            "reason": _s3b_reason,
+            "regime": _reg_up,
+            "direction": direction,
+            "pre_stage3b_confidence": _pre_s3b_conf,
+            "min_confidence": _s3b_min_conf,
+            "buy_judges": sorted(set(_act_buy_j)),
+            "sell_judges": sorted(set(_act_sell_j)),
+            "live_capped": False,
+        }
+        if _s3b_live and direction in ("BUY", "SELL") and not _fg_already_capped and not _s3b_ok:
+            _thr_s3b = getattr(config, "CONFIDENCE_THRESHOLD", None)
+            if _thr_s3b is None or isinstance(_thr_s3b, bool):
+                _thr_s3b = getattr(config, "AI_CONFIDENCE_THRESHOLD", 70.0)
+            _cap_s3b = max(0.0, min(float(_thr_s3b) - 5.0, 30.0))
+            if confidence > _cap_s3b:
+                confidence = round(_cap_s3b, 2)
+                _s3b_shadow_payload["live_capped"] = True
+                notes.append(
+                    f"STAGE3B_GATE live cap: {_s3b_reason} (regime={_reg_up}, "
+                    f"buy={','.join(sorted(set(_act_buy_j))) or 'none'}) -> "
+                    f"confidence {_pre_s3b_conf:.1f}%->{confidence:.1f}%"
+                )
+    except Exception:
+        pass
+
     # ---- D7a: hand the scout its REMEMBERED doors ----------------------------
     # poc_day / htf_poc / supply_demand name prices, so they are door-makers. They now
     # live with the scout instead of shouting street names at the force team.
@@ -6412,6 +6496,8 @@ def analyze_market(market_data: Dict[str, Any],
     )
     if _fg_shadow_payload:
         _merged_shadows["family_gate"] = _fg_shadow_payload
+    if _s3b_shadow_payload:
+        _merged_shadows["stage3b_gate"] = _s3b_shadow_payload
     _merged_shadows["l3_passive_mbo_shadow"] = {
         "near_touch_ofi": float(getattr(level3, "near_touch_ofi", 0.0) or 0.0),
         "near_large_order_events": int(getattr(level3, "near_large_order_events", 0) or 0),

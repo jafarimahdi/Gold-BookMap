@@ -1166,3 +1166,19 @@ The committed `4f71043` follow-up supersedes the three audit-tool findings above
   2. **`main.py:_shooting_execution_gate`:** Added non-overridable fail-closed guard blocking execution whenever `FAMILY_GATE_LIVE_ENABLED` is `True` and `snapshot.shadow_candidates["family_gate"]["ok"] is False`.
   3. **`shooting_team.py` (`_observe_passive_road_sample` & `_crowd_v2`):** Replaced bare wall-clock `time.time()` with `_epoch(ctx.get("now")) or time.time()` so fast historical replay never drops `Crowd v2` Q2 road-history samples.
   4. **`tools/raw_replay.py`:** Added `BLOCKED: <2 Families (Family Gate)` in `[2]` and filtered `[5] DIRECTION x REGIME`, `[6] BUDAPEST HOUR`, and `[9] REGIME:*` to actionable `conf >= conf_thr` signals so `Stage 3b` inspects pure post-`Stage 3a` survivors without `<35%` blocked noise.
+
+---
+
+## Check-in stamp — `2026-11-02 04:55 CET` `current_version_replay-6.txt` Flips 5-Day Robot Net-Positive (`+619.2 FIX / +127.9 C3 / +169.8 TR`) & `Stage 3b` Installed (`nov02_stage3b_conviction_50_and_nontrend_buy_guard.patch`)
+
+- **5-Day Stage 3a Isolated Replay Receipt (`current_version_replay-6.txt`, `2026-10-26..30`, `3,233` cycles, `327` actionable `>=2`-Family signals):**
+  - **Entire 5-Day Robot Flipped Net-Profitable (`+2,180.1 FIX_PTS` & `+277.7 C3_TRAIL` turnaround!):**
+    - `10-26` (`LAKE`): `-1,628.8 -> -95.6 FIX` / **`+17.1 C3`**; `10-27` (`TREND`): `+120.9 FIX`; `10-28` (`LAKE`): `-1,777.6 -> -79.1 FIX` / `-13.4 C3`; `10-29` (`MIXED`): **`-953.8 -> +137.6 FIX` / `+58.2 C3`**; `10-30` (`TREND`): **`+535.4 FIX` (`+4.58/sig`) / `+76.6 C3`**.
+    - **5-Day Total:** **`+619.2 FIX_PTS` (`+1.89/sig` net of spread), `+127.9 C3_TRAIL`, `+169.8 TR_1.0A`** (`[9]` actionable `+12m` = **`+0.96`**, `TREND` `+0.83`, `RANGE` **`+1.92`**, `NEUTRAL` `+0.43`).
+  - **Why Path A Step-by-Step Saved a Goldmine:** Once `<2`-Family noise was removed, **`50–64%` (`N=48`) revealed `69.0%` WR (`29/13`), `68.8%` `+12m%`, `+236.0 FIX` (`+$4.92/sig`), `+68.8 C3`, `+122.9 TR`**, while **only `35–49%` (`N=24`, conflicted panel) lost (`33.3%` WR, `-22.2 FIX`, `-2.7 C3`, `-3.6 TR`)**.
+  - **Remaining Stage 3 Leaks Exposed Cleanly (`Stage 3b -> 3c -> 3d`):**
+    1. **`Stage 3b` (Now):** `35–49%` conflicted panels (`-22.2 FIX`) + unconfirmed non-`TREND` `BUY`s (`BUY | NEUTRAL` `-26.3 FIX`, `21.2%` `+12m%`; `BUY | RANGE` `-78.2 FIX`, `19.0%` WR vs `SELL | NEUTRAL` `+215.5`, `SELL | RANGE` `+160.4`, `BUY | TREND` `+107.5`).
+    2. **`Stage 3c` (Next):** `17:00–20:59 CET` Post-London-Close & COMEX Settlement window (`-148.3 FIX` across all 4 hours vs `+629.3 FIX` in `10:00–16:59 CET` and `+138.2 FIX` at `21:00 CET`).
+    3. **`Stage 3d` (After 3c):** `POWER v2` / `Shooting` Climax Handoff (`CONF>=35% ONLY (POWER=NEITHER)` won **`+670.4 FIX` / `+141.7 TR`** while `POWER ALIGNED` `N=39` lost `-94.2 FIX` at `20.0%` WR because `power_team_v2` still weights benched `footprint_delta` / `footprint_levels` / `big_prints`).
+- **Installed `Stage 3b` (`config.py`, `step2_market_analysis.py`, `main.py`, `tools/raw_replay.py`):**
+  - Enabled `STAGE3B_GATE_LIVE_ENABLED=True`, `STAGE3B_MIN_CONFIDENCE=50.0` (blocks internally conflicted `<50%` panels while preserving `50–64%` & `>=65%`), and `STAGE3B_NON_TREND_BUY_GUARD_ENABLED=True` (in `RANGE`/`NEUTRAL`, `BUY` requires discounted `price <= VWAP`, zero active `SELL` dissent, and bottom exhaustion/absorption via `cvd_divergence`/`sweep` or `value_area` + `spoof_invert`/`l3_aggr_limit`), plus fail-closed `main._shooting_execution_gate` and `[2]` waterfall buckets.
