@@ -32,6 +32,7 @@ with hand-computed numbers.
 import csv
 import importlib.util
 import json
+import os
 import py_compile
 import shutil
 import subprocess
@@ -58,28 +59,28 @@ D1D = (TODAY - timedelta(days=2)).isoformat()
 D2D = (TODAY - timedelta(days=1)).isoformat()
 
 # hand-computed fixtures (active non-retired judges):
-#   vwap_bands:      day1 (80.0% of 40) + day2 (60.0% of 60) -> 100 scored, 68.0% hit,
+#   vwap_trend:      day1 (80.0% of 40) + day2 (60.0% of 60) -> 100 scored, 68.0% hit,
 #                    20.0 + 34.0 = +54.0 pts -> +0.54/call  [STRONG]
-#   footprint_delta: day1 (40.0% of 50) + day2 (44.0% of 50) -> 100 scored, 42.0% hit,
+#   value_area:      day1 (40.0% of 50) + day2 (44.0% of 50) -> 100 scored, 42.0% hit,
 #                    -25.0 + -11.0 = -36.0 pts -> -0.36/call [WEAK]
 #   l3_net_flow:     only 10 scored calls in the window -> below the 20 floor, excluded
 DAY1_ROWS = [
-    ["vwap_bands", 100, 50.0, 60, 40, 0, 80.0, 40, 20.0, 0.5, 90.0, 0.8, 0.9],
-    ["footprint_delta", 100, 50.0, 50, 50, 0, 40.0, 50, -25.0, -0.5, 60.0, 1.0, 0.8],
+    ["vwap_trend", 100, 50.0, 60, 40, 0, 80.0, 40, 20.0, 0.5, 90.0, 0.8, 0.9],
+    ["value_area", 100, 50.0, 50, 50, 0, 40.0, 50, -25.0, -0.5, 60.0, 1.0, 0.8],
     ["l3_net_flow", 100, 50.0, 50, 50, 0, 50.0, 10, -2.0, -0.2, 55.0, 1.5, 1.2],
 ]
 DAY2_ROWS = [
-    ["vwap_bands", 90, 45.0, 50, 40, 0, 60.0, 60, 34.0, 0.567, 88.0, 0.8, 0.9],
-    ["footprint_delta", 90, 45.0, 45, 45, 0, 44.0, 50, -11.0, -0.22, 58.0, 1.0, 0.8],
+    ["vwap_trend", 90, 45.0, 50, 40, 0, 60.0, 60, 34.0, 0.567, 88.0, 0.8, 0.9],
+    ["value_area", 90, 45.0, 45, 45, 0, 44.0, 50, -11.0, -0.22, 58.0, 1.0, 0.8],
 ]
-TODAY_POISON = [["vwap_bands", 1, 100.0, 1, 0, 0, 100.0, 100, 999.0, 9.99, 100.0, 0.8, 9.9]]
+TODAY_POISON = [["vwap_trend", 1, 100.0, 1, 0, 0, 100.0, 100, 999.0, 9.99, 100.0, 0.8, 9.9]]
 
 EXPECTED_BLOCK = (
     "JUDGE REPORT CARDS (each judge's real track record over 2 graded "
     f"day(s) {D1D}..{D2D}, scored on its own clock by the nightly audit; weigh "
     "the panel votes accordingly):\n"
-    "- vwap_bands: 68% right, +0.54 pts/call, 100 scored calls [STRONG]\n"
-    "- footprint_delta: 42% right, -0.36 pts/call, 100 scored calls [WEAK]\n"
+    "- vwap_trend: 68% right, +0.54 pts/call, 100 scored calls [STRONG]\n"
+    "- value_area: 42% right, -0.36 pts/call, 100 scored calls [WEAK]\n"
     "(tag rule: STRONG = pts/call>0 and hit>=55%; WEAK = pts/call<-0.25 or hit<40%; else MIXED)\n\n"
 )
 
@@ -109,9 +110,11 @@ def write_panel(path, rows):
 
 
 def run_builder(data_dir, extra=()):
+    env = dict(os.environ)
+    env["JUDGE_REPORT_CARD_EPOCH_DATE"] = ""
     return subprocess.run(
         [sys.executable, str(BUILDER), "--data-dir", str(data_dir), *extra],
-        capture_output=True, text=True)
+        capture_output=True, text=True, env=env)
 
 
 def snap():
@@ -126,12 +129,13 @@ _ENG = {}
 def load_engines():
     if _ENG:
         return _ENG
+    os.environ["JUDGE_REPORT_CARD_EPOCH_DATE"] = ""
     fake_s2 = types.ModuleType("step2_market_analysis")
     fake_s2.snapshot_to_dict = lambda s: {"price": 4000.0, "timestamp": "fixed",
                                           "order_flow": {}, "level3": {}}
     sys.modules["step2_market_analysis"] = fake_s2
     fake_se = types.ModuleType("session")
-    fake_se.session_context = lambda: {"session": "RIG", "market_open": "yes"}
+    fake_se.session_context = lambda *a, **kw: {"session": "RIG", "market_open": "yes"}
     sys.modules["session"] = fake_se
     orig, patched = STATE["orig"], STATE["patched"]
     sys.path.insert(0, str(orig))
@@ -142,6 +146,8 @@ def load_engines():
         mod = importlib.util.module_from_spec(spec)
         sys.modules[name] = mod
         spec.loader.exec_module(mod)
+        if hasattr(mod, "config"):
+            setattr(mod.config, "JUDGE_REPORT_CARD_EPOCH_DATE", "")
         return mod
 
     s3o = load("s3_orig", orig / "step3_ai_decision.py")
@@ -165,14 +171,14 @@ def d1_builder_math():
     expect(TODAYS not in card["source_days"], "today leaked into the card!")
     expect(card["window_days"] == 2, f"window_days {card['window_days']}")
     names = [j["judge"] for j in card["judges"]]
-    expect(names == ["vwap_bands", "footprint_delta"], f"judges/order {names}")
+    expect(names == ["vwap_trend", "value_area"], f"judges/order {names}")
     h, w = card["judges"]
     expect(h["scored"] == 100 and abs(h["hit_pct"] - 68.0) < 0.05
            and abs(h["net_pts"] - 54.0) < 0.05 and abs(h["pts_per_call"] - 0.54) < 0.005,
-           f"vwap_bands numbers {h}")
+           f"vwap_trend numbers {h}")
     expect(w["scored"] == 100 and abs(w["hit_pct"] - 42.0) < 0.05
            and abs(w["net_pts"] + 36.0) < 0.05 and abs(w["pts_per_call"] + 0.36) < 0.005,
-           f"footprint_delta numbers {w}")
+           f"value_area numbers {w}")
     expect(h["votes"] == 190 and w["votes"] == 190, f"votes sums {h['votes']} {w['votes']}")
 
 
@@ -307,7 +313,14 @@ def d11_composition():
         mod = importlib.util.module_from_spec(spec)
         sys.modules["s3_" + tag] = mod
         spec.loader.exec_module(mod)
-        p = mod.AIDecisionEngine().build_prompt(snap())
+        prev_data_dir = getattr(mod.config, "DATA_DIR", None) if hasattr(mod, "config") else None
+        try:
+            if hasattr(mod, "config"):
+                setattr(mod.config, "DATA_DIR", d / "data")
+            p = mod.AIDecisionEngine().build_prompt(snap())
+        finally:
+            if hasattr(mod, "config") and prev_data_dir is not None:
+                setattr(mod.config, "DATA_DIR", prev_data_dir)
         expect(p == g, f"{tag}: golden no-card prompt broken after both patches")
 
 

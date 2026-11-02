@@ -406,6 +406,59 @@ def _a1_try_serve(market_data, now, price):
 
     # ---- live scout chain (full notebook feed), EVERY serve ----------------
     scout_notes, _atr = _a1_refresh_scout(market_data, served, price, _spread_now)
+    # Stage 5b (2026-11-02): Re-verify Stage 3R MBO feed health on intra-bar A1
+    # serve cycles (`:01`/`:02` of each M3 bar = 2/3 of live 60s polls). If MBO
+    # order events drop out mid-bar while L1 trade prints keep flowing, flip
+    # `stage3r_gate` fail-closed and neutralize any cached `GO` shot immediately.
+    try:
+        if bool(getattr(config, "STAGE3R_MBO_FEED_GUARD_ENABLED", False)):
+            _src_srv = str(
+                market_data.get("source")
+                or getattr(config, "DATA_SOURCE", "mt5")
+                or "mt5"
+            ).strip().lower()
+            _is_bm_srv = _src_srv in {
+                "bookmapbridge", "ninjabridge", "bookmap", "bmbridge",
+                "bookmap_bridge", "ntbridge", "ninja",
+            }
+            _srv_dq = getattr(served, "data_quality", None) or {}
+            _prints_srv = str(_srv_dq.get("trade_prints", "unknown")).strip().lower() == "available"
+            _l3_ev_srv = str(_srv_dq.get("level3_events", "unknown")).strip().lower()
+            if _is_bm_srv and _prints_srv and _l3_ev_srv in {"unavailable", "stale_or_unverifiable"}:
+                _s3r_srv_reason = f"mbo_feed_{_l3_ev_srv}"
+                _pre_srv_conf = float(getattr(served, "confidence", 0.0) or 0.0)
+                if not isinstance(getattr(served, "shadow_candidates", None), dict):
+                    served.shadow_candidates = {}
+                served.shadow_candidates["stage3r_gate"] = {
+                    "ok": False,
+                    "reason": _s3r_srv_reason,
+                    "level3_events": _l3_ev_srv,
+                    "trade_prints_available": True,
+                    "pre_stage3r_confidence": _pre_srv_conf,
+                    "live_capped": False,
+                    "a1_serve_refreshed": True,
+                }
+                if str(getattr(served, "signal_direction", "") or "").upper() in ("BUY", "SELL"):
+                    _thr_srv = getattr(config, "CONFIDENCE_THRESHOLD", None)
+                    if _thr_srv is None or isinstance(_thr_srv, bool):
+                        _thr_srv = getattr(config, "AI_CONFIDENCE_THRESHOLD", 70.0)
+                    _cap_srv = max(0.0, min(float(_thr_srv) - 5.0, 30.0))
+                    if _pre_srv_conf > _cap_srv:
+                        served.confidence = round(_cap_srv, 2)
+                    served.shadow_candidates["stage3r_gate"]["live_capped"] = True
+                if isinstance(getattr(served, "shot", None), dict) and str(served.shot.get("shot", "")).upper() == "GO":
+                    served.shot["shot"] = "WAIT"
+                    served.shot["authorized_by"] = ""
+                    served.shot["reason"] = f"Stage 3R MBO feed guard ({_s3r_srv_reason} on A1 intra-bar serve)"
+                    _why_srv = list(served.shot.get("why") or [])
+                    _why_srv.insert(0, served.shot["reason"])
+                    served.shot["why"] = _why_srv
+                scout_notes.append(
+                    f"STAGE3R_GATE intra-bar A1 cap: {_s3r_srv_reason} (trade_prints=available, "
+                    f"level3_events={_l3_ev_srv}) -> blind-depth entry blocked"
+                )
+    except Exception:
+        pass
     # Stage 3e (2026-11-02): Keep Crowd v2 Q2's rolling road-history baseline fed on
     # intra-bar A1 serve cycles (which represent 2/3 of M3 1m cycles & 94% of live 10s
     # cycles!). Without this, _ROAD_HISTORY only received 1 sample per 3m bar close
@@ -6749,6 +6802,74 @@ def analyze_market(market_data: Dict[str, Any],
     except Exception:
         pass
 
+    # Stage 3R (2026-11-02): Unplugged-MBO / Blind-Depth Eye Guard
+    # Proven on 15-day M3 raw archive (2026-10-15: PRINTS=57,447 flowed while MBO_EV=23,363
+    # went dark -> -62.0 PM_TRAIL / 17.2 DD). When BookMap bridge is the active feed and
+    # live trade prints are flowing (`trade_prints == "available"`), executing without
+    # fresh Level-3 MBO events (`level3_events in {"unavailable", "stale_or_unverifiable"}`)
+    # hides order-ID queue priority, cancel/replace spoofing, and iceberg refills
+    # (Bouchaud et al. 2018 Ch. 3-4; Frey & Sandas 2017). Fail closed on blind depth.
+    _s3r_shadow_payload: Dict[str, Any] = {}
+    _s3r_blind_mbo = False
+    try:
+        _s3r_on = bool(getattr(config, "STAGE3R_MBO_FEED_GUARD_ENABLED", True))
+        _src_3r = str(getattr(config, "DATA_SOURCE", "") or "").strip().lower()
+        _raw_dq_3r = market_data.get("data_quality")
+        _prints_live_3r = (
+            isinstance(_raw_dq_3r, dict)
+            and str(_raw_dq_3r.get("trade_prints", "")).strip().lower() == "available"
+        )
+        _snap_dq_3r = _snapshot_data_quality(
+            market_data, tick_data, now_epoch=_datetime_epoch_utc(now)
+        )
+        _l3_ev_3r = str(_snap_dq_3r.get("level3_events", "unknown")).strip().lower()
+        _is_bm_3r = _src_3r in {
+            "bookmapbridge", "ninjabridge", "bookmap", "bmbridge",
+            "bookmap_bridge", "ntbridge", "ninja",
+        }
+        _pre_s3r_conf = float(confidence)
+        _s3r_ok = True
+        _s3r_reason = "ok"
+        if _s3r_on and _is_bm_3r and _prints_live_3r and _l3_ev_3r in {"unavailable", "stale_or_unverifiable"}:
+            _s3r_ok = False
+            _s3r_blind_mbo = True
+            _s3r_reason = f"mbo_feed_{_l3_ev_3r}"
+        _s3r_shadow_payload = {
+            "ok": _s3r_ok,
+            "reason": _s3r_reason,
+            "level3_events": _l3_ev_3r,
+            "trade_prints_available": _prints_live_3r,
+            "pre_stage3r_confidence": _pre_s3r_conf,
+            "live_capped": False,
+        }
+        if _s3r_blind_mbo:
+            _s3d_power_envelope = None
+            _s3d_sniper_auth = False
+            _s3d_sniper_reason = ""
+            if _s3d_shadow_payload:
+                _s3d_shadow_payload["sniper_authorized"] = False
+            _earlier_capped_3r = (
+                bool(_fg_shadow_payload.get("live_capped", False))
+                or bool(_s3b_shadow_payload.get("live_capped", False))
+                or bool(_s3c_shadow_payload.get("live_capped", False))
+                or bool(_s3d_shadow_payload.get("live_capped", False))
+            )
+            if direction in ("BUY", "SELL") and not _earlier_capped_3r:
+                _thr_s3r = getattr(config, "CONFIDENCE_THRESHOLD", None)
+                if _thr_s3r is None or isinstance(_thr_s3r, bool):
+                    _thr_s3r = getattr(config, "AI_CONFIDENCE_THRESHOLD", 70.0)
+                _cap_s3r = max(0.0, min(float(_thr_s3r) - 5.0, 30.0))
+                if confidence > _cap_s3r:
+                    confidence = round(_cap_s3r, 2)
+                _s3r_shadow_payload["live_capped"] = True
+                notes.append(
+                    f"STAGE3R_GATE live cap: {_s3r_reason} (trade_prints=available, "
+                    f"level3_events={_l3_ev_3r}) -> blind-depth entry blocked "
+                    f"({_pre_s3r_conf:.1f}%->{confidence:.1f}%)"
+                )
+    except Exception:
+        pass
+
     _shot = {}
     try:
         from shooting_team import plan_shot as _plan, describe as _shot_say
@@ -6795,6 +6916,8 @@ def analyze_market(market_data: Dict[str, Any],
                 if _s3d_verified_quality is not None
                 else _power_context.get("data_quality_ok", False)
             )
+        if _s3r_blind_mbo:
+            _shot_quality = False
         try:
             from aggressive_trigger import evaluate_aggressive_trigger as _aggr_eval
             # Keep A2 / v1 impulse trigger strictly bound to raw `_power_v2` so
@@ -6950,6 +7073,8 @@ def analyze_market(market_data: Dict[str, Any],
         _merged_shadows["stage3c_gate"] = _s3c_shadow_payload
     if _s3d_shadow_payload:
         _merged_shadows["stage3d_gate"] = _s3d_shadow_payload
+    if _s3r_shadow_payload:
+        _merged_shadows["stage3r_gate"] = _s3r_shadow_payload
     _merged_shadows["l3_passive_mbo_shadow"] = {
         "near_touch_ofi": float(getattr(level3, "near_touch_ofi", 0.0) or 0.0),
         "near_large_order_events": int(getattr(level3, "near_large_order_events", 0) or 0),

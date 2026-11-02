@@ -578,6 +578,8 @@ class PositionManager:
             gain = float(st.get("last_gain_pts", 0.0) or 0.0)
             entry = float(st.get("entry", 0.0) or 0.0)
             last_sl = float(st.get("last_sl", 0.0) or 0.0)
+            close_px = 0.0
+            estimated_flag = True
             pnl_usd = None
             reason = "GONE (SL/TP hit or manual close)"
             try:
@@ -588,7 +590,41 @@ class PositionManager:
                     from_dt, now_dt, position=int(ticket))
                 if deals:
                     pnl_usd = sum(float(getattr(d, "profit", 0.0) or 0.0)
+                                  + float(getattr(d, "swap", 0.0) or 0.0)
+                                  + float(getattr(d, "commission", 0.0) or 0.0)
                                   for d in deals)
+                    out_deals = [
+                        d for d in deals
+                        if getattr(d, "entry", None) == 1
+                        and float(getattr(d, "price", 0.0) or 0.0) > 0.0
+                    ]
+                    if out_deals:
+                        total_out_vol = sum(
+                            max(0.0, float(getattr(d, "volume", 0.0) or 0.0))
+                            for d in out_deals
+                        )
+                        if total_out_vol > 0.0:
+                            close_px = sum(
+                                float(getattr(d, "price", 0.0) or 0.0)
+                                * max(0.0, float(getattr(d, "volume", 0.0) or 0.0))
+                                for d in out_deals
+                            ) / total_out_vol
+                        else:
+                            close_px = float(getattr(out_deals[-1], "price", 0.0) or 0.0)
+                    elif entry > 0.0:
+                        for d in reversed(deals):
+                            d_px = float(getattr(d, "price", 0.0) or 0.0)
+                            if d_px > 0.0 and getattr(d, "entry", None) not in (0, 2):
+                                close_px = d_px
+                                break
+                    if close_px > 0.0 and entry > 0.0 and side in ("BUY", "SELL"):
+                        gain = (close_px - entry) if side == "BUY" else (entry - close_px)
+                        estimated_flag = False
+                    elif pnl_usd is not None and vol > 0.0:
+                        c_size = float(getattr(config, "CONTRACT_SIZE", 100.0) or 100.0)
+                        if c_size > 0.0:
+                            gain = float(pnl_usd) / (vol * c_size)
+                            estimated_flag = False
                     for d in reversed(deals):
                         c = str(getattr(d, "comment", "") or "")
                         if c:
@@ -601,9 +637,9 @@ class PositionManager:
                 # assume the stop fired (loss memory must not miss these)
                 sl_gain = (last_sl - entry) if side == "BUY" else (entry - last_sl)
                 gain = min(gain, sl_gain)
-            trade_history.record_close(ticket, side, 0.0, reason,
+            trade_history.record_close(ticket, side, close_px, reason,
                                        gain_pts=gain, volume=vol,
-                                       estimated=True, pnl_usd=pnl_usd)
+                                       estimated=estimated_flag, pnl_usd=pnl_usd)
         except Exception:
             logger.exception("PM: gone-position record failed (non-fatal)")
 

@@ -248,3 +248,162 @@ def test_morning_check_sh_parses_and_notes_winter_cet_offset():
     assert res.returncode == 0, res.stderr
     text = sh_path.read_text(encoding="utf-8")
     assert "+0100 CET winter" in text
+
+
+def test_stage5b_pm_record_gone_extracts_exact_broker_sl_gain_pts_for_stage4r_shield(tmp_path, monkeypatch):
+    import sys as _sys
+    import position_manager as pm_mod
+    import trade_history as th
+
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path, raising=False)
+    monkeypatch.setattr(config, "CONTRACT_SIZE", 100.0, raising=False)
+
+    pm = pm_mod.PositionManager.__new__(pm_mod.PositionManager)
+    pm._state = {}
+    pm._hist = []
+
+    class _FakeDeal:
+        def __init__(self, entry, price, profit, volume=0.10, comment=""):
+            self.entry = entry
+            self.price = price
+            self.profit = profit
+            self.swap = 0.0
+            self.commission = 0.0
+            self.volume = volume
+            self.comment = comment
+
+    class _FakeMT5:
+        @staticmethod
+        def history_deals_get(_from_dt, _now_dt, position=0):
+            assert position == 778899
+            return [
+                _FakeDeal(entry=0, price=4100.00, profit=0.0, volume=0.10, comment="gold-trading-bot"),
+                _FakeDeal(entry=1, price=4092.00, profit=-80.0, volume=0.10, comment="[sl 4092.00]"),
+            ]
+
+    pm._mt5 = _FakeMT5()
+    # Position was +0.80 pts on the previous 60s poll, then spiked down to SL @ 4092.00 (-8.00 pts)
+    pm._record_gone(
+        "778899",
+        {
+            "side": "BUY",
+            "entry": 4100.00,
+            "last_sl": 4092.00,
+            "last_volume": 0.10,
+            "last_gain_pts": 0.80,
+        },
+    )
+    closed = th.closed_trades(limit=5)
+    assert len(closed) == 1
+    rec = closed[0]
+    assert rec["ticket"] == "778899"
+    assert abs(rec["close_price"] - 4092.00) < 1e-6
+    assert abs(rec["gain_pts"] - (-8.00)) < 1e-6
+    assert abs(rec["pnl_usd_est"] - (-80.00)) < 1e-6
+    assert rec["estimated"] is False
+    assert abs(th.day_realized_pts() - (-8.00)) < 1e-6
+    assert th.recent_loss("BUY", within_minutes=30.0)["hit"] is True
+
+
+def test_stage5b_a1_intrabar_serve_refreshes_stage3r_mbo_drop_fail_closed(monkeypatch):
+    from datetime import datetime, timezone
+    import pandas as pd
+    import step2_market_analysis as s2
+
+    monkeypatch.setattr(config, "DATA_SOURCE", "bookmapbridge", raising=False)
+    monkeypatch.setattr(config, "TIMEFRAME", "M3", raising=False)
+    monkeypatch.setattr(config, "A1_BASE_TF_MINUTES", 3, raising=False)
+    monkeypatch.setattr(config, "CONFIDENCE_THRESHOLD", 35.0, raising=False)
+    monkeypatch.setattr(config, "AI_CONFIDENCE_THRESHOLD", 35.0, raising=False)
+    monkeypatch.setattr(config, "STAGE3R_MBO_FEED_GUARD_ENABLED", True, raising=False)
+
+    t_bar = datetime(2026, 11, 3, 10, 3, 5, tzinfo=timezone.utc)
+    t_srv = datetime(2026, 11, 3, 10, 4, 5, tzinfo=timezone.utc)
+    idx = pd.date_range("2026-11-03 09:00:00", periods=21, freq="3min", tz="UTC")
+    candles = pd.DataFrame(
+        {
+            "open": [4000.0] * 21,
+            "high": [4001.5] * 21,
+            "low": [3998.5] * 21,
+            "close": [4000.2] * 21,
+            "volume": [120.0] * 21,
+        },
+        index=idx,
+    )
+    cached_snap = SimpleNamespace(
+        timestamp=t_bar,
+        price=4000.2,
+        bid=4000.1,
+        ask=4000.3,
+        volume=120.0,
+        spread_pct=0.005,
+        signal_direction="SELL",
+        signal_strength=48.0,
+        confidence=75.0,
+        regime="TREND",
+        power={"direction": "NEITHER"},
+        power_v2={"direction": "NEITHER"},
+        news=SimpleNamespace(news_state="QUIET"),
+        divergence=SimpleNamespace(),
+        footprint=SimpleNamespace(),
+        order_flow=SimpleNamespace(),
+        level3=SimpleNamespace(),
+        signal_map={},
+        shot={
+            "shot": "GO",
+            "side": "SELL",
+            "entry_style": "AGGRESSIVE_MARKET",
+            "authorized_by": "STAGE3D_SNIPER",
+            "why": ["Stage-3d Sniper setup"],
+        },
+        shadow_candidates={
+            "stage3d_gate": {"ok": True, "sniper_authorized": True},
+            "stage3r_gate": {"ok": True, "reason": "ok", "level3_events": "available"},
+        },
+        data_quality={"trade_prints": "available", "level3_events": "available", "quote": "valid"},
+        notes=["initial bar close"],
+    )
+    md_bar = {"symbol": "GCG6", "candles": candles}
+    s2._a1_cache_store(cached_snap, md_bar, t_bar, spread_now=0.20)
+    try:
+        ticks = [
+            {"timestamp": t_srv.timestamp() - i, "price": 4000.1, "volume": 2.0, "side": "SELL"}
+            for i in range(25)
+        ]
+        md_srv = {
+            "symbol": "GCG6",
+            "source": "bookmapbridge",
+            "candles": candles,
+            "bid": 4000.0,
+            "ask": 4000.2,
+            "spread_pct": 0.005,
+            "volume": 50.0,
+            "tick_data": ticks,
+            "order_events": [],  # MBO feed dropped mid-bar!
+            "data_quality": {"trade_prints": "available", "quote": "valid"},
+            "bid_depth": {4000.0: 15.0, 3999.9: 20.0},
+            "ask_depth": {4000.2: 15.0, 4000.3: 20.0},
+        }
+        served = s2._a1_try_serve(md_srv, t_srv, 4000.1)
+        assert served is not None
+        s3r = served.shadow_candidates["stage3r_gate"]
+        assert s3r["ok"] is False
+        assert s3r["a1_serve_refreshed"] is True
+        assert served.confidence <= 30.0
+        assert served.shot["shot"] == "WAIT"
+        ok, reason = main._shooting_execution_gate(
+            SimpleNamespace(action="SELL", confidence=80.0),
+            served,
+        )
+        assert ok is False
+        assert "Stage 3R MBO Feed Gate failed" in reason
+    finally:
+        s2._A1_BAR_SERVICE_CACHE.clear()
+
+
+def test_stage5b_rig_memory_evening_gate_passes_12_of_12():
+    import sys
+    rig_path = Path(__file__).resolve().parent / "rig_memory.py"
+    res = subprocess.run([sys.executable, str(rig_path)], capture_output=True, text=True, check=False)
+    assert res.returncode == 0, f"{res.stdout}\n{res.stderr}"
+    assert "ALL PASS (12/12)" in res.stdout
