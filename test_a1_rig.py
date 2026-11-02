@@ -20,8 +20,10 @@ Run from the folder holding the patched file:
 import importlib.util
 import os
 import sys
+import tempfile
 import time as _time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 FAILURES = []
 
@@ -92,11 +94,32 @@ def main():
     path = sys.argv[1] if len(sys.argv) > 1 else "step2_market_analysis.py"
     print(f"A1 unit rig -- {path}")
     print("=" * 64)
+    import config as _live_cfg
+    _orig_data_dir = getattr(_live_cfg, "DATA_DIR", None)
+    _tmp_ctx = tempfile.TemporaryDirectory(prefix="a1_rig_data_")
+    _live_cfg.DATA_DIR = Path(_tmp_ctx.name)
+    try:
+        _run_rig(path)
+    finally:
+        if _orig_data_dir is not None:
+            _live_cfg.DATA_DIR = _orig_data_dir
+        _tmp_ctx.cleanup()
+
+
+def _run_rig(path: str):
     s2 = load_module(os.path.abspath(path), "step2_a1_under_test")
+    tf = int(s2._active_base_tf_minutes())
+    env_a1 = os.environ.get("A1_BASE_TF_MINUTES", "").strip()
+    expected_tf = (
+        max(1, int(float(env_a1)))
+        if env_a1
+        else max(1, int(getattr(s2.config, "BASE_TF_MINUTES", 5) or 5))
+    )
+    step_sec = max(5, min(30, (tf * 60) // 6))
 
     # ---- T1 ----------------------------------------------------------------
-    print("T1 constants + engine")
-    check("T1a A1_BASE_TF_MINUTES == 5", s2.A1_BASE_TF_MINUTES == 5)
+    print(f"T1 constants + engine (active TF = M{tf})")
+    check(f"T1a active A1 base TF == {expected_tf} (M{expected_tf})", tf == expected_tf and tf >= 1)
     check("T1b POWER_HISTORY_MAX_BARS == 300", s2.POWER_HISTORY_MAX_BARS == 300)
     check("T1c engine functions present",
           all(hasattr(s2, n) for n in
@@ -104,35 +127,40 @@ def main():
                "_a1_last_closed_bucket", "_a1_cap_history_bars")))
 
     # ---- T2 ----------------------------------------------------------------
-    print("T2 bucket math (UTC, DST-immune)")
-    t = datetime(2026, 10, 9, 12, 3, tzinfo=timezone.utc)
-    check("T2a 12:03 -> last closed bucket is 11:55",
-          s2._a1_bucket_index(t) - 1 == s2._a1_bucket_index(t) - 1 and
-          s2._a1_last_closed_bucket(t) == s2._a1_bucket_index(t) - 1)
-    b1203 = s2._a1_bucket_index(datetime(2026, 10, 9, 12, 3, tzinfo=timezone.utc))
-    b1200 = s2._a1_bucket_index(datetime(2026, 10, 9, 12, 0, tzinfo=timezone.utc))
-    check("T2b 12:03 and 12:00 share a bucket", b1203 == b1200)
-    b1205 = s2._a1_bucket_index(datetime(2026, 10, 9, 12, 5, tzinfo=timezone.utc))
-    check("T2c 12:05 starts a new bucket", b1205 == b1200 + 1)
+    print("T2 bucket math (UTC, DST-immune, Law #11 timeframe-aware)")
+    t1200 = datetime(2026, 10, 9, 12, 0, 0, tzinfo=timezone.utc)
+    mid_offset_sec = max(1, min(tf * 60 - 1, (tf * 60) // 2))
+    t_same = t1200 + timedelta(seconds=mid_offset_sec)
+    t_next_bucket = t1200 + timedelta(minutes=tf)
+    b1200 = s2._a1_bucket_index(t1200)
+    b_same = s2._a1_bucket_index(t_same)
+    b_next = s2._a1_bucket_index(t_next_bucket)
+    check(f"T2a {t_same.strftime('%H:%M:%S')} -> last closed bucket is {(t1200 - timedelta(minutes=tf)).strftime('%H:%M')}",
+          s2._a1_last_closed_bucket(t_same) == b1200 - 1)
+    check(f"T2b {t_same.strftime('%H:%M:%S')} and 12:00:00 share an M{tf} bucket",
+          b_same == b1200)
+    check(f"T2c {t_next_bucket.strftime('%H:%M:%S')} starts a new M{tf} bucket",
+          b_next == b1200 + 1)
     ok = True
     for i in range(12):  # across the Oct-25 DST-change weekend, UTC buckets tick on
-        a = datetime(2026, 10, 25, 0, 0, tzinfo=timezone.utc) + timedelta(minutes=5 * i)
+        a = datetime(2026, 10, 25, 0, 0, tzinfo=timezone.utc) + timedelta(minutes=tf * i)
         if s2._a1_bucket_index(a) != s2._a1_bucket_index(
                 datetime(2026, 10, 25, 0, 0, tzinfo=timezone.utc)) + i:
             ok = False
-    check("T2d DST weekend: buckets advance 1 per 5 min in UTC", ok)
+    check(f"T2d DST weekend: buckets advance 1 per {tf} min in UTC", ok)
 
     # ---- T3 ----------------------------------------------------------------
     print("T3 serve identity (same bucket, new quotes)")
     start = datetime(2026, 10, 9, 8, 0, tzinfo=timezone.utc)
     trades = synth_market(start=start)
-    t_bell = datetime(2026, 10, 9, 10, 5, 1, tzinfo=timezone.utc)   # just after a bell
+    # 10:00 UTC (600m since midnight) is an exact bar bell for M1/M2/M3/M4/M5/M6/M10/M12/M15/M20/M30/H1
+    t_bell = datetime(2026, 10, 9, 10, 0, 1, tzinfo=timezone.utc)   # just after a bell
     md1 = md_at(trades, t_bell, start)
     snap1 = s2.analyze_market(md1, now=t_bell)
     s1_notes = " ".join(snap1.notes or [])
     check("T3a bell compute is a full compute (no serve note)",
           "A1 bar-service:" not in s1_notes)
-    t_mid = t_bell + timedelta(seconds=90)                            # same bucket
+    t_mid = t_bell + timedelta(seconds=step_sec)                      # same M{tf} bucket
     md2 = md_at(trades, t_mid, start)
     md2["price"] = md2["price"] + 1.7                                 # new quote
     md2["bid"] = round(md2["price"] - 0.25, 2); md2["ask"] = round(md2["price"] + 0.25, 2)
@@ -155,7 +183,7 @@ def main():
 
     # ---- T4 ----------------------------------------------------------------
     print("T4 bell boundary -> full compute")
-    t_next = datetime(2026, 10, 9, 10, 10, 1, tzinfo=timezone.utc)   # next bell
+    t_next = t_bell + timedelta(minutes=tf)                           # next M{tf} bell
     md3 = md_at(trades, t_next, start)
     snap3 = s2.analyze_market(md3, now=t_next)
     check("T4a after the next bell: full compute (no serve note)",
@@ -166,7 +194,7 @@ def main():
 
     # ---- T5 ----------------------------------------------------------------
     print("T5 news force rule")
-    t_mid2 = t_next + timedelta(seconds=60)
+    t_mid2 = t_next + timedelta(seconds=step_sec)
     md4 = md_at(trades, t_mid2, start)
     cached = s2._A1_BAR_SERVICE_CACHE["entry"]["snapshot"]
     old_state = getattr(cached.news, "news_state", None)
@@ -181,7 +209,7 @@ def main():
 
     # ---- T6 ----------------------------------------------------------------
     print("T6 history shrink -> full compute")
-    t_mid3 = t_mid2 + timedelta(seconds=30)
+    t_mid3 = t_mid2 + timedelta(seconds=step_sec)
     md5 = md_at(trades, t_mid3, start)
     md5["candles"] = {k: v[:-40] for k, v in md5["candles"].items()}  # feed reset
     snap5 = s2.analyze_market(md5, now=t_mid3)
@@ -199,7 +227,7 @@ def main():
 
     # ---- T8 ----------------------------------------------------------------
     print("T8 fail-open")
-    t_mid4 = t_mid3 + timedelta(seconds=30)
+    t_mid4 = t_mid3 + timedelta(seconds=step_sec)
     md6 = md_at(trades, t_mid4, start)
     s2._A1_BAR_SERVICE_CACHE["entry"]["stored_at"] = "not-a-datetime"  # poison
     try:
@@ -212,20 +240,21 @@ def main():
 
     # ---- T9 ----------------------------------------------------------------
     print("T9 speed receipt (informational)")
-    t_a = datetime(2026, 10, 9, 10, 15, 2, tzinfo=timezone.utc)
+    # 11:00 UTC (660m since midnight) is an exact bar bell across all intraday TFs
+    t_a = datetime(2026, 10, 9, 11, 0, 2, tzinfo=timezone.utc)
     md7 = md_at(trades, t_a, start)
     s2.analyze_market(md7, now=t_a)                      # ensure a fresh store
-    md8 = md_at(trades, t_a + timedelta(seconds=45), start)
+    md8 = md_at(trades, t_a + timedelta(seconds=step_sec), start)
     t0 = _time.perf_counter()
     serves = 0
     for i in range(5):
-        snap = s2.analyze_market(md8, now=t_a + timedelta(seconds=45 + i))
+        snap = s2.analyze_market(md8, now=t_a + timedelta(seconds=step_sec + i))
         if "A1 bar-service:" in " ".join(snap.notes or []):
             serves += 1
     t_serve = (_time.perf_counter() - t0) / 5
     t0 = _time.perf_counter()
     for i in range(3):
-        s2.analyze_market(md7, now=t_a + timedelta(minutes=5 * (i + 1), seconds=1))
+        s2.analyze_market(md7, now=t_a + timedelta(minutes=tf * (i + 1)))
     t_full = (_time.perf_counter() - t0) / 3
     print(f"       serve avg {t_serve*1000:.1f} ms vs full compute avg {t_full*1000:.1f} ms "
           f"({serves}/5 serves hit)")
