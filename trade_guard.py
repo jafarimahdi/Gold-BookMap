@@ -42,14 +42,46 @@ def _resolve_state_file() -> Path:
 
 
 class TradeGuard:
-    """Cooldown + daily trade cap."""
+    """Cooldown + daily trade cap + Stage-4R post-exit cooldown & daily loss circuit breaker."""
 
-    def __init__(self, cooldown_minutes: Optional[int] = None,
-                 max_trades_per_day: Optional[int] = None):
-        self.cooldown_minutes = (cooldown_minutes if cooldown_minutes is not None
-                                 else config.COOLDOWN_MINUTES)
+    def __init__(self, cooldown_minutes: Optional[float] = None,
+                 max_trades_per_day: Optional[int] = None,
+                 post_exit_cooldown_minutes: Optional[float] = None,
+                 max_daily_loss_pts: Optional[float] = None):
+        s4r_cd_on = bool(getattr(config, "STAGE4R_POST_EXIT_COOLDOWN_ENABLED", True))
+        s4r_cd_min = float(
+            getattr(
+                config,
+                "STAGE4R_POST_EXIT_COOLDOWN_MINUTES",
+                getattr(config, "BASE_TF_MINUTES", 3),
+            ) or 0.0
+        )
+        if cooldown_minutes is not None:
+            self.cooldown_minutes = float(cooldown_minutes)
+        elif s4r_cd_on:
+            self.cooldown_minutes = s4r_cd_min
+        else:
+            self.cooldown_minutes = float(getattr(config, "COOLDOWN_MINUTES", 3) or 0.0)
+
+        if post_exit_cooldown_minutes is not None:
+            self.post_exit_cooldown_minutes = float(post_exit_cooldown_minutes)
+        elif cooldown_minutes is not None:
+            self.post_exit_cooldown_minutes = float(cooldown_minutes)
+        elif s4r_cd_on:
+            self.post_exit_cooldown_minutes = s4r_cd_min
+        else:
+            self.post_exit_cooldown_minutes = 0.0
+
         self.max_trades_per_day = (max_trades_per_day if max_trades_per_day is not None
                                    else config.MAX_TRADES_PER_DAY)
+
+        s4r_dl_on = bool(getattr(config, "STAGE4R_DAILY_LOSS_BREAKER_ENABLED", True))
+        if max_daily_loss_pts is not None:
+            self.max_daily_loss_pts = max(0.0, float(max_daily_loss_pts))
+        elif s4r_dl_on:
+            self.max_daily_loss_pts = max(0.0, float(getattr(config, "STAGE4R_DAILY_MAX_LOSS_PTS", 12.0) or 0.0))
+        else:
+            self.max_daily_loss_pts = 0.0
 
     # -- persisted state -------------------------------------------------------
     def load_state(self) -> dict:
@@ -108,13 +140,26 @@ class TradeGuard:
         now = self._now(now)
         state = self._today_state(now)
 
+        # Stage 4R: intraday realized daily-loss circuit breaker (in Gold points)
+        if self.max_daily_loss_pts > 0:
+            try:
+                import trade_history as _th
+                day_pts = float(_th.day_realized_pts(now=now))
+                if day_pts <= -self.max_daily_loss_pts:
+                    return (
+                        False,
+                        f"daily loss circuit breaker hit ({day_pts:+.2f} pts <= -{self.max_daily_loss_pts:.2f} pts)",
+                    )
+            except Exception:
+                pass
+
         # daily cap
         if self.max_trades_per_day > 0:
             done = int(state.get("trades_today", 0) or 0)
             if done >= self.max_trades_per_day:
                 return False, f"daily trade cap reached ({self.max_trades_per_day})"
 
-        # cooldown
+        # entry-to-entry anti-double-click cooldown
         if self.cooldown_minutes > 0:
             last = state.get("last_trade_ts")
             if last:
@@ -123,11 +168,25 @@ class TradeGuard:
                     if last_dt.tzinfo is None:
                         last_dt = last_dt.replace(tzinfo=timezone.utc)
                     elapsed = (now - last_dt).total_seconds()
-                    if elapsed < self.cooldown_minutes * 60:
+                    if 0.0 <= elapsed < self.cooldown_minutes * 60.0:
                         left = self.cooldown_minutes - elapsed / 60.0
-                        return False, f"cooldown active ({left:.0f} min left)"
+                        return False, f"cooldown active ({left:.1f} min left)"
                 except (ValueError, TypeError):
                     pass
+
+        # Stage 4R (Law #11): post-exit cooldown measured from last actual close
+        if self.post_exit_cooldown_minutes > 0:
+            try:
+                import trade_history as _th
+                last_close_ep = _th.last_close_epoch(now=now)
+                if last_close_ep is not None:
+                    now_ep = (now if now.tzinfo is not None else now.replace(tzinfo=timezone.utc)).timestamp()
+                    elapsed_ex = now_ep - float(last_close_ep)
+                    if 0.0 <= elapsed_ex < self.post_exit_cooldown_minutes * 60.0:
+                        left_ex = self.post_exit_cooldown_minutes - elapsed_ex / 60.0
+                        return False, f"post-exit cooldown active ({left_ex:.1f} min left)"
+            except Exception:
+                pass
 
         return True, "ok"
 
@@ -138,5 +197,5 @@ class TradeGuard:
         state["trades_today"] = int(state.get("trades_today", 0) or 0) + 1
         state["last_trade_ts"] = now.isoformat()
         self.save_state(state)
-        logger.info("TradeGuard: recorded trade #%d today (cooldown %d min)",
+        logger.info("TradeGuard: recorded trade #%d today (cooldown %.1f min)",
                     state["trades_today"], self.cooldown_minutes)

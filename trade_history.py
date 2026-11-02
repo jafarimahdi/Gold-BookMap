@@ -274,6 +274,66 @@ def day_pnl_pct(equity: float) -> float:
     return float(day.get("pnl_usd_est", 0.0)) / equity * 100.0
 
 
+def _local_day_iso(ts_or_dt: Any = None) -> str:
+    """Resolve operator-local trading date (Europe/Budapest default), matching TradeGuard."""
+    if isinstance(ts_or_dt, datetime):
+        dt = ts_or_dt if ts_or_dt.tzinfo is not None else ts_or_dt.replace(tzinfo=timezone.utc)
+    else:
+        ep = float(ts_or_dt) if ts_or_dt is not None else _now_ts()
+        dt = datetime.fromtimestamp(ep, tz=timezone.utc)
+    try:
+        from zoneinfo import ZoneInfo
+        import config as _cfg
+        tz = ZoneInfo(str(getattr(_cfg, "LOCAL_TZ", "Europe/Budapest")))
+        return dt.astimezone(tz).date().isoformat()
+    except Exception:
+        return dt.date().isoformat()
+
+
+def day_realized_pts(now: Optional[datetime] = None) -> float:
+    """Net realized strategy PnL in Gold points for the current operator-local day."""
+    target_day = _local_day_iso(now)
+    now_ep = (
+        (now if now.tzinfo is not None else now.replace(tzinfo=timezone.utc)).timestamp()
+        if isinstance(now, datetime)
+        else _now_ts()
+    )
+    total_pts = 0.0
+    for rec in _load().get("closed", []):
+        if not isinstance(rec, dict):
+            continue
+        try:
+            c_ts = float(rec.get("closed_ts", 0.0) or 0.0)
+            if c_ts <= 0.0 or c_ts > now_ep + 1e-6:
+                continue
+            if _local_day_iso(c_ts) == target_day:
+                total_pts += float(rec.get("gain_pts", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            continue
+    return round(total_pts, 4)
+
+
+def last_close_epoch(now: Optional[datetime] = None) -> Optional[float]:
+    """Latest closed-trade epoch (<= `now`) from trade_memory.json, or None."""
+    now_ep = (
+        (now if now.tzinfo is not None else now.replace(tzinfo=timezone.utc)).timestamp()
+        if isinstance(now, datetime)
+        else _now_ts()
+    )
+    best: Optional[float] = None
+    for rec in _load().get("closed", []):
+        if not isinstance(rec, dict):
+            continue
+        try:
+            c_ts = float(rec.get("closed_ts", 0.0) or 0.0)
+            if 0.0 < c_ts <= now_ep + 1e-6:
+                if best is None or c_ts > best:
+                    best = c_ts
+        except (TypeError, ValueError):
+            continue
+    return best
+
+
 # --------------------------------------------------------------------------- #
 # 3) TCA LOG  (intended vs actual fill price)
 # --------------------------------------------------------------------------- #
@@ -585,4 +645,3 @@ if __name__ == "__main__":
         print("tca   :", tca_path())
     finally:
         _base_dir = _orig                       # noqa: F811 (restore)
-

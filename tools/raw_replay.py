@@ -692,15 +692,18 @@ def simulate_one_pos_portfolio(
     exit_ep_key: str,
     cooldown_min: float = 5.0,
     exclude_pebble_bypass: bool = False,
+    daily_max_loss_pts: float = 0.0,
 ) -> Dict[str, Any]:
-    """Realistic 1-open-position MT5 account simulation (non-overlapping + cooldown, net of spread)."""
+    """Realistic 1-open-position MT5 account simulation (non-overlapping + cooldown + Stage-4R day stop, net of spread)."""
     taken: List[Dict[str, Any]] = []
     skipped_open = 0
     skipped_cd = 0
+    skipped_day_stop = 0
     eq = 0.0
     peak_eq = 0.0
     max_dd = 0.0
     by_day: List[Dict[str, Any]] = []
+    day_stop_thr = max(0.0, float(daily_max_loss_pts or 0.0))
 
     for r in ok_days:
         day_str = str(r.get("day") or "?")
@@ -713,6 +716,7 @@ def simulate_one_pos_portfolio(
         d_eq = 0.0
         d_peak = 0.0
         d_dd = 0.0
+        d_halted = False
         for c in r.get("cycles") or []:
             if c.get("error"):
                 continue
@@ -730,6 +734,10 @@ def simulate_one_pos_portfolio(
             ent_ep = float(c.get("entry_ep") if c.get("entry_ep") is not None else (dt_obj.timestamp() if dt_obj else 0.0))
             if ent_ep < busy_open_until:
                 skipped_open += 1
+                continue
+            if day_stop_thr > 0.0 and d_pts <= -day_stop_thr:
+                skipped_day_stop += 1
+                d_halted = True
                 continue
             if ent_ep < busy_cd_until:
                 skipped_cd += 1
@@ -766,6 +774,7 @@ def simulate_one_pos_portfolio(
             "losses": d_losses,
             "pts": round(d_pts, 2),
             "max_dd": round(d_dd, 2),
+            "halted": d_halted or (day_stop_thr > 0.0 and d_pts <= -day_stop_thr),
         })
 
     wins = sum(1 for t in taken if t["pts"] > 0)
@@ -786,6 +795,7 @@ def simulate_one_pos_portfolio(
         "max_dd": round(max_dd, 2),
         "skipped_open": skipped_open,
         "skipped_cd": skipped_cd,
+        "skipped_day_stop": skipped_day_stop,
         "pos_days": sum(1 for d in by_day if d["pts"] > 0),
         "active_days": sum(1 for d in by_day if d["trades"] > 0),
         "by_day": by_day,
@@ -1932,8 +1942,10 @@ def replay_single_day(
                 s3d = (getattr(snap, "shadow_candidates", None) or {}).get("stage3d_gate") or {}
                 s3d_live_capped = bool(s3d.get("live_capped", False))
                 s3d_sniper_auth = bool(s3d.get("sniper_authorized", False))
+                s3r = (getattr(snap, "shadow_candidates", None) or {}).get("stage3r_gate") or {}
+                s3r_live_capped = bool(s3r.get("live_capped", False))
 
-                # Current-version gate classification (Step 2 -> Family Gate -> Stage 3b -> Stage 3c -> Stage 3d -> Shooting)
+                # Current-version gate classification (Step 2 -> Family Gate -> Stage 3b -> Stage 3c -> Stage 3d -> Stage 3R -> Shooting)
                 pw_side = "BUY" if pw_dir == "UP" else ("SELL" if pw_dir == "DOWN" else "NEITHER")
                 if sig_dir not in ("BUY", "SELL"):
                     gate_stage = "NEUTRAL (no panel signal)"
@@ -1947,6 +1959,8 @@ def replay_single_day(
                     gate_stage = "BLOCKED: Session Dead-Zone (Stage 3c)"
                 elif sig_conf < conf_thr and s3d_live_capped:
                     gate_stage = "BLOCKED: Late POWER Climax (Stage 3d)"
+                elif sig_conf < conf_thr and s3r_live_capped:
+                    gate_stage = "BLOCKED: Unplugged MBO (Stage 3R)"
                 elif sig_conf < conf_thr:
                     gate_stage = f"BLOCKED: Conf < {conf_thr:.0f}%"
                 elif shot_act == "GO":
@@ -2817,43 +2831,62 @@ def synthesize_multi_day(results: List[Dict[str, Any]]) -> Tuple[str, str, Dict[
     else:
         lines.append("  0 SHOOTING GO cycles executed on this sample.")
 
-    # [8d] Stage 4c Realistic 1-Position Portfolio Simulation (Non-Overlapping + Cooldown)
-    cd_cfg = float(getattr(config, "COOLDOWN_MINUTES", 5) or 5)
+    # [8d] Stage 4c + Stage 4R Realistic 1-Position Portfolio Simulation (Non-Overlapping + Cooldown + DayStop)
+    s4r_cd_on = bool(getattr(config, "STAGE4R_POST_EXIT_COOLDOWN_ENABLED", True))
+    cd_live = (
+        float(getattr(config, "STAGE4R_POST_EXIT_COOLDOWN_MINUTES", float(h1)))
+        if s4r_cd_on
+        else float(getattr(config, "COOLDOWN_MINUTES", float(h1)) or 0.0)
+    )
+    dl_live = (
+        max(0.0, float(getattr(config, "STAGE4R_DAILY_MAX_LOSS_PTS", 12.0) or 0.0))
+        if bool(getattr(config, "STAGE4R_DAILY_LOSS_BREAKER_ENABLED", True))
+        else 0.0
+    )
+    dl_tag = f"{dl_live:.0f}pt Stop" if dl_live > 0 else "no Stop"
     lines.append(
         f"\n[8d] REALISTIC 1-POSITION PORTFOLIO SIMULATION (MAX_OPEN=1, NON-OVERLAPPING, NET OF SPREAD)"
     )
     if go_cycles:
         port_configs = [
-            (f"Stage-4c Live PM (1.5xATR+BE@1R, {cd_cfg:.0f}m CD)", "shot_pm4b_pts", "shot_pm4b_exit_ep", cd_cfg, False),
-            ("Stage-4c Live PM (1.5xATR+BE@1R, 0m CD)", "shot_pm4b_pts", "shot_pm4b_exit_ep", 0.0, False),
-            (f"Stage-4c Planned Shot (Pure SL/TP, {cd_cfg:.0f}m CD)", "shot_br_pts", "shot_br_exit_ep", cd_cfg, False),
-            (f"Stage-4b Strict Subset (road_clear, {cd_cfg:.0f}m CD)", "shot_pm4b_pts", "shot_pm4b_exit_ep", cd_cfg, True),
+            (f"Stage-4R Live PM (1.5xATR, {cd_live:.0f}m CD, {dl_tag})", "shot_pm4b_pts", "shot_pm4b_exit_ep", cd_live, False, dl_live),
+            (f"Stage-4c + 3R Only (1.5xATR, {cd_live:.0f}m CD, no Stop)", "shot_pm4b_pts", "shot_pm4b_exit_ep", cd_live, False, 0.0),
+            ("Stage-4c + 3R Legacy (1.5xATR, 10m CD, no Stop)", "shot_pm4b_pts", "shot_pm4b_exit_ep", 10.0, False, 0.0),
+            ("Stage-4c + 3R Zero-CD (1.5xATR, 0m CD, no Stop)", "shot_pm4b_pts", "shot_pm4b_exit_ep", 0.0, False, 0.0),
+            (f"Stage-4R Planned Shot (SL/TP, {cd_live:.0f}m CD, {dl_tag})", "shot_br_pts", "shot_br_exit_ep", cd_live, False, dl_live),
+            (f"Stage-4b Strict (road_clear, {cd_live:.0f}m CD, {dl_tag})", "shot_pm4b_pts", "shot_pm4b_exit_ep", cd_live, True, dl_live),
         ]
         lines.append(
-            f"  {'PORTFOLIO CONFIGURATION':<44} {'TRD':>4} {'W/L':>8} {'WR%':>6} {'NET_PTS':>9} "
+            f"  {'PORTFOLIO CONFIGURATION':<46} {'TRD':>4} {'W/L':>8} {'WR%':>6} {'NET_PTS':>9} "
             f"{'PTS/TRD':>8} {'PF':>6} {'MAX_DD':>7} {'POS_D':>6} {'SKIP_BUSY':>9}"
         )
-        lines.append("  " + "-" * 116)
+        lines.append("  " + "-" * 118)
         primary_sim = None
-        for p_lbl, p_k, ex_k, cd_m, excl_peb in port_configs:
-            sim = simulate_one_pos_portfolio(ok_days, conf_thr, p_k, ex_k, cooldown_min=cd_m, exclude_pebble_bypass=excl_peb)
+        for p_lbl, p_k, ex_k, cd_m, excl_peb, dl_m in port_configs:
+            sim = simulate_one_pos_portfolio(
+                ok_days, conf_thr, p_k, ex_k,
+                cooldown_min=cd_m, exclude_pebble_bypass=excl_peb, daily_max_loss_pts=dl_m,
+            )
             if primary_sim is None:
                 primary_sim = sim
             wl_s = f"{sim['wins']}/{sim['losses']}"
             pd_s = f"{sim['pos_days']}/{sim['active_days']}"
-            sk_s = sim["skipped_open"] + sim["skipped_cd"]
+            sk_s = sim["skipped_open"] + sim["skipped_cd"] + sim.get("skipped_day_stop", 0)
             lines.append(
-                f"  {p_lbl:<44} {sim['trades']:>4} {wl_s:>8} {sim['wr']:>5.1f}% {sim['tot_pts']:>+9.1f} "
+                f"  {p_lbl:<46} {sim['trades']:>4} {wl_s:>8} {sim['wr']:>5.1f}% {sim['tot_pts']:>+9.1f} "
                 f"{sim['avg_pts']:>+8.2f} {sim['pf']:>6.2f} {sim['max_dd']:>7.1f} {pd_s:>6} {sk_s:>9}"
             )
         if primary_sim and primary_sim["by_day"]:
-            lines.append(f"  Day-by-Day 1-Position Account Curve (Stage-4c Live PM, {cd_cfg:.0f}m Cooldown):")
+            lines.append(
+                f"  Day-by-Day 1-Position Account Curve (Stage-4R Live PM, {cd_live:.0f}m Cooldown, {dl_tag}):"
+            )
             for d_row in primary_sim["by_day"]:
                 d_wr = (100.0 * d_row["wins"] / (d_row["wins"] + d_row["losses"])) if (d_row["wins"] + d_row["losses"]) else 0.0
+                halt_s = " [DAY-STOP HALT]" if d_row.get("halted") else ""
                 lines.append(
                     f"    {d_row['day']} ({d_row['day_type']:<10}): {d_row['trades']:>3} trades | "
                     f"W/L {d_row['wins']}/{d_row['losses']} ({d_wr:>5.1f}% WR) | "
-                    f"Net {d_row['pts']:>+7.1f} pts | Intraday Max DD {d_row['max_dd']:>5.1f} pts"
+                    f"Net {d_row['pts']:>+7.1f} pts | Intraday Max DD {d_row['max_dd']:>5.1f} pts{halt_s}"
                 )
     else:
         lines.append("  0 SHOOTING GO cycles available for portfolio simulation.")
