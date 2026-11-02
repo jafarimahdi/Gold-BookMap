@@ -733,7 +733,8 @@ class LevelBook:
         road = [(p, s) for p, s in ladder if lo < p < hi and s > 0]
         if not road:
             return {"doors_between": 0, "lots_between": 0.0,
-                    "biggest_in_path": None, "road_clear": not iceberg_blocking}
+                    "biggest_in_path": None, "iceberg_in_path": bool(iceberg_blocking),
+                    "road_clear": not iceberg_blocking}
 
         wall_blocking = iceberg_blocking
         if not wall_blocking:
@@ -756,6 +757,7 @@ class LevelBook:
             "doors_between": len(road),
             "lots_between": round(sum(s for _, s in road), 1),
             "biggest_in_path": {"price": big[0], "size": round(big[1], 1)},
+            "iceberg_in_path": bool(iceberg_blocking),
             "road_clear": not wall_blocking,
         }
 

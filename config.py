@@ -492,6 +492,7 @@ def _refresh() -> None:
     g["PM_WAVE_MAJOR_WALL_TP_LOTS"] = max(5.0, _ffloat("PM_WAVE_MAJOR_WALL_TP_LOTS", 40.0))
     g["ESCORT_WAVE_LOCK_TRIGGER_R"] = max(0.5, _ffloat("ESCORT_WAVE_LOCK_TRIGGER_R", 1.0))
     g["ESCORT_WAVE_LOCK_GIVEBACK_ATR"] = max(0.5, _ffloat("ESCORT_WAVE_LOCK_GIVEBACK_ATR", 1.50))
+    g["STAGE4C_SNIPER_PEBBLE_BYPASS_ENABLED"] = _fget("STAGE4C_SNIPER_PEBBLE_BYPASS_ENABLED", "1") == "1"
     g["L3_NEAR_TOUCH_USD"] = max(0.5, _ffloat("L3_NEAR_TOUCH_USD", 2.50))
     g["QUEUE_FLOW_WINDOW_SECONDS"] = max(5.0, _ffloat("QUEUE_FLOW_WINDOW_SECONDS", 30.0))
     g["BOOK_PROBE_TILT"] = max(0.05, min(0.50, _ffloat("BOOK_PROBE_TILT", 0.12)))

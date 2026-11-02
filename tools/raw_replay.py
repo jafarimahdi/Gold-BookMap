@@ -594,6 +594,72 @@ def _excursion_30m(
     return max(pxs), min(pxs)
 
 
+def _walk_bracket_with_exit(
+    bar_keys: List[int],
+    bars: List[Tuple[int, float, float, float, float]],
+    entry_ep: float,
+    direction: str,
+    entry_px: float,
+    sl_px: float,
+    tp_px: float,
+    max_hold_min: int,
+    spread_cost: float,
+    trail_atr: float = 0.0,
+    trail_dist_mult: float = 0.0,
+    trail_trigger_r: float = 0.5,
+    be_floor_atr: float = 0.0,
+) -> Tuple[str, float, float]:
+    """Walk forward strictly after entry minute (`m > entry_min`). Returns `(outcome, net_pts, exit_ep)`."""
+    entry_min = int(entry_ep // 60) * 60
+    start_idx = bisect.bisect_right(bar_keys, entry_min)
+    if start_idx >= len(bars):
+        return "last_bar", 0.0, float(entry_ep)
+    end_min = entry_min + max_hold_min * 60
+    is_buy = direction.upper() == "BUY"
+    cur_sl = sl_px
+    init_risk = abs(entry_px - sl_px)
+    hwm = entry_px
+    last_close = entry_px
+    last_b_min = entry_min
+
+    for idx in range(start_idx, len(bars)):
+        b_min, _o, hi, lo, cl = bars[idx]
+        if b_min > end_min:
+            break
+        last_close = cl
+        last_b_min = b_min
+        # Check SL before TP on current bar (no intra-bar peek)
+        if is_buy:
+            if lo <= cur_sl:
+                return ("TRAIL" if cur_sl > sl_px + 1e-9 else "SL"), round((cur_sl - entry_px) - spread_cost, 2), float(b_min + 60)
+            if hi >= tp_px:
+                return "TP", round((tp_px - entry_px) - spread_cost, 2), float(b_min + 60)
+            if hi > hwm:
+                hwm = hi
+            if trail_atr > 0 and trail_dist_mult > 0 and init_risk > 0 and (hwm - entry_px) >= trail_trigger_r * init_risk:
+                cand_sl = hwm - trail_dist_mult * trail_atr
+                if be_floor_atr > 0:
+                    cand_sl = max(cand_sl, entry_px + max(be_floor_atr * trail_atr, spread_cost))
+                if cand_sl > cur_sl:
+                    cur_sl = cand_sl
+        else:
+            if hi >= cur_sl:
+                return ("TRAIL" if cur_sl < sl_px - 1e-9 else "SL"), round((entry_px - cur_sl) - spread_cost, 2), float(b_min + 60)
+            if lo <= tp_px:
+                return "TP", round((entry_px - tp_px) - spread_cost, 2), float(b_min + 60)
+            if lo < hwm:
+                hwm = lo
+            if trail_atr > 0 and trail_dist_mult > 0 and init_risk > 0 and (entry_px - hwm) >= trail_trigger_r * init_risk:
+                cand_sl = hwm + trail_dist_mult * trail_atr
+                if be_floor_atr > 0:
+                    cand_sl = min(cand_sl, entry_px - max(be_floor_atr * trail_atr, spread_cost))
+                if cand_sl < cur_sl:
+                    cur_sl = cand_sl
+
+    pts = (last_close - entry_px) if is_buy else (entry_px - last_close)
+    return "TIMEOUT", round(pts - spread_cost, 2), float(last_b_min + 60)
+
+
 def _walk_bracket(
     bar_keys: List[int],
     bars: List[Tuple[int, float, float, float, float]],
@@ -610,52 +676,120 @@ def _walk_bracket(
     be_floor_atr: float = 0.0,
 ) -> Tuple[str, float]:
     """Walk forward strictly after entry minute (`m > entry_min`). Conservative SL-first."""
-    entry_min = int(entry_ep // 60) * 60
-    start_idx = bisect.bisect_right(bar_keys, entry_min)
-    if start_idx >= len(bars):
-        return "last_bar", 0.0
-    end_min = entry_min + max_hold_min * 60
-    is_buy = direction.upper() == "BUY"
-    cur_sl = sl_px
-    init_risk = abs(entry_px - sl_px)
-    hwm = entry_px
-    last_close = entry_px
+    out, pts, _ = _walk_bracket_with_exit(
+        bar_keys, bars, entry_ep, direction, entry_px, sl_px, tp_px,
+        max_hold_min, spread_cost, trail_atr=trail_atr,
+        trail_dist_mult=trail_dist_mult, trail_trigger_r=trail_trigger_r,
+        be_floor_atr=be_floor_atr,
+    )
+    return out, pts
 
-    for idx in range(start_idx, len(bars)):
-        b_min, _o, hi, lo, cl = bars[idx]
-        if b_min > end_min:
-            break
-        last_close = cl
-        # Check SL before TP on current bar (no intra-bar peek)
-        if is_buy:
-            if lo <= cur_sl:
-                return ("TRAIL" if cur_sl > sl_px + 1e-9 else "SL"), round((cur_sl - entry_px) - spread_cost, 2)
-            if hi >= tp_px:
-                return "TP", round((tp_px - entry_px) - spread_cost, 2)
-            if hi > hwm:
-                hwm = hi
-            if trail_atr > 0 and trail_dist_mult > 0 and init_risk > 0 and (hwm - entry_px) >= trail_trigger_r * init_risk:
-                cand_sl = hwm - trail_dist_mult * trail_atr
-                if be_floor_atr > 0:
-                    cand_sl = max(cand_sl, entry_px + max(be_floor_atr * trail_atr, spread_cost))
-                if cand_sl > cur_sl:
-                    cur_sl = cand_sl
-        else:
-            if hi >= cur_sl:
-                return ("TRAIL" if cur_sl < sl_px - 1e-9 else "SL"), round((entry_px - cur_sl) - spread_cost, 2)
-            if lo <= tp_px:
-                return "TP", round((entry_px - tp_px) - spread_cost, 2)
-            if lo < hwm:
-                hwm = lo
-            if trail_atr > 0 and trail_dist_mult > 0 and init_risk > 0 and (entry_px - hwm) >= trail_trigger_r * init_risk:
-                cand_sl = hwm + trail_dist_mult * trail_atr
-                if be_floor_atr > 0:
-                    cand_sl = min(cand_sl, entry_px - max(be_floor_atr * trail_atr, spread_cost))
-                if cand_sl < cur_sl:
-                    cur_sl = cand_sl
 
-    pts = (last_close - entry_px) if is_buy else (entry_px - last_close)
-    return "TIMEOUT", round(pts - spread_cost, 2)
+def simulate_one_pos_portfolio(
+    ok_days: Sequence[Dict[str, Any]],
+    conf_thr: float,
+    pts_key: str,
+    exit_ep_key: str,
+    cooldown_min: float = 5.0,
+    exclude_pebble_bypass: bool = False,
+) -> Dict[str, Any]:
+    """Realistic 1-open-position MT5 account simulation (non-overlapping + cooldown, net of spread)."""
+    taken: List[Dict[str, Any]] = []
+    skipped_open = 0
+    skipped_cd = 0
+    eq = 0.0
+    peak_eq = 0.0
+    max_dd = 0.0
+    by_day: List[Dict[str, Any]] = []
+
+    for r in ok_days:
+        day_str = str(r.get("day") or "?")
+        busy_open_until = -1.0
+        busy_cd_until = -1.0
+        d_trades = 0
+        d_wins = 0
+        d_losses = 0
+        d_pts = 0.0
+        d_eq = 0.0
+        d_peak = 0.0
+        d_dd = 0.0
+        for c in r.get("cycles") or []:
+            if c.get("error"):
+                continue
+            if c.get("direction") not in ("BUY", "SELL") or float(c.get("confidence") or 0.0) < conf_thr:
+                continue
+            if str(c.get("shot_action") or "").upper() != "GO":
+                continue
+            if exclude_pebble_bypass and bool(c.get("shot_pebble_bypass")):
+                continue
+            pts_val = c.get(pts_key)
+            ex_ep = c.get(exit_ep_key)
+            if pts_val is None or ex_ep is None:
+                continue
+            dt_obj = c.get("dt_utc")
+            ent_ep = float(c.get("entry_ep") if c.get("entry_ep") is not None else (dt_obj.timestamp() if dt_obj else 0.0))
+            if ent_ep < busy_open_until:
+                skipped_open += 1
+                continue
+            if ent_ep < busy_cd_until:
+                skipped_cd += 1
+                continue
+            p_val = float(pts_val)
+            d_trades += 1
+            if p_val > 0:
+                d_wins += 1
+            elif p_val < 0:
+                d_losses += 1
+            d_pts += p_val
+            d_eq += p_val
+            d_peak = max(d_peak, d_eq)
+            d_dd = max(d_dd, d_peak - d_eq)
+
+            eq += p_val
+            peak_eq = max(peak_eq, eq)
+            max_dd = max(max_dd, peak_eq - eq)
+
+            busy_open_until = float(ex_ep)
+            busy_cd_until = float(ex_ep) + max(0.0, float(cooldown_min)) * 60.0
+            taken.append({
+                "day": day_str,
+                "entry_ep": ent_ep,
+                "exit_ep": float(ex_ep),
+                "pts": p_val,
+                "pebble_bypass": bool(c.get("shot_pebble_bypass")),
+            })
+        by_day.append({
+            "day": day_str,
+            "day_type": str(r.get("day_type") or "?"),
+            "trades": d_trades,
+            "wins": d_wins,
+            "losses": d_losses,
+            "pts": round(d_pts, 2),
+            "max_dd": round(d_dd, 2),
+        })
+
+    wins = sum(1 for t in taken if t["pts"] > 0)
+    losses = sum(1 for t in taken if t["pts"] < 0)
+    gross_win = sum(t["pts"] for t in taken if t["pts"] > 0)
+    gross_loss = abs(sum(t["pts"] for t in taken if t["pts"] < 0))
+    pf = (gross_win / gross_loss) if gross_loss > 1e-9 else (99.99 if gross_win > 0 else 0.0)
+    wr = (100.0 * wins / (wins + losses)) if (wins + losses) else 0.0
+    tot_pts = round(sum(t["pts"] for t in taken), 2)
+    return {
+        "trades": len(taken),
+        "wins": wins,
+        "losses": losses,
+        "wr": wr,
+        "tot_pts": tot_pts,
+        "avg_pts": (tot_pts / len(taken)) if taken else 0.0,
+        "pf": pf,
+        "max_dd": round(max_dd, 2),
+        "skipped_open": skipped_open,
+        "skipped_cd": skipped_cd,
+        "pos_days": sum(1 for d in by_day if d["pts"] > 0),
+        "active_days": sum(1 for d in by_day if d["trades"] > 0),
+        "by_day": by_day,
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -1934,6 +2068,8 @@ def replay_single_day(
                 shot_rr_val = None
                 shot_sl_dist = shot_tp_dist = None
                 shot_tp_src = ""
+                shot_pebble_bypass = False
+                shot_br_exit_ep = shot_pm4b_exit_ep = None
                 shot_s15_out, shot_s15_pts = "NO_SIGNAL", None
                 shot_pm4b_out, shot_pm4b_pts = "NO_SIGNAL", None
                 shot_ch15_out, shot_ch15_pts = "NO_SIGNAL", None
@@ -2014,14 +2150,15 @@ def replay_single_day(
                             shot_rr_val = float(shot.get("rr") or 0.0)
                             _eo = (shot.get("entry_options") or {}).get(shot_style) or {}
                             shot_tp_src = str(_eo.get("target_source") or "SCOUT_DOOR")
+                            shot_pebble_bypass = bool(_eo.get("sniper_pebble_bypass"))
                             if sh_sl > 0 and sh_tp > 0:
                                 shot_sl_dist = round(abs(px - sh_sl), 2)
                                 shot_tp_dist = round(abs(sh_tp - px), 2)
-                                shot_br_out, shot_br_pts = _walk_bracket(
+                                shot_br_out, shot_br_pts, shot_br_exit_ep = _walk_bracket_with_exit(
                                     bar_keys, walk_bars, tc_ep, sig_dir, px,
                                     sh_sl, sh_tp, max_hold_min, spread_cost,
                                 )
-                                shot_pm4b_out, shot_pm4b_pts = _walk_bracket(
+                                shot_pm4b_out, shot_pm4b_pts, shot_pm4b_exit_ep = _walk_bracket_with_exit(
                                     bar_keys, walk_bars, tc_ep, sig_dir, px,
                                     sh_sl, sh_tp, max_hold_min, spread_cost,
                                     trail_atr=atr_live, trail_dist_mult=1.5, trail_trigger_r=1.0, be_floor_atr=0.10,
@@ -2053,6 +2190,7 @@ def replay_single_day(
                 dq = md.get("data_quality") or {}
                 l2d = md.get("l2_diagnostics") or {}
                 cycles_out.append({
+                    "entry_ep": tc_ep,
                     "dt_utc": tc_dt,
                     "buda_hhmmss": tc_dt.astimezone(BUDA_TZ).strftime("%H:%M:%S"),
                     "buda_hour": tc_dt.astimezone(BUDA_TZ).hour,
@@ -2094,6 +2232,9 @@ def replay_single_day(
                     "shot_rr": shot_rr_val,
                     "shot_sl_dist": shot_sl_dist, "shot_tp_dist": shot_tp_dist,
                     "shot_tp_src": shot_tp_src,
+                    "shot_pebble_bypass": shot_pebble_bypass,
+                    "shot_br_exit_ep": shot_br_exit_ep,
+                    "shot_pm4b_exit_ep": shot_pm4b_exit_ep,
                     "shot_s15_out": shot_s15_out, "shot_s15_pts": shot_s15_pts,
                     "shot_pm4b_out": shot_pm4b_out, "shot_pm4b_pts": shot_pm4b_pts,
                     "shot_ch15_out": shot_ch15_out, "shot_ch15_pts": shot_ch15_pts,
@@ -2663,8 +2804,59 @@ def synthesize_multi_day(results: List[Dict[str, Any]]) -> Tuple[str, str, Dict[
             lines.append(
                 f"  {r_lbl:<44} {len(r_pts):>5} {f'{r_w}/{r_l}':>10} {r_wr:>6.1f}% {r_tot:>+10.1f} {r_avg:>+9.2f}"
             )
+        peb_cycles = [c for c in go_cycles if c.get("shot_pebble_bypass") and c.get("shot_pm4b_pts") is not None]
+        if peb_cycles:
+            p_w = sum(1 for c in peb_cycles if float(c["shot_pm4b_pts"]) > 0)
+            p_l = sum(1 for c in peb_cycles if float(c["shot_pm4b_pts"]) < 0)
+            p_wr = (100.0 * p_w / (p_w + p_l)) if (p_w + p_l) else 0.0
+            p_tot = sum(float(c["shot_pm4b_pts"]) for c in peb_cycles)
+            lines.append(
+                f"  * Law #9 Isolated Stage-4c Pebble-Bypass Subset: N={len(peb_cycles)} | "
+                f"W/L={p_w}/{p_l} ({p_wr:.1f}% WR) | PM4B_PTS={p_tot:+.1f} ({p_tot/len(peb_cycles):+.2f}/go)"
+            )
     else:
         lines.append("  0 SHOOTING GO cycles executed on this sample.")
+
+    # [8d] Stage 4c Realistic 1-Position Portfolio Simulation (Non-Overlapping + Cooldown)
+    cd_cfg = float(getattr(config, "COOLDOWN_MINUTES", 5) or 5)
+    lines.append(
+        f"\n[8d] REALISTIC 1-POSITION PORTFOLIO SIMULATION (MAX_OPEN=1, NON-OVERLAPPING, NET OF SPREAD)"
+    )
+    if go_cycles:
+        port_configs = [
+            (f"Stage-4c Live PM (1.5xATR+BE@1R, {cd_cfg:.0f}m CD)", "shot_pm4b_pts", "shot_pm4b_exit_ep", cd_cfg, False),
+            ("Stage-4c Live PM (1.5xATR+BE@1R, 0m CD)", "shot_pm4b_pts", "shot_pm4b_exit_ep", 0.0, False),
+            (f"Stage-4c Planned Shot (Pure SL/TP, {cd_cfg:.0f}m CD)", "shot_br_pts", "shot_br_exit_ep", cd_cfg, False),
+            (f"Stage-4b Strict Subset (road_clear, {cd_cfg:.0f}m CD)", "shot_pm4b_pts", "shot_pm4b_exit_ep", cd_cfg, True),
+        ]
+        lines.append(
+            f"  {'PORTFOLIO CONFIGURATION':<44} {'TRD':>4} {'W/L':>8} {'WR%':>6} {'NET_PTS':>9} "
+            f"{'PTS/TRD':>8} {'PF':>6} {'MAX_DD':>7} {'POS_D':>6} {'SKIP_BUSY':>9}"
+        )
+        lines.append("  " + "-" * 116)
+        primary_sim = None
+        for p_lbl, p_k, ex_k, cd_m, excl_peb in port_configs:
+            sim = simulate_one_pos_portfolio(ok_days, conf_thr, p_k, ex_k, cooldown_min=cd_m, exclude_pebble_bypass=excl_peb)
+            if primary_sim is None:
+                primary_sim = sim
+            wl_s = f"{sim['wins']}/{sim['losses']}"
+            pd_s = f"{sim['pos_days']}/{sim['active_days']}"
+            sk_s = sim["skipped_open"] + sim["skipped_cd"]
+            lines.append(
+                f"  {p_lbl:<44} {sim['trades']:>4} {wl_s:>8} {sim['wr']:>5.1f}% {sim['tot_pts']:>+9.1f} "
+                f"{sim['avg_pts']:>+8.2f} {sim['pf']:>6.2f} {sim['max_dd']:>7.1f} {pd_s:>6} {sk_s:>9}"
+            )
+        if primary_sim and primary_sim["by_day"]:
+            lines.append(f"  Day-by-Day 1-Position Account Curve (Stage-4c Live PM, {cd_cfg:.0f}m Cooldown):")
+            for d_row in primary_sim["by_day"]:
+                d_wr = (100.0 * d_row["wins"] / (d_row["wins"] + d_row["losses"])) if (d_row["wins"] + d_row["losses"]) else 0.0
+                lines.append(
+                    f"    {d_row['day']} ({d_row['day_type']:<10}): {d_row['trades']:>3} trades | "
+                    f"W/L {d_row['wins']}/{d_row['losses']} ({d_wr:>5.1f}% WR) | "
+                    f"Net {d_row['pts']:>+7.1f} pts | Intraday Max DD {d_row['max_dd']:>5.1f} pts"
+                )
+    else:
+        lines.append("  0 SHOOTING GO cycles available for portfolio simulation.")
 
     # [9] Stage 1: Timeframe-linked 1..4-bar path & Market Trick Detector
     lines.append(

@@ -649,6 +649,23 @@ def plan_shot(signal_map: Dict[str, Any], power: Dict[str, Any],
     road_count = int(raw_road_count)
     road_lots = raw_road_lots
     route_clear = target_door.get("road_clear") is True
+    # Stage 4c (2026-11-02, Frey & Sandas 2017): When L3_WHALE_THRESHOLD=10.0 flags a routine
+    # 10..39-lot non-iceberg quote inside SCOUT_MIN_SPREADS ($2.00), `road_clear` is False even
+    # though Crowd v2 Q1/Q2/Q3 PASS and no >=40-lot wall or iceberg stands in path (~69 Sniper
+    # waves in replay-12 earning +539.2 FIX_PTS / 69.4% WR). Permit corridor scan ONLY on
+    # verified Stage-3d Sniper waves when `biggest_in_path` is explicitly < 40 lots and non-iceberg.
+    _big_in_path = target_door.get("biggest_in_path")
+    _big_path_sz = _num(_big_in_path.get("size")) if isinstance(_big_in_path, Mapping) else None
+    _major_block_thr = _cfg(config, "SHOOT_MAJOR_WALL_BLOCK_LOTS", 40.0)
+    sniper_pebble_clear = (
+        not route_clear
+        and bool(getattr(config, "STAGE4C_SNIPER_PEBBLE_BYPASS_ENABLED", False))
+        and ctx.get("stage3d_sniper_authorized") is True
+        and not bool(target_door.get("iceberg_in_path", False))
+        and _big_path_sz is not None
+        and 0.0 < _big_path_sz < _major_block_thr
+    )
+    eff_route_clear = route_clear or sniper_pebble_clear
     # crowdv2:v1 -- the Three Fair Questions replace the road/target-size ratio.
     shot_lots = _num(ctx.get("trade_lots"))
     if shot_lots is None or shot_lots <= 0:
@@ -796,7 +813,14 @@ def plan_shot(signal_map: Dict[str, Any], power: Dict[str, Any],
                 aggressive_reason = (
                     f"{aggressive_reason} (major opposing wall {_b_sz:.0f} lots at {_b_px:.2f} blocks wave target)"
                 )
-            elif route_clear:
+            elif not eff_route_clear and isinstance(_big_in_path, Mapping) and (_big_path_sz or 0.0) >= _major_block_thr:
+                _b_px = _num(_big_in_path.get("price")) or 0.0
+                aggressive_reason = (
+                    f"{aggressive_reason} (major in-path wall {_big_path_sz:.0f} lots at {_b_px:.2f} blocks corridor)"
+                )
+            elif not eff_route_clear and bool(target_door.get("iceberg_in_path", False)):
+                aggressive_reason = f"{aggressive_reason} (active iceberg in front corridor blocks wave target)"
+            elif eff_route_clear:
                 # (1) Scan further live Scout doors on the trade side
                 for _, _cand_d in _all_doors[1:]:
                     _c_px = _num(_cand_d.get("price"))
@@ -900,11 +924,14 @@ def plan_shot(signal_map: Dict[str, Any], power: Dict[str, Any],
                         aggressive = _wave_plan
                         aggressive_reason = None
                         target_px = _chosen_tp
+    sniper_pebble_used = bool(sniper_pebble_clear and not route_clear)
+    if sniper_pebble_used and isinstance(aggressive, dict):
+        aggressive = {**aggressive, "sniper_pebble_bypass": True}
     trigger = ctx.get("aggressive_trigger_confirmed") is True
     trigger_reason = str(ctx.get("aggressive_trigger_reason") or "").strip()
-    aggressive_geometry_ok = aggressive_reason is None and route_clear
+    aggressive_geometry_ok = aggressive_reason is None and eff_route_clear
     aggressive_allowed = (trigger and bool(trigger_reason) and aggressive_geometry_ok)
-    if trigger and trigger_reason and aggressive_reason is None and not route_clear:
+    if trigger and trigger_reason and aggressive_reason is None and not eff_route_clear:
         aggressive_reason = "Scout has not confirmed a clear route for aggressive entry"
 
     limit_order_enabled = bool(getattr(config, "LIMIT_ORDER_ENABLED", False))
@@ -914,7 +941,7 @@ def plan_shot(signal_map: Dict[str, Any], power: Dict[str, Any],
     # Stage 3d (2026-11-02): When the verified Stage-3 Sniper Panel (>=2 families, Conf>=50%,
     # non-climax, outside dead zones) explicitly authorizes marketable entry and passive limits
     # are policy-disabled, permit AGGRESSIVE_MARKET ONLY if full Scout-door + Shelter/ATR
-    # geometry (reward > 3x spread, R:R >= SHOOT_MIN_RR, Crowd v2 PASS, route_clear) passes.
+    # geometry (reward > 3x spread, R:R >= SHOOT_MIN_RR, Crowd v2 PASS, eff_route_clear) passes.
     if (
         not passive_allowed
         and not aggressive_allowed
@@ -927,7 +954,7 @@ def plan_shot(signal_map: Dict[str, Any], power: Dict[str, Any],
                 or "Stage 3d Sniper Panel authorized marketable entry"
             ).strip()
             aggressive_allowed = True
-        elif aggressive_reason is None and not route_clear:
+        elif aggressive_reason is None and not eff_route_clear:
             aggressive_reason = "Scout has not confirmed a clear route for sniper marketable entry"
     if passive_geometry_reason:
         passive_reason = passive_geometry_reason
