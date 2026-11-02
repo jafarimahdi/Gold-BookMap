@@ -66,7 +66,7 @@ class PaperTrade:
     __slots__ = ("side", "entry", "target", "stop", "opened", "opened_price",
                  "orig_target", "orig_stop", "door_price", "actions", "peak", "trough",
                  "closed", "close_reason", "close_price", "cycles",
-                 "entry_style", "paper_fill_model", "is_a2_burst")
+                 "entry_style", "paper_fill_model", "is_a2_burst", "target_source")
 
     def __init__(self, plan: Dict[str, Any], price: float):
         self.side = plan.get("side")
@@ -84,6 +84,8 @@ class PaperTrade:
             plan.get("a2_burst") is True
             or str(plan.get("stop_source") or "").upper() == "A2_BURST_FIXED"
         )
+        _eo = (plan.get("entry_options") or {}).get(self.entry_style) or {}
+        self.target_source = str(_eo.get("target_source") or "")
         self.actions: List[Dict[str, Any]] = []
         self.peak = price          # best price seen in our favour
         self.trough = price        # worst price seen against us
@@ -156,12 +158,21 @@ def get_escort() -> EscortBook:
 # --------------------------------------------------------------------------- #
 #  the five jobs
 # --------------------------------------------------------------------------- #
-def _job1_exit_clear(t: PaperTrade, smap: Dict[str, Any], price: float) -> Optional[Dict]:
+def _job1_exit_clear(t: PaperTrade, smap: Dict[str, Any], price: float,
+                     config: Any = None) -> Optional[Dict]:
     """Is my exit still clear? Watch the very door the shooter aimed at."""
     doors = (smap or {}).get("above" if t.is_buy else "below") or []
+    wave_mode = (
+        bool(getattr(config, "STAGE4B_WAVE_TRAIL_ENABLED", False))
+        and not getattr(t, "is_a2_burst", False)
+    )
+    is_wave_target = (
+        getattr(t, "target_source", "") in {"ATR_WAVE_TARGET", "STRUCTURAL_MEMORY_DOOR"}
+        or (t.door_price > 0 and abs(t.orig_target - t.door_price) > 1.0)
+    )
     same = next((d for d in doors if abs(_f(d.get("price")) - t.door_price) < 0.05), None)
 
-    if same is None:
+    if same is None and not (wave_mode and is_wave_target):
         # the door we aimed at is gone from the map
         return {"job": 1, "judge": "whale_walls", "action": "TARGET_NEARER",
                 "reason": "the door we aimed at is no longer on the map - do not wait "
@@ -169,21 +180,26 @@ def _job1_exit_clear(t: PaperTrade, smap: Dict[str, Any], price: float) -> Optio
                 "new_target": (price + (t.target - price) * 0.5)}
 
     # a NEW door has appeared in front of our target
+    upper_ref = t.target if (wave_mode and is_wave_target) else t.door_price
     nearer = [d for d in doors
-              if (price < _f(d.get("price")) < t.door_price) if t.is_buy] or \
+              if (price < _f(d.get("price")) < upper_ref) if t.is_buy] or \
              [d for d in doors
-              if (t.door_price < _f(d.get("price")) < price) if not t.is_buy]
+              if (upper_ref < _f(d.get("price")) < price) if not t.is_buy]
     if nearer:
-        best = max(nearer, key=lambda d: _f(d.get("resistance")))
-        if _f(best.get("resistance")) >= 0.45:
-            return {"job": 1, "judge": "whale_walls", "action": "TARGET_NEARER",
-                    "reason": f"a new door appeared at {_f(best.get('price')):.2f} in front "
-                              f"of our target (hold {_f(best.get('resistance')):.2f}) - "
-                              f"take profit before it, not after",
-                    "new_target": _f(best.get("price"))}
+        if wave_mode:
+            maj_lots = _f(getattr(config, "PM_WAVE_MAJOR_WALL_TP_LOTS", 40.0), 40.0)
+            nearer = [d for d in nearer if _f(d.get("size")) >= maj_lots]
+        if nearer:
+            best = max(nearer, key=lambda d: _f(d.get("resistance")))
+            if _f(best.get("resistance")) >= (0.55 if wave_mode else 0.45):
+                return {"job": 1, "judge": "whale_walls", "action": "TARGET_NEARER",
+                        "reason": f"a new door appeared at {_f(best.get('price')):.2f} in front "
+                                  f"of our target (hold {_f(best.get('resistance')):.2f}) - "
+                                  f"take profit before it, not after",
+                        "new_target": _f(best.get("price"))}
 
     # our door has grown a lot - it will hold harder, so bank earlier
-    if _f(same.get("resistance")) >= 0.70 and same.get("trend") == "growing":
+    if same is not None and _f(same.get("resistance")) >= 0.70 and same.get("trend") == "growing":
         return {"job": 1, "judge": "iceberg", "action": "TARGET_NEARER",
                 "reason": "the target door is growing and hardening - it will stop price "
                           "sooner than we hoped",
@@ -229,9 +245,14 @@ def _job3_push_dying(t: PaperTrade, order_flow: Any, footprint: Any,
 
 
 def _job4_move_stop(t: PaperTrade, book, price: float, atr: float,
-                    spread: float) -> Optional[Dict]:
+                    spread: float, config: Any = None) -> Optional[Dict]:
     """Where do I move my stop to? Behind the next shelter, never further away."""
-    if book is None or t.r_now(price) < 0.5:
+    wave_mode = (
+        bool(getattr(config, "STAGE4B_WAVE_TRAIL_ENABLED", False))
+        and not getattr(t, "is_a2_burst", False)
+    )
+    min_r = _f(getattr(config, "ESCORT_WAVE_LOCK_TRIGGER_R", 1.0), 1.0) if wave_mode else 0.5
+    if book is None or t.r_now(price) < min_r:
         return None                                  # only trail once it is working
     try:
         sh = book.shelter_behind(price, t.is_buy)
@@ -241,6 +262,9 @@ def _job4_move_stop(t: PaperTrade, book, price: float, atr: float,
         return None
     buf = max(spread * 2.0, 0.15 * atr)
     new_stop = (_f(sh["price"]) - buf) if t.is_buy else (_f(sh["price"]) + buf)
+    # Stage 4b: Never trail behind a $0.30 near-touch BBO quote (< 1.2x ATR from price)
+    if wave_mode and atr > 0 and abs(price - new_stop) < 1.2 * atr:
+        return None
     better = (new_stop > t.stop) if t.is_buy else (new_stop < t.stop)
     if better:
         return {"job": 4, "judge": "supply_demand", "action": "TIGHTEN",
@@ -258,15 +282,23 @@ def _profit_lock(t: PaperTrade, price: float, atr: float, spread: float,
     follows it so any reversal closes POSITIVE. One-Law compatible: it may
     only ever move the stop safer. Config (all .env-editable):
     ESCORT_PROFIT_LOCK_ENABLE (1), ESCORT_LOCK_TRIGGER_R (1.0),
-    ESCORT_LOCK_GIVEBACK_ATR (0.5).
+    ESCORT_LOCK_GIVEBACK_ATR (0.5; upgraded to 1.50 Chandelier on Stage-4b waves).
     """
     if not bool(getattr(config, "ESCORT_PROFIT_LOCK_ENABLE", True)):
         return None
     entry = _f(getattr(t, "entry", 0.0)) or _f(getattr(t, "opened_price", 0.0))
     if entry <= 0:
         return None
-    trigger_r = _f(getattr(config, "ESCORT_LOCK_TRIGGER_R", 1.0)) or 1.0
-    giveback_atr = _f(getattr(config, "ESCORT_LOCK_GIVEBACK_ATR", 0.5)) or 0.5
+    wave_mode = (
+        bool(getattr(config, "STAGE4B_WAVE_TRAIL_ENABLED", False))
+        and not getattr(t, "is_a2_burst", False)
+    )
+    if wave_mode:
+        trigger_r = _f(getattr(config, "ESCORT_WAVE_LOCK_TRIGGER_R", 1.0)) or 1.0
+        giveback_atr = _f(getattr(config, "ESCORT_WAVE_LOCK_GIVEBACK_ATR", 1.5)) or 1.5
+    else:
+        trigger_r = _f(getattr(config, "ESCORT_LOCK_TRIGGER_R", 1.0)) or 1.0
+        giveback_atr = _f(getattr(config, "ESCORT_LOCK_GIVEBACK_ATR", 0.5)) or 0.5
     r_now = t.r_now(price)
     if r_now < trigger_r:
         return None
@@ -344,10 +376,10 @@ def escort_cycle(shot_plan: Dict[str, Any], signal_map: Dict[str, Any],
         # ---- the five jobs, one voice each ----------------------------------
         acts = [a for a in (
             _profit_lock(t, price, atr, spread, config),
-            _job1_exit_clear(t, signal_map, price),
+            _job1_exit_clear(t, signal_map, price, config=config),
             _job2_crowd_turning(t, order_flow, level3, price),
             _job3_push_dying(t, order_flow, footprint, divergence, mark),
-            _job4_move_stop(t, book, mark, atr, spread),
+            _job4_move_stop(t, book, mark, atr, spread, config=config),
             _job5_bomb(t, news, config),
         ) if a]
 
@@ -440,4 +472,3 @@ def describe(out: Dict[str, Any]) -> str:
         bits.append(f"{r['side']} {style} @{r['entry']:.2f} tgt {r['target']:.2f} "
                     f"stop {r['stop']:.2f} ({r['r']:+.2f}R) -> {acts}")
     return f"ESCORT: guarding {out['watching']} | " + " | ".join(bits)
-

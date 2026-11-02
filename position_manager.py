@@ -1328,37 +1328,71 @@ class PositionManager:
 
         min_step = max(0.05 * atr, 2.0 * float(getattr(info, "point", 0.0) or 0.0))
 
+        is_burst_pos = bool(
+            st.get("is_a2_burst", False)
+            or "a2 burst" in str(getattr(position, "comment", "") or "").lower()
+        )
+        wave_trail_on = bool(getattr(config, "STAGE4B_WAVE_TRAIL_ENABLED", False)) and not is_burst_pos
+        wave_trig_r = float(getattr(config, "PM_WAVE_TRAIL_TRIGGER_R", 1.0) or 1.0)
+        wave_trail_atr = float(getattr(config, "PM_WAVE_TRAIL_ATR", 1.50) or 1.50)
+        best_r = (best_gain / initial_r) if initial_r > 0 else 0.0
+        # On Stage-4b wave trades, do not tighten initial SL via structural/wall shelter
+        # before the trade has proven itself (+1.0R), except emergency orphan ADOPT_TIGHTEN
+        # when an external stop was wider than PM_MAX_SL_ATR * ATR.
+        allow_struct_tighten = (
+            (not wave_trail_on)
+            or best_r >= wave_trig_r
+            or (adopted and atr > 0 and abs(entry - cur_sl) > float(getattr(config, "PM_MAX_SL_ATR", 3.0)) * atr)
+        )
+
         # -- SL candidates (tighten only; the tightest wins) -------------------
         # v4.1: each rule proposes a stop; the tightest valid proposal wins.
         cands: List[Tuple[float, str, str]] = []      # (level, rule, reason)
-        if config.PM_TRAIL_ENABLE and s_sl * sign > cur_sl * sign + min_step:
+        if config.PM_TRAIL_ENABLE and allow_struct_tighten and s_sl * sign > cur_sl * sign + min_step:
             cands.append((s_sl, "ADOPT_TIGHTEN" if adopted else "TRAIL",
                           f"structural stop {s_sl:.2f} tighter than SL "
                           f"{cur_sl:.2f}"))
-        # C3 Wall Shelter + Early High-Water Trail + Quick +1.0pt Small-Fish BE:
-        # Proven across 1,179 shadow trades (t = -3.46) and flow_probe (93% >= +1.0pt in 6m).
+        # C3 Wall Shelter + High-Water Trail + Quick +1.0pt Small-Fish BE (A2 bursts)
+        # Stage 4b (2026-11-02, LeBeau/Elder Chandelier Exit, replay-11 [8c]):
+        # Wave trades (`not is_burst_pos`) trail at `1.50x ATR` starting at `+1.0R`
+        # (+257.5 pts / 68.3% WR vs +75.3 pts on old 0.5x ATR) and never choke at +$1.00.
         if bool(getattr(config, "PM_C3_WALL_TRAIL_ENABLED", True)):
-            if w_sl is not None and w_sl * sign > cur_sl * sign + min_step:
+            if allow_struct_tighten and w_sl is not None and w_sl * sign > cur_sl * sign + min_step:
                 cands.append((w_sl, "WALL_SHELTER",
                               f"C3 live BookMap wall shelter {w_sl:.2f} tighter than SL {cur_sl:.2f}"))
-            c3_trigger_r = float(getattr(config, "PM_C3_EARLY_TRAIL_R", 0.50) or 0.50)
-            c3_trail_atr = float(getattr(config, "PM_C3_TRAIL_ATR", 0.50) or 0.50)
-            if initial_r > 0 and (best_gain / initial_r) >= c3_trigger_r and atr > 0:
+            c3_trigger_r = (
+                wave_trig_r if wave_trail_on
+                else float(getattr(config, "PM_C3_EARLY_TRAIL_R", 0.50) or 0.50)
+            )
+            c3_trail_atr = (
+                wave_trail_atr if wave_trail_on
+                else float(getattr(config, "PM_C3_TRAIL_ATR", 0.50) or 0.50)
+            )
+            if initial_r > 0 and best_r >= c3_trigger_r and atr > 0:
                 c3_stop = entry + sign * best_gain - sign * (c3_trail_atr * atr)
                 if c3_stop * sign > cur_sl * sign + min_step:
-                    cands.append((c3_stop, "C3_EARLY_TRAIL",
-                                  f"C3 early trail (+{best_gain/initial_r:.2f}R >= {c3_trigger_r:.2f}R): "
+                    _tr_rule = "CHANDELIER_WAVE_TRAIL" if wave_trail_on else "C3_EARLY_TRAIL"
+                    cands.append((c3_stop, _tr_rule,
+                                  f"{_tr_rule} (+{best_r:.2f}R >= {c3_trigger_r:.2f}R): "
                                   f"HWM {best_gain:.2f}pts - {c3_trail_atr:.2f}xATR"))
-            quick_be_pts = float(getattr(config, "PM_BURST_QUICK_BE_PTS", 1.0) or 0.0)
-            if quick_be_pts > 0 and best_gain >= quick_be_pts:
-                q_be = entry + sign * max(0.05 * atr, spread, min_dist)
-                if q_be * sign > cur_sl * sign + min_step:
-                    cands.append((q_be, "QUICK_1PT_BE",
-                                  f"small-fish +{best_gain:.2f}pts (>= {quick_be_pts:.2f}pt) -> stop locked at break-even"))
+            if is_burst_pos or not wave_trail_on:
+                quick_be_pts = float(getattr(config, "PM_BURST_QUICK_BE_PTS", 1.0) or 0.0)
+                if quick_be_pts > 0 and best_gain >= quick_be_pts:
+                    q_be = entry + sign * max(0.05 * atr, spread, min_dist)
+                    if q_be * sign > cur_sl * sign + min_step:
+                        cands.append((q_be, "QUICK_1PT_BE",
+                                      f"small-fish +{best_gain:.2f}pts (>= {quick_be_pts:.2f}pt) -> stop locked at break-even"))
         # v4.1: a move that lacks CVD support protects its gains earlier
-        be_trigger = config.PM_BE_TRIGGER_R
+        be_trigger = (
+            max(float(getattr(config, "PM_WAVE_BE_TRIGGER_R", 1.0)), float(config.PM_BE_TRIGGER_R))
+            if wave_trail_on else config.PM_BE_TRIGGER_R
+        )
         if config.PM_FLOW_ENABLE and flow_weak:
-            be_trigger = min(be_trigger, config.PM_FLOW_WEAK_BE_R)
+            weak_r = (
+                float(getattr(config, "PM_WAVE_WEAK_BE_R", 0.75))
+                if wave_trail_on else float(config.PM_FLOW_WEAK_BE_R)
+            )
+            be_trigger = min(be_trigger, weak_r)
         be_level = entry + sign * max(0.1 * atr, spread, min_dist)
         if r_now >= be_trigger and be_level * sign > cur_sl * sign + min_step:
             be_reason = f"{r_now:+.2f}R reached — stop to break-even"
@@ -1368,6 +1402,7 @@ class PositionManager:
             cands.append((be_level, "BE", be_reason))
         # v4.1: trend day -> trail behind VWAP (institutions defend it)
         if (config.PM_VWAP_ENABLE and vwap_c > 0
+                and (not wave_trail_on or best_r >= wave_trig_r)
                 and z_fav >= config.PM_VWAP_TREND_Z
                 and z_fav < config.PM_VWAP_STRETCH_Z):
             vwap_trail = vwap_c - sign * config.PM_VWAP_TRAIL_BUFFER_ATR * atr
@@ -1376,8 +1411,9 @@ class PositionManager:
                               f"trend day: trailing behind VWAP {vwap_c:.2f} "
                               f"(institutions defend their average)"))
         # v4.1: stretched far beyond VWAP -> lock half the open gain
-        if config.PM_VWAP_ENABLE and vwap_c > 0 and \
-                z_fav >= config.PM_VWAP_STRETCH_Z:
+        if (config.PM_VWAP_ENABLE and vwap_c > 0
+                and (not wave_trail_on or best_r >= wave_trig_r)
+                and z_fav >= config.PM_VWAP_STRETCH_Z):
             lock = entry + sign * max(0.1 * atr, abs(mid - entry) * 0.5)
             if lock * sign > cur_sl * sign + min_step:
                 cands.append((lock, "VWAP_STRETCH",
@@ -1433,8 +1469,17 @@ class PositionManager:
                         adaptive_tags.append(f"LOW_VOL:{vol_rank:.2f}->{giveback*100:.0f}%")
                 except Exception as e:
                     logger.debug(f"L6 vol adaptive error: {e}")
-            if best_gain >= lock_min_atr * atr:
-                lock = entry + sign * best_gain * (1.0 - giveback)
+            # Stage 4b: On M3 waves, arm PROFIT_LOCK only once >= 1.0R is reached and never
+            # give back less breathing room than `wave_trail_atr * ATR` (prevents 0.30x ATR choke!).
+            arm_profit_lock = (
+                (best_r >= wave_trig_r and best_gain >= lock_min_atr * atr)
+                if wave_trail_on else (best_gain >= lock_min_atr * atr)
+            )
+            if arm_profit_lock:
+                gb_pts = best_gain * giveback
+                if wave_trail_on and atr > 0:
+                    gb_pts = max(gb_pts, wave_trail_atr * atr)
+                lock = entry + sign * max(0.1 * atr, best_gain - gb_pts)
                 if lock * sign > cur_sl * sign + min_step:
                     extra = f" ({', '.join(adaptive_tags)})" if adaptive_tags else ""
                     base_gb = float(getattr(config, "PM_PROFIT_GIVEBACK", 0.5))
@@ -1461,8 +1506,23 @@ class PositionManager:
         # -- TP candidate (front-run fresh opposing wall or structure) --
         tp_candidate = cur_tp
         tp_reason = ""
+        allow_wall_tp_cap = True
+        if wave_trail_on:
+            # Stage 4b: Never pull a multi-ATR wave TP down to a routine 10-15 lot quote!
+            # Only cap an open wave TP when a major institutional wall (>= 40 lots) forms ahead.
+            maj_tp_lots = float(getattr(config, "PM_WAVE_MAJOR_WALL_TP_LOTS", 40.0) or 40.0)
+            smap_pm = getattr(snapshot, "signal_map", None) or {}
+            opp_doors = smap_pm.get("above" if is_buy else "below") if isinstance(smap_pm, dict) else []
+            has_major_opp = any(
+                isinstance(d, dict)
+                and float(d.get("size") or 0.0) >= maj_tp_lots
+                and ((float(d.get("price") or 0.0) > price) if is_buy else (0.0 < float(d.get("price") or 0.0) < price))
+                for d in (opp_doors or [])
+            )
+            allow_wall_tp_cap = bool(has_major_opp and initial_r > 0 and w_tp is not None and abs(w_tp - entry) >= initial_r)
         if (
             bool(getattr(config, "PM_C3_WALL_TRAIL_ENABLED", True))
+            and allow_wall_tp_cap
             and w_tp is not None
             and w_tp > 0
             and ((w_tp * sign < cur_tp * sign) if cur_tp > 0 else True)
@@ -1470,7 +1530,7 @@ class PositionManager:
         ):
             tp_candidate = w_tp
             tp_reason = f"C3 TP front-runs fresh opposing BookMap wall ({w_tp:.2f})"
-        elif s_tp > 0:
+        elif s_tp > 0 and (not wave_trail_on or (initial_r > 0 and abs(s_tp - entry) >= 1.2 * initial_r)):
             closer = (s_tp * sign < cur_tp * sign) if cur_tp > 0 else True
             further = (s_tp * sign > cur_tp * sign) and st.get("be_done", False)
             big_enough = cur_tp <= 0 or abs(s_tp - cur_tp) >= 0.2 * atr

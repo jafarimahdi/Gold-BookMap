@@ -1240,3 +1240,23 @@ The committed `4f71043` follow-up supersedes the three audit-tool findings above
   1. **Structural Stop Bounds (`SHOOT_MIN_SL_ATR=1.5`, `SHOOT_MAX_SL_ATR=2.5`, `wall_brackets` `>=1.2x ATR`):** Rejects sub-ATR near-touch quotes behind entry (`ATR_FALLBACK = 2.0x ATR`), protecting `M3` `SHAKE->W` dips.
   2. **Viable Door Scan + Wave Horizon (`STAGE4A_WAVE_BRACKET_ENABLED=True`, `SHOOT_WAVE_TP_ATR_MULT=3.5`, `SHOOT_MAJOR_WALL_BLOCK_LOTS=40.0`, *Frey & Sandås 2017; Dalton 2013*):** Scans past routine `<40`-lot pebbles to (a) viable further Scout doors, (b) structural `memory_doors` (`POC/VA/HTF_POC/OB`), or (c) `3.5x ATR` wave target on verified Sniper waves — failing closed (`WAIT`) with preserved reason whenever a `>=40`-lot wall or active `iceberg` blocks `< min_rr * risk`, and syncing `step4_mt5_execution.py` CFD scaling.
   3. **Bookmark `#8` (`A2_BURST_ATR_FLOOR_MULT=1.0`) + `[8c]` Stage 4 Exit Ruler Scorecard (`tools/raw_replay.py`):** Upgrades `A2` sprint brackets to `max(1.80, 1.0xATR)` and adds `[8c]` scoring Planned Shot vs `1.5x/1.0x ATR` Chandelier Trails (`@1R`) & `0.5x ATR` `C3` ahead of **Stage 4b (`PositionManager` / `Escort` trailing calibration)**.
+
+---
+
+## Check-in stamp — `2026-11-02 11:05 CET` `current_version_replay-11.txt` Flips Executed `SHOOTING GO` Brackets `-18.7 -> +278.9 pts` (`66.7%` WR, `N=63`) + Bookmark `#8` `+12.0 pts`, & `Stage 4b` Chandelier Wave Trails Installed (`nov02_stage4b_wave_chandelier_trails.patch`)
+
+- **5-Day Stage 4a Entry-Bracket Replay Receipt (`current_version_replay-11.txt`, `2026-10-26..30`, `3,233` cycles, Commit `4fef99c`):**
+  - **Executed `SHOOTING GO` Breakthrough (`replay-10` -> `replay-11`):**
+    - Count: `27 -> 63` (`+133%` more executed Sniper trades; `ATR_WAVE_TARGET=54`, `MAJOR_WALL_CAP=9`, `Avg SL=7.53 pts`, `Avg TP=12.24 pts`, `Avg R:R=1.68`).
+    - Executed Planned Shot Bracket (`shot["stop"]` & `shot["target"]`): **`-18.7 pts` (`9/18 = 33.3%` WR, `-$0.69/go`) -> `+278.9 pts` (`42W/21L = 66.7%` WR, `27 TP / 15 SL = 64.3%` pure TP/SL, `+$4.43/go`) — `+297.6 pt` net swing!**
+    - Bookmark `#8` (`[8]`, `N=114`, `Shooting GO=105`): **`Fixed 1.80/1.80 = -23.5 pts` vs `max(1.80, 1.0xATR) = +12.0 pts`** (`+35.5 pt` swing into positive territory).
+  - **`[8c]` Stage 4 Exit Ruler Empirical Proof (`N=63` Executed `SHOOTING GO` Brackets):**
+    - `Stage-4a Planned Shot (Pure SL/TP)`: `42/21` (`66.7%` WR), **`+278.9 pts` (`+$4.43/go`)**
+    - `Stage-4b Chandelier 1.5xATR Trail@1R`: **`43/20` (`68.3%` WR), `+257.5 pts` (`+$4.09/go`)** *(cuts losses `21 -> 20` while keeping `92.3%` of full wave profit!)*
+    - `Stage-4b Tight 1.0xATR Trail@1R`: `43/20` (`68.3%` WR), `+157.1 pts` (`+$2.49/go`)
+    - `Legacy PM C3 (0.5xATR Trail@0.5R)`: `51/12` (`81.0%` WR), **`+75.3 pts` (`+$1.20/go`)** *(chokes `-203.6 pts` = `73%` of wave profit!)*
+- **Owner Decision `Stage 4b` (`Option 1: stage4b_pure_trails` — Pure `PositionManager` + `Escort` Chandelier Wave Trails, Strictly Isolated Before `Stage 4c`):**
+  1. **`position_manager.py` (`STAGE4B_WAVE_TRAIL_ENABLED=True`):** Scopes `$1.00` `QUICK_1PT_BE`, `0.5x ATR @ 0.5R` `C3_EARLY_TRAIL`, `<1.0R` shelter/VWAP tightening, and `<40`-lot `w_tp` front-running strictly to `is_a2_burst` sprint positions (`test_oct29_evening_fixes.py` preserved); upgrades `M3` wave positions (`not is_burst_pos`) to **`PM_WAVE_BE_TRIGGER_R=1.0`** (`0.75R` weak-flow BE), **`CHANDELIER_WAVE_TRAIL` (`PM_WAVE_TRAIL_ATR=1.50` @ `PM_WAVE_TRAIL_TRIGGER_R=1.0`, *LeBeau 1999; Elder 2002*)**, `>=1.5x ATR` `PROFIT_LOCK` giveback floor, and `>=40`-lot (`PM_WAVE_MAJOR_WALL_TP_LOTS=40.0`) institutional-wall `TP` caps.
+  2. **`escort_team.py`:** Preserves `ATR_WAVE_TARGET`/`STRUCTURAL_MEMORY_DOOR` targets in `_job1_exit_clear` when price sweeps past a front pebble (`same is None`) or sees `<40`-lot quotes, guards `_job4_move_stop` (`>=1.0R` and `>=1.2x ATR` shelter distance), and syncs `_profit_lock` on non-burst wave trades to `ESCORT_WAVE_LOCK_GIVEBACK_ATR=1.50` @ `1.0R` (`test_v8_updates.py` custom namespace preserved).
+  3. **`tools/raw_replay.py`:** Adds `be_floor_atr` to `_walk_bracket`, syncs `[1]`/`[2]`/`[8b]` (`PM_TRAIL` / `PM_1.5A` / `PM4B`) to active Stage-4b `PositionManager` wave trailing, and displays all `7` exit rulers side-by-side in `[8c]`.
+  - **Next (`Stage 4c` After `replay-12`):** Evaluate `<40`-lot non-iceberg `biggest_in_path` corridor scan (`~75` remaining `R:R<1.20` Sniper waves earning `+539.2 FIX_PTS` at `69.4%` WR) + 5-day 1-open-position portfolio simulation (cooldown, DD, profit factor).

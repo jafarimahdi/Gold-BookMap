@@ -607,6 +607,7 @@ def _walk_bracket(
     trail_atr: float = 0.0,
     trail_dist_mult: float = 0.0,
     trail_trigger_r: float = 0.5,
+    be_floor_atr: float = 0.0,
 ) -> Tuple[str, float]:
     """Walk forward strictly after entry minute (`m > entry_min`). Conservative SL-first."""
     entry_min = int(entry_ep // 60) * 60
@@ -635,6 +636,8 @@ def _walk_bracket(
                 hwm = hi
             if trail_atr > 0 and trail_dist_mult > 0 and init_risk > 0 and (hwm - entry_px) >= trail_trigger_r * init_risk:
                 cand_sl = hwm - trail_dist_mult * trail_atr
+                if be_floor_atr > 0:
+                    cand_sl = max(cand_sl, entry_px + max(be_floor_atr * trail_atr, spread_cost))
                 if cand_sl > cur_sl:
                     cur_sl = cand_sl
         else:
@@ -646,6 +649,8 @@ def _walk_bracket(
                 hwm = lo
             if trail_atr > 0 and trail_dist_mult > 0 and init_risk > 0 and (entry_px - hwm) >= trail_trigger_r * init_risk:
                 cand_sl = hwm + trail_dist_mult * trail_atr
+                if be_floor_atr > 0:
+                    cand_sl = min(cand_sl, entry_px - max(be_floor_atr * trail_atr, spread_cost))
                 if cand_sl < cur_sl:
                     cur_sl = cand_sl
 
@@ -1930,6 +1935,7 @@ def replay_single_day(
                 shot_sl_dist = shot_tp_dist = None
                 shot_tp_src = ""
                 shot_s15_out, shot_s15_pts = "NO_SIGNAL", None
+                shot_pm4b_out, shot_pm4b_pts = "NO_SIGNAL", None
                 shot_ch15_out, shot_ch15_pts = "NO_SIGNAL", None
                 shot_ch10_out, shot_ch10_pts = "NO_SIGNAL", None
                 shot_c3p_out, shot_c3p_pts = "NO_SIGNAL", None
@@ -1956,19 +1962,30 @@ def replay_single_day(
                         bar_keys, walk_bars, tc_ep, sig_dir, px, sl_fix, tp_fix, max_hold_min, spread_cost
                     )
 
-                    # 2) Current C3 Wall + 0.5xATR Trail vs 1.0xATR Trail
+                    # 2) Active Stage-4b PositionManager Wave Trail (1.5xATR + BE@1R) vs 1.0xATR Trail
+                    _s4b_on = bool(getattr(config, "STAGE4B_WAVE_TRAIL_ENABLED", True))
+                    _pm_tr_atr = float(getattr(config, "PM_WAVE_TRAIL_ATR", 1.50) if _s4b_on else 0.50)
+                    _pm_tr_r = float(getattr(config, "PM_WAVE_TRAIL_TRIGGER_R", 1.0) if _s4b_on else 0.50)
+                    _pm_be_flr = 0.10 if _s4b_on else 0.0
                     w_sl, w_tp, _ = sr.compute_wall_brackets(sig_dir, px, atr_live, snap)
                     use_sl = w_sl if w_sl is not None else ((px - sl_mult * atr_live) if is_b else (px + sl_mult * atr_live))
                     use_tp = w_tp if w_tp is not None else ((px + tp_mult * atr_live) if is_b else (px - tp_mult * atr_live))
-                    vg_ok, _ = sr.value_gate(sig_dir, px, use_sl, use_tp, atr_live, config)
+                    if shot_act == "GO" and float(shot.get("stop") or 0.0) > 0 and float(shot.get("target") or 0.0) > 0:
+                        use_sl = float(shot["stop"])
+                        use_tp = float(shot["target"])
+                        vg_ok = True
+                    else:
+                        vg_ok, _ = sr.value_gate(sig_dir, px, use_sl, use_tp, atr_live, config)
                     if vg_ok:
                         c3_out, c3_pts = _walk_bracket(
                             bar_keys, walk_bars, tc_ep, sig_dir, px, use_sl, use_tp,
-                            max_hold_min, spread_cost, trail_atr=atr_live, trail_dist_mult=0.5,
+                            max_hold_min, spread_cost, trail_atr=atr_live,
+                            trail_dist_mult=_pm_tr_atr, trail_trigger_r=_pm_tr_r, be_floor_atr=_pm_be_flr,
                         )
                         tr10_out, tr10_pts = _walk_bracket(
                             bar_keys, walk_bars, tc_ep, sig_dir, px, use_sl, use_tp,
-                            max_hold_min, spread_cost, trail_atr=atr_live, trail_dist_mult=1.0,
+                            max_hold_min, spread_cost, trail_atr=atr_live,
+                            trail_dist_mult=1.0, trail_trigger_r=_pm_tr_r, be_floor_atr=_pm_be_flr,
                         )
                     else:
                         c3_out, c3_pts = "VG_SKIP", 0.0
@@ -2003,6 +2020,11 @@ def replay_single_day(
                                 shot_br_out, shot_br_pts = _walk_bracket(
                                     bar_keys, walk_bars, tc_ep, sig_dir, px,
                                     sh_sl, sh_tp, max_hold_min, spread_cost,
+                                )
+                                shot_pm4b_out, shot_pm4b_pts = _walk_bracket(
+                                    bar_keys, walk_bars, tc_ep, sig_dir, px,
+                                    sh_sl, sh_tp, max_hold_min, spread_cost,
+                                    trail_atr=atr_live, trail_dist_mult=1.5, trail_trigger_r=1.0, be_floor_atr=0.10,
                                 )
                                 shot_ch15_out, shot_ch15_pts = _walk_bracket(
                                     bar_keys, walk_bars, tc_ep, sig_dir, px,
@@ -2073,6 +2095,7 @@ def replay_single_day(
                     "shot_sl_dist": shot_sl_dist, "shot_tp_dist": shot_tp_dist,
                     "shot_tp_src": shot_tp_src,
                     "shot_s15_out": shot_s15_out, "shot_s15_pts": shot_s15_pts,
+                    "shot_pm4b_out": shot_pm4b_out, "shot_pm4b_pts": shot_pm4b_pts,
                     "shot_ch15_out": shot_ch15_out, "shot_ch15_pts": shot_ch15_pts,
                     "shot_ch10_out": shot_ch10_out, "shot_ch10_pts": shot_ch10_pts,
                     "shot_c3p_out": shot_c3p_out, "shot_c3p_pts": shot_c3p_pts,
@@ -2446,7 +2469,7 @@ def synthesize_multi_day(results: List[Dict[str, Any]]) -> Tuple[str, str, Dict[
     lines.append("=" * 108)
 
     lines.append("\n[1] DAY-BY-DAY RAW REPLAY RECEIPT")
-    lines.append(f"  {'DATE':<12} {'TYPE':<11} {'PRINTS':>8} {'MBO_EV':>9} {'RANGE':>6} {'NET':>7} {'CYC':>5} {'SIG>=' + str(int(conf_thr)):>8} {'FIX_PTS(>=' + str(int(conf_thr)) + ')':>14} {'C3_TRAIL':>10} {'SEC':>5}")
+    lines.append(f"  {'DATE':<12} {'TYPE':<11} {'PRINTS':>8} {'MBO_EV':>9} {'RANGE':>6} {'NET':>7} {'CYC':>5} {'SIG>=' + str(int(conf_thr)):>8} {'FIX_PTS(>=' + str(int(conf_thr)) + ')':>14} {'PM_TRAIL':>10} {'SEC':>5}")
     lines.append("  " + "-" * 96)
     for r in ok_days:
         c35_rows = [c for c in r["cycles"] if not c.get("error") and c["direction"] in ("BUY", "SELL") and c["confidence"] >= conf_thr and c["fix_out"] in ("TP", "SL", "TIMEOUT", "TRAIL")]
@@ -2462,7 +2485,7 @@ def synthesize_multi_day(results: List[Dict[str, Any]]) -> Tuple[str, str, Dict[
 
     def _fmt_bucket_table(title: str, mapping: Dict[Any, Dict[str, Any]], key_order: Optional[Sequence[Any]] = None) -> None:
         lines.append(f"\n{title}")
-        lines.append(f"  {'BUCKET':<42} {'N':>5} {'TP/SL':>9} {'WR%':>6} {b4_col_hdr:>6} {'FIX_PTS':>9} {'PTS/SIG':>8} {'C3_0.5A':>9} {'TR_1.0A':>9}")
+        lines.append(f"  {'BUCKET':<42} {'N':>5} {'TP/SL':>9} {'WR%':>6} {b4_col_hdr:>6} {'FIX_PTS':>9} {'PTS/SIG':>8} {'PM_1.5A':>9} {'TR_1.0A':>9}")
         lines.append("  " + "-" * 108)
         keys = key_order if key_order is not None else [k for k, _ in sorted(mapping.items(), key=lambda kv: -kv[1]["n"])]
         for k in keys:
@@ -2598,7 +2621,7 @@ def synthesize_multi_day(results: List[Dict[str, Any]]) -> Tuple[str, str, Dict[
         lines.append(
             f"  SHOOTING GO: N={len(go_cycles)} | Scout Door Bracket: TP/SL={go_tp}/{go_sl} ({go_wr:.1f}% WR), "
             f"PTS={sum(go_br):+.1f} ({(sum(go_br)/max(len(go_br),1)):+.2f}/go), Avg R:R={avg_rr:.2f} | "
-            f"FIX={go_fix:+.1f} | C3={go_c3:+.1f} | TR1.0={go_tr:+.1f}"
+            f"FIX={go_fix:+.1f} | PM4B={go_c3:+.1f} | TR1.0={go_tr:+.1f}"
         )
     else:
         lines.append("  SHOOTING GO: N=0")
@@ -2623,9 +2646,10 @@ def synthesize_multi_day(results: List[Dict[str, Any]]) -> Tuple[str, str, Dict[
         lines.append("  " + "-" * 90)
         ruler_defs = [
             ("Stage-4a Planned Shot (Pure SL/TP)", "shot_br_out", "shot_br_pts"),
+            ("Stage-4b Live PM: 1.5xATR Trail + BE@1R", "shot_pm4b_out", "shot_pm4b_pts"),
             ("Stage-4b Preview: Planned + 1.5xATR Trail@1R", "shot_ch15_out", "shot_ch15_pts"),
             ("Stage-4b Preview: Planned + 1.0xATR Trail@1R", "shot_ch10_out", "shot_ch10_pts"),
-            ("Current PM C3: Planned + 0.5xATR Trail@0.5R", "shot_c3p_out", "shot_c3p_pts"),
+            ("Legacy PM C3 (Retired): 0.5xATR Trail@0.5R", "shot_c3p_out", "shot_c3p_pts"),
             ("Benchmark: 2.0x SL / 3.5x TP Fixed Wave", "fix_out", "fix_pts"),
             ("Benchmark: 1.5x SL / 3.0x TP Live ATR", "shot_s15_out", "shot_s15_pts"),
         ]
