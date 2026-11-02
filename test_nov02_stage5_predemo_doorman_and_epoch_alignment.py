@@ -432,7 +432,8 @@ def test_stage_s1_a1_refresh_scout_uses_active_m3_candles_tf_for_atr_and_keeps_m
             order_book_imbalance=-0.2,
             ofi=-10.0,
         )
-        smap0 = book.ingest(l3_seed, 4000.0, 5.0, config, spread=0.20)
+        t_bell = datetime(2026, 11, 3, 10, 3, 2, tzinfo=timezone.utc)
+        smap0 = book.ingest(l3_seed, 4000.0, 5.0, config, spread=0.20, now=t_bell)
         assert any(abs(d["price"] - 4016.0) < 1e-6 for d in smap0["above"])
 
         # Intra-bar A1 serve: `candles` are tight M1 bars (range=1.50), `candles_tf` are M3 bars (range=5.00)

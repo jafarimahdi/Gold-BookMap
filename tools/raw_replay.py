@@ -2203,6 +2203,68 @@ def replay_single_day(
 
                 dq = md.get("data_quality") or {}
                 l2d = md.get("l2_diagnostics") or {}
+                spread_cur = (
+                    round(float(md.get("ask") or 0.0) - float(md.get("bid") or 0.0), 2)
+                    if (md.get("ask") and md.get("bid")) else None
+                )
+                is_a1_serve = any(
+                    "A1 bar-service:" in str(nt) for nt in (getattr(snap, "notes", None) or [])
+                )
+                smap_cur = getattr(snap, "signal_map", None) or {}
+                sc_ba = smap_cur.get("best_above") if isinstance(smap_cur, dict) else None
+                sc_bb = smap_cur.get("best_below") if isinstance(smap_cur, dict) else None
+                touch_tol = max(0.30, float(spread_cur or 0.30))
+                hold_tol = 0.5 * max(atr_live, 1.0)
+
+                ba_reached = None
+                ba_held = None
+                if isinstance(sc_ba, dict) and sc_ba.get("price") and hi4b is not None and pb4 is not None:
+                    _ba_px = float(sc_ba["price"])
+                    if _ba_px > px:
+                        ba_reached = bool(hi4b >= _ba_px - touch_tol)
+                        if ba_reached:
+                            ba_held = bool(pb4 < _ba_px and (hi4b - _ba_px) <= hold_tol)
+
+                bb_reached = None
+                bb_held = None
+                if isinstance(sc_bb, dict) and sc_bb.get("price") and lo4b is not None and pb4 is not None:
+                    _bb_px = float(sc_bb["price"])
+                    if _bb_px < px:
+                        bb_reached = bool(lo4b <= _bb_px + touch_tol)
+                        if bb_reached:
+                            bb_held = bool(pb4 > _bb_px and (_bb_px - lo4b) <= hold_tol)
+
+                dir_door = sc_ba if sig_dir == "BUY" else (sc_bb if sig_dir == "SELL" else None)
+                scout_diag = {
+                    "is_serve": bool(is_a1_serve),
+                    "atr": round(float(smap_cur.get("atr") or 0.0), 3) if isinstance(smap_cur, dict) else 0.0,
+                    "n_live": int(smap_cur.get("n") or 0) if isinstance(smap_cur, dict) else 0,
+                    "tracked": int(smap_cur.get("tracked") or 0) if isinstance(smap_cur, dict) else 0,
+                    "n_mem": len(smap_cur.get("memory_doors") or []) if isinstance(smap_cur, dict) else 0,
+                    "too_close": int(smap_cur.get("too_close") or 0) if isinstance(smap_cur, dict) else 0,
+                    "banned_spoof": int(smap_cur.get("banned_spoof") or 0) if isinstance(smap_cur, dict) else 0,
+                    "has_iceberg": bool("iceberg" in (smap_cur.get("tracked_sources") or []))
+                    if isinstance(smap_cur, dict) else False,
+                    "vac_state": str(((smap_cur.get("road_vacuum") or {}).get("state") or "unknown"))
+                    if isinstance(smap_cur, dict) else "unknown",
+                    "ba_attr": float(sc_ba.get("attraction") or 0.0) if isinstance(sc_ba, dict) else None,
+                    "ba_res": float(sc_ba.get("resistance") or 0.0) if isinstance(sc_ba, dict) else None,
+                    "ba_burn": str(sc_ba.get("burn_word") or "solid") if isinstance(sc_ba, dict) else None,
+                    "ba_atk": int(sc_ba.get("attacked") or 0) if isinstance(sc_ba, dict) else 0,
+                    "ba_reached": ba_reached,
+                    "ba_held": ba_held,
+                    "bb_attr": float(sc_bb.get("attraction") or 0.0) if isinstance(sc_bb, dict) else None,
+                    "bb_res": float(sc_bb.get("resistance") or 0.0) if isinstance(sc_bb, dict) else None,
+                    "bb_burn": str(sc_bb.get("burn_word") or "solid") if isinstance(sc_bb, dict) else None,
+                    "bb_atk": int(sc_bb.get("attacked") or 0) if isinstance(sc_bb, dict) else 0,
+                    "bb_reached": bb_reached,
+                    "bb_held": bb_held,
+                    "dir_has_door": bool(isinstance(dir_door, dict)),
+                    "dir_rc": bool(dir_door.get("road_clear")) if isinstance(dir_door, dict) else None,
+                    "dir_ice_path": bool(dir_door.get("iceberg_in_path")) if isinstance(dir_door, dict) else False,
+                    "dir_burn": str(dir_door.get("burn_word") or "solid") if isinstance(dir_door, dict) else None,
+                    "dir_atk": int(dir_door.get("attacked") or 0) if isinstance(dir_door, dict) else 0,
+                }
                 cycles_out.append({
                     "entry_ep": tc_ep,
                     "dt_utc": tc_dt,
@@ -2211,8 +2273,7 @@ def replay_single_day(
                     "price": px,
                     "bid": float(md.get("bid") or 0.0),
                     "ask": float(md.get("ask") or 0.0),
-                    "spread_pts": round(float(md.get("ask") or 0.0) - float(md.get("bid") or 0.0), 2)
-                    if (md.get("ask") and md.get("bid")) else None,
+                    "spread_pts": spread_cur,
                     "l2_status": str(dq.get("level2") or "?"),
                     "depth_levels": f"{l2d.get('fresh_bid_levels', 0)}/{l2d.get('fresh_ask_levels', 0)}",
                     "mbo_window": len(md.get("order_events") or []),
@@ -2255,6 +2316,7 @@ def replay_single_day(
                     "shot_ch10_out": shot_ch10_out, "shot_ch10_pts": shot_ch10_pts,
                     "shot_c3p_out": shot_c3p_out, "shot_c3p_pts": shot_c3p_pts,
                     "a2_fix_pts": a2_fix_pts, "a2_atr_pts": a2_atr_pts,
+                    "scout": scout_diag,
                 })
                 tc_ep += every_s
         finally:
@@ -2890,6 +2952,156 @@ def synthesize_multi_day(results: List[Dict[str, Any]]) -> Tuple[str, str, Dict[
                 )
     else:
         lines.append("  0 SHOOTING GO cycles available for portfolio simulation.")
+
+    # [8e] Scout Team Raw-Data Scorecard (Doors, Magnet Reach, Wall Hold & Corridor Truth)
+    sc_cycles = [
+        c for r in ok_days for c in r["cycles"]
+        if not c.get("error") and isinstance(c.get("scout"), dict)
+    ]
+    lines.append(
+        f"\n[8e] SCOUT TEAM RAW-DATA SCORECARD (+{h4}m = 4x {tf_lbl} FORWARD TAPE, N={len(sc_cycles):,} CYCLES)"
+    )
+    if sc_cycles:
+        bell_sc = [c for c in sc_cycles if not c["scout"].get("is_serve")]
+        serv_sc = [c for c in sc_cycles if c["scout"].get("is_serve")]
+        bell_atr = (sum(c["scout"]["atr"] for c in bell_sc) / len(bell_sc)) if bell_sc else 0.0
+        serv_atr = (sum(c["scout"]["atr"] for c in serv_sc) / len(serv_sc)) if serv_sc else 0.0
+        has_live_pct = 100.0 * sum(1 for c in sc_cycles if c["scout"]["n_live"] > 0) / len(sc_cycles)
+        avg_live = sum(c["scout"]["n_live"] for c in sc_cycles) / len(sc_cycles)
+        avg_trk = sum(c["scout"]["tracked"] for c in sc_cycles) / len(sc_cycles)
+        avg_mem = sum(c["scout"]["n_mem"] for c in sc_cycles) / len(sc_cycles)
+        avg_tc = sum(c["scout"]["too_close"] for c in sc_cycles) / len(sc_cycles)
+        lines.append(
+            f"  1) Stage-S1 Parity & Coverage: Bell(:00)={len(bell_sc):,} (ATR={bell_atr:.2f}) | "
+            f"Serve(:01/:02)={len(serv_sc):,} (ATR={serv_atr:.2f}) | "
+            f"Cycles w/ Live Door={has_live_pct:.1f}% | Avg Live={avg_live:.1f}, Tracked={avg_trk:.1f}, "
+            f"Memory={avg_mem:.1f}, TooClose={avg_tc:.1f}"
+        )
+        b_sp = sum(1 for c in bell_sc if c["scout"].get("banned_spoof", 0) > 0)
+        b_ic = sum(1 for c in bell_sc if c["scout"].get("has_iceberg"))
+        s_sp = sum(1 for c in serv_sc if c["scout"].get("banned_spoof", 0) > 0)
+        s_ic = sum(1 for c in serv_sc if c["scout"].get("has_iceberg"))
+        lines.append(
+            f"     Creator L3 Handoff (Step-S2b Check): Bell(:00) spoof_cyc={b_sp}, iceberg_cyc={b_ic} | "
+            f"Serve(:01/:02) spoof_cyc={s_sp}, iceberg_cyc={s_ic}"
+        )
+
+        # 2) Magnet Reach & Wall Hold Physics on +{h4}m forward tape
+        def _door_stats(side_prefix: str):
+            eval_c = [c for c in sc_cycles if c["scout"].get(f"{side_prefix}_reached") is not None]
+            rch_c = [c for c in eval_c if c["scout"].get(f"{side_prefix}_reached") is True]
+            hld_c = [c for c in rch_c if c["scout"].get(f"{side_prefix}_held") is True]
+            hi_at = [c for c in eval_c if (c["scout"].get(f"{side_prefix}_attr") or 0.0) >= 0.55]
+            lo_at = [c for c in eval_c if (c["scout"].get(f"{side_prefix}_attr") or 0.0) < 0.55]
+            hi_rs = [c for c in rch_c if (c["scout"].get(f"{side_prefix}_res") or 0.0) >= 0.55]
+            lo_rs = [c for c in rch_c if (c["scout"].get(f"{side_prefix}_res") or 0.0) < 0.55]
+            return eval_c, rch_c, hld_c, hi_at, lo_at, hi_rs, lo_rs
+
+        ba_ev, ba_rc, ba_hl, ba_ha, ba_la, ba_hr, ba_lr = _door_stats("ba")
+        bb_ev, bb_rc, bb_hl, bb_ha, bb_la, bb_hr, bb_lr = _door_stats("bb")
+        tot_ev = len(ba_ev) + len(bb_ev)
+        tot_rc = len(ba_rc) + len(bb_rc)
+        tot_hl = len(ba_hl) + len(bb_hl)
+        hi_at_all = ba_ha + bb_ha
+        lo_at_all = ba_la + bb_la
+        hi_rs_all = ba_hr + bb_hr
+        lo_rs_all = ba_lr + bb_lr
+        hi_at_rch = sum(
+            1 for c in ba_ha if c["scout"].get("ba_reached")
+        ) + sum(1 for c in bb_ha if c["scout"].get("bb_reached"))
+        lo_at_rch = sum(
+            1 for c in ba_la if c["scout"].get("ba_reached")
+        ) + sum(1 for c in bb_la if c["scout"].get("bb_reached"))
+        hi_rs_hld = sum(
+            1 for c in ba_hr if c["scout"].get("ba_held")
+        ) + sum(1 for c in bb_hr if c["scout"].get("bb_held"))
+        lo_rs_hld = sum(
+            1 for c in ba_lr if c["scout"].get("ba_held")
+        ) + sum(1 for c in bb_lr if c["scout"].get("bb_held"))
+
+        ba_r_pct = (100.0 * len(ba_rc) / len(ba_ev)) if ba_ev else 0.0
+        ba_h_pct = (100.0 * len(ba_hl) / len(ba_rc)) if ba_rc else 0.0
+        bb_r_pct = (100.0 * len(bb_rc) / len(bb_ev)) if bb_ev else 0.0
+        bb_h_pct = (100.0 * len(bb_hl) / len(bb_rc)) if bb_rc else 0.0
+        ha_pct = (100.0 * hi_at_rch / len(hi_at_all)) if hi_at_all else 0.0
+        la_pct = (100.0 * lo_at_rch / len(lo_at_all)) if lo_at_all else 0.0
+        hr_pct = (100.0 * hi_rs_hld / len(hi_rs_all)) if hi_rs_all else 0.0
+        lr_pct = (100.0 * lo_rs_hld / len(lo_rs_all)) if lo_rs_all else 0.0
+        lines.append(
+            f"  2) Door Reach & Hold (+{h4}m): Ceiling N={len(ba_ev):,} -> Reached {len(ba_rc):,} ({ba_r_pct:.1f}%), "
+            f"Held {len(ba_hl):,}/{len(ba_rc):,} ({ba_h_pct:.1f}%) | "
+            f"Floor N={len(bb_ev):,} -> Reached {len(bb_rc):,} ({bb_r_pct:.1f}%), "
+            f"Held {len(bb_hl):,}/{len(bb_rc):,} ({bb_h_pct:.1f}%)"
+        )
+        if tot_ev:
+            lines.append(
+                f"     Score Calibration: Attraction>=0.55 Reach={ha_pct:.1f}% (N={len(hi_at_all):,}) vs "
+                f"<0.55 Reach={la_pct:.1f}% (N={len(lo_at_all):,}) | "
+                f"Resistance>=0.55 Hold={hr_pct:.1f}% (N={len(hi_rs_all):,}) vs "
+                f"<0.55 Hold={lr_pct:.1f}% (N={len(lo_rs_all):,})"
+            )
+
+        # 3) Corridor (road_clear), Burn-Word (Step S2a) & Attack Count (Step S2c) on Actionable Signals
+        def _s4_last(cyc: Dict[str, Any]) -> Optional[float]:
+            s4_v = cyc.get("signed_4b")
+            if isinstance(s4_v, (list, tuple)) and len(s4_v) >= 4 and s4_v[3] is not None:
+                return float(s4_v[3])
+            if isinstance(s4_v, (int, float)):
+                return float(s4_v)
+            return None
+
+        act_sc = [
+            c for c in sc_cycles
+            if c.get("direction") in ("BUY", "SELL") and float(c.get("confidence") or 0.0) >= conf_thr
+            and _s4_last(c) is not None
+        ]
+        rc_yes = [c for c in act_sc if c["scout"].get("dir_has_door") and c["scout"].get("dir_rc") is True]
+        rc_no = [c for c in act_sc if c["scout"].get("dir_has_door") and c["scout"].get("dir_rc") is False]
+        rc_ice = sum(1 for c in rc_no if c["scout"].get("dir_ice_path"))
+        rc_y_avg = (sum(_s4_last(c) or 0.0 for c in rc_yes) / len(rc_yes)) if rc_yes else 0.0
+        rc_n_avg = (sum(_s4_last(c) or 0.0 for c in rc_no) / len(rc_no)) if rc_no else 0.0
+        rc_y_wr = (100.0 * sum(1 for c in rc_yes if (_s4_last(c) or 0.0) > 0) / len(rc_yes)) if rc_yes else 0.0
+        rc_n_wr = (100.0 * sum(1 for c in rc_no if (_s4_last(c) or 0.0) > 0) / len(rc_no)) if rc_no else 0.0
+        lines.append(
+            f"  3) Actionable Signal Corridors (Conf>={conf_thr:.0f}%, N={len(act_sc)}): "
+            f"road_clear=True N={len(rc_yes)} ({rc_y_wr:.1f}% +{h4}m WR, {rc_y_avg:+.2f} pts/sig) | "
+            f"road_clear=False N={len(rc_no)} [iceberg_path={rc_ice}] ({rc_n_wr:.1f}% +{h4}m WR, {rc_n_avg:+.2f} pts/sig)"
+        )
+
+        burn_counts: Dict[str, int] = defaultdict(int)
+        atk_vals: List[int] = []
+        for c in sc_cycles:
+            for pfx in ("ba", "bb"):
+                bw = c["scout"].get(f"{pfx}_burn")
+                if bw:
+                    burn_counts[bw] += 1
+                    atk_vals.append(int(c["scout"].get(f"{pfx}_atk") or 0))
+        avg_atk = (sum(atk_vals) / len(atk_vals)) if atk_vals else 0.0
+        max_atk = max(atk_vals) if atk_vals else 0
+        lines.append(
+            f"     Burn-Rate & Attack Health (Step-S2a/S2c Check): "
+            f"solid={burn_counts['solid']:,} | eroding={burn_counts['eroding']:,} | "
+            f"melting={burn_counts['melting']:,} | melting-fast={burn_counts['melting-fast']:,} | "
+            f"Door attacked avg={avg_atk:.2f}, max={max_atk}"
+        )
+
+        # 4) road_vacuum corridor liquidity expansion check
+        vac_disp: Dict[str, List[float]] = defaultdict(list)
+        for c in sc_cycles:
+            if c.get("pb4") is not None and c.get("price"):
+                vac_disp[str(c["scout"].get("vac_state") or "unknown")].append(
+                    abs(float(c["pb4"]) - float(c["price"]))
+                )
+        vac_parts = []
+        for vk in ("EMPTYING", "steady", "FILLING"):
+            arr_v = vac_disp.get(vk) or []
+            if arr_v:
+                vac_parts.append(f"{vk}: N={len(arr_v):,} (avg |{h4}m|={sum(arr_v)/len(arr_v):.2f} pts)")
+            else:
+                vac_parts.append(f"{vk}: N=0")
+        lines.append("  4) road_vacuum Corridor Travel: " + " | ".join(vac_parts))
+    else:
+        lines.append("  0 Scout cycles recorded.")
 
     # [9] Stage 1: Timeframe-linked 1..4-bar path & Market Trick Detector
     lines.append(

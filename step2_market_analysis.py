@@ -300,7 +300,7 @@ def _a1_refresh_scout(market_data, served, price, spread_now):
         from signal_team import build_signal_map as _a1_bsm, describe as _a1_dsm
         from signal_team import get_book as _a1_gb
         signal_map = _a1_bsm(level3, price, atr_live, config, order_flow,
-                             spread=spread_now)
+                             spread=spread_now, now=now)
         _hist = []
         if getattr(vp, "poc", 0):
             _hist.append({"price": float(vp.poc), "kind": "poc_day"})
@@ -332,11 +332,17 @@ def _a1_refresh_scout(market_data, served, price, spread_now):
             except Exception:
                 continue
         if _hist:
-            _a1_gb().add_history(price, atr_live, _hist, config)
+            _prev_banned = int((signal_map or {}).get("banned_spoof", 0) or 0)
+            _prev_atr_eff = float((signal_map or {}).get("atr") or max(atr_live, 1e-9))
+            _prev_atr_raw = (signal_map or {}).get("atr_raw", round(float(atr_live or 0.0), 3))
+            _prev_atr_fl = bool((signal_map or {}).get("atr_floored", False))
+            _a1_gb().add_history(price, atr_live, _hist, config, now=now)
             signal_map = _a1_gb()._render(
-                price, max(atr_live, 1e-9),
-                float(getattr(config, "L3_WHALE_THRESHOLD", 10.0)), 0, level3,
+                price, max(_prev_atr_eff, 1e-9),
+                float(getattr(config, "L3_WHALE_THRESHOLD", 10.0)), _prev_banned, level3,
                 order_flow, spread_now)
+            signal_map["atr_raw"] = _prev_atr_raw
+            signal_map["atr_floored"] = _prev_atr_fl
         scout_notes.append(_a1_dsm(signal_map))
     except Exception as _a1_scout_err:
         scout_notes.append("scout unavailable: "
@@ -6036,7 +6042,8 @@ def analyze_market(market_data: Dict[str, Any],
         _spread_now = abs(_f_ask - _f_bid) if (_f_ask := float(market_data.get("ask") or 0.0)) \
             and (_f_bid := float(market_data.get("bid") or 0.0)) else 0.0
         _signal_map = build_signal_map(l3, price, getattr(volatility, "atr", 0.0) or 0.0,
-                                       config, order_flow, spread=_spread_now)
+                                       config, order_flow, spread=_spread_now,
+                                       now=_now_ep)
         if _signal_map.get("n"):
             notes.append(_describe_map(_signal_map))
     except Exception as _sm_err:
@@ -6399,12 +6406,22 @@ def analyze_market(market_data: Dict[str, Any],
             except Exception:
                 continue
         if _hist:
+            _prev_sm_banned = int((_signal_map or {}).get("banned_spoof", 0) or 0)
+            _prev_sm_atr_eff = float(
+                (_signal_map or {}).get("atr") or max(getattr(volatility, "atr", 0.0) or 0.0, 1e-9)
+            )
+            _prev_sm_atr_raw = (_signal_map or {}).get(
+                "atr_raw", round(float(getattr(volatility, "atr", 0.0) or 0.0), 3)
+            )
+            _prev_sm_atr_fl = bool((_signal_map or {}).get("atr_floored", False))
             _gb_hist().add_history(price, getattr(volatility, "atr", 0.0) or 0.0,
-                                   _hist, config)
+                                   _hist, config, now=_now_ep)
             _signal_map = _gb_hist()._render(
-                price, max(getattr(volatility, "atr", 0.0) or 0.0, 1e-9),
-                float(getattr(config, "L3_WHALE_THRESHOLD", 10.0)), 0, level3,
+                price, max(_prev_sm_atr_eff, 1e-9),
+                float(getattr(config, "L3_WHALE_THRESHOLD", 10.0)), _prev_sm_banned, level3,
                 order_flow, _spread_now)
+            _signal_map["atr_raw"] = _prev_sm_atr_raw
+            _signal_map["atr_floored"] = _prev_sm_atr_fl
     except Exception as _h_err:
         notes.append(f"history doors unavailable: {type(_h_err).__name__}")
 

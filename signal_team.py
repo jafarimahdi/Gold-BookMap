@@ -56,8 +56,10 @@ exactly as before.
 """
 from __future__ import annotations
 
+import math
 import statistics
 import time
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 __all__ = ["build_signal_map", "describe", "SIGNAL_JUDGES", "LevelBook", "get_book"]
@@ -108,6 +110,7 @@ MIN_SPREADS = 10.0      # a door closer than this many spreads is not worth trad
 ROUND_BONUS = 0.08      # institutions cluster on round numbers (4400.0 held 23 lots)
 STALE_CYCLES = 5        # not seen this many cycles -> fading
 FORGET_CYCLES = 15      # not seen this many -> drop it entirely
+SESSION_GAP_RESET_SEC = 4.0 * 3600.0  # >4h session break / weekend gap clears stale doors
 
 
 def _f(x, d=0.0):
@@ -115,6 +118,26 @@ def _f(x, d=0.0):
         return float(x)
     except Exception:
         return d
+
+
+def _resolve_now_epoch(now: Any = None, fallback: Optional[float] = None) -> float:
+    """Step S2a (Law #8): Resolve deterministic snapshot clock (`datetime` or epoch)
+    so fast replays and offline rigs measure true market minutes (`burn_rate` &
+    `600s` spoof rehab) instead of CPU wall-clock milliseconds."""
+    if isinstance(now, datetime):
+        if now.tzinfo is None:
+            return now.replace(tzinfo=timezone.utc).timestamp()
+        return now.timestamp()
+    if now is not None:
+        try:
+            val = float(now)
+            if math.isfinite(val) and val > 0.0:
+                return val
+        except (TypeError, ValueError, OverflowError):
+            pass
+    if fallback is not None and fallback > 0.0:
+        return float(fallback)
+    return time.time()
 
 
 def _saturate(x: float, half: float) -> float:
@@ -221,12 +244,28 @@ class LevelBook:
         self.cfg = None                          # last config seen, for _render
         self.last_history = {}                   # what the stars offered, and why kept
         self.cycles = 0
+        self.last_ingest_ts: float = 0.0
+        self.session_resets: int = 0
 
     # -- one cycle -----------------------------------------------------------
     def ingest(self, level3: Any, price: float, atr: float, config: Any = None,
-               order_flow: Any = None, spread: float = 0.0) -> Dict[str, Any]:
+               order_flow: Any = None, spread: float = 0.0,
+               now: Any = None) -> Dict[str, Any]:
         self.cycles += 1
-        now = time.time()
+        now = _resolve_now_epoch(now)
+        if self.last_ingest_ts > 0.0:
+            gap_sec = now - self.last_ingest_ts
+            if gap_sec >= SESSION_GAP_RESET_SEC or gap_sec < -60.0:
+                # Step S2a: Across >4h overnight/weekend breaks or replay rewinds,
+                # flush stale doors while keeping any actively protected trade door.
+                self.levels = {
+                    p: lv for p, lv in self.levels.items()
+                    if p in self.protected
+                }
+                self.band_history = []
+                self.last_ladder = []
+                self.session_resets += 1
+        self.last_ingest_ts = now
         price = _f(price)
         atr = max(_f(atr), 1e-9)
         if price <= 0:
@@ -317,6 +356,8 @@ class LevelBook:
                         lv.samples.append((now, lv.size_now))
                         if len(lv.samples) > 12:
                             lv.samples.pop(0)
+                    elif lv.samples and lv.samples[-1][0] == now:
+                        lv.samples[-1] = (now, lv.size_now)
             seen_now.add(p)
             return lv
 
@@ -658,7 +699,7 @@ class LevelBook:
         }
 
     def add_history(self, price: float, atr: float, hist: List[Dict[str, Any]],
-                    config: Any = None) -> Dict[str, Any]:
+                    config: Any = None, now: Any = None) -> Dict[str, Any]:
         """D7a: poc_day / htf_poc / supply_demand are DOOR-MAKERS, not force judges.
 
         A POC is a price. A supply zone is a price. Naming a price is the scout's job,
@@ -668,7 +709,7 @@ class LevelBook:
 
         hist: [{"price": 4326.0, "kind": "poc_day"|"htf_poc"|"supply"|"demand"}]
         """
-        now = time.time()
+        now = _resolve_now_epoch(now, fallback=self.last_ingest_ts)
         atr = max(_f(atr), 1e-9)
         # the same ATR floor ingest() uses - without it a collapsed ATR shrinks the band
         # and silently rejects every star
@@ -837,9 +878,10 @@ def get_book() -> LevelBook:
 
 
 def build_signal_map(level3: Any, price: float, atr: float, config: Any = None,
-                     order_flow: Any = None, spread: float = 0.0) -> Dict[str, Any]:
+                     order_flow: Any = None, spread: float = 0.0,
+                     now: Any = None) -> Dict[str, Any]:
     """Update the scout's notebook with this cycle and hand back the map."""
-    return get_book().ingest(level3, price, atr, config, order_flow, spread)
+    return get_book().ingest(level3, price, atr, config, order_flow, spread, now=now)
 
 
 def describe(smap: Dict[str, Any]) -> str:
