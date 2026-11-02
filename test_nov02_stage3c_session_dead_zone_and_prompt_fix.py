@@ -215,8 +215,8 @@ def test_stage3c_step3_prompt_stays_well_under_15k_with_populated_report_card(mo
         "judges": [
             {"judge": j, "scored": 250, "hit_pct": 62.5, "pts_per_call": 1.45}
             for j in (
-                "vwap_trend", "mtf", "value_area", "cvd_divergence", "cvd_momentum",
-                "l3_large_ofi", "sweep", "spoof_invert", "l3_net_flow", "l3_aggr_limit",
+                "vwap_trend", "mtf", "value_area", "cvd_divergence",
+                "sweep", "spoof_invert", "l3_net_flow", "l3_aggr_limit",
                 "macro_risk", "news_sentiment",
             )
         ],

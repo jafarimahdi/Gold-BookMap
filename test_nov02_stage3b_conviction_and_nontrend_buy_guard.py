@@ -158,7 +158,7 @@ def test_stage3b_non_trend_buy_guard_blocks_midair_and_keeps_bottom_exhaustion(m
 
     t0 = datetime(2026, 10, 30, 15, 0, 0, tzinfo=timezone.utc)
 
-    # (A) Mid-air BUY | RANGE (mtf + cvd_momentum above VWAP, no bottom exhaustion) -> BLOCKED!
+    # (A) Mid-air BUY | RANGE (mtf + l3_net_flow above VWAP, no bottom exhaustion) -> BLOCKED!
     monkeypatch.setattr(
         s2.SignalEngine,
         "aggregate",
@@ -168,7 +168,7 @@ def test_stage3b_non_trend_buy_guard_blocks_midair_and_keeps_bottom_exhaustion(m
             70.0,
             [
                 "MTF M9:UP M36:UP -> BUY w 0.50",
-                "CVD rising delta +250.0 CVD +900.0 -> BUY w 0.45",
+                "L3 NET FLOW BUY +140 (buys 180 vs sells 40) w 1.0 -> BUY",
             ],
         ),
     )

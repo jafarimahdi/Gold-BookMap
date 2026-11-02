@@ -286,8 +286,70 @@ def test_cvd_momentum_timeframe_scaling_clv_and_l3_large_ofi_tape_followthrough(
         near_large_order_events=5, near_touch_ofi=65.0,
         aggressive_buy_volume=35.0, aggressive_sell_volume=10.0,
     )
-    _, _, _, n_real = eng.aggregate(
+    _, d_real, c_real, n_real = eng.aggregate(
         4200.5, vol, tr, _mk_of(), fp, l3_real, vp, mac, nw,
         regime="TREND", recent_closes=np.array([4200.0, 4200.2, 4200.5]),
     )
-    assert _panel_by_judge(n_real)["l3_large_ofi"]["dir"] == 1.0
+    pm_real = _panel_by_judge(n_real)
+    assert pm_real["l3_large_ofi"]["dir"] == 1.0
+    assert pm_real["l3_large_ofi"].get("retired") is True
+    assert d_real == "NEUTRAL" and c_real == 0.0  # retired in Stage 2R-b -> casts 0 live votes!
+
+
+def test_stage2rb_book_family_m3_window_scaling_and_anchor_seatbelt(monkeypatch):
+    """Stage 2R-b (Law #11): l3_aggr_limit (66 on M3 vs 110 on M5) & l3_net_flow (60 on M3 vs 100 on M5) scale cleanly."""
+    assert {"cvd_momentum", "l3_large_ofi"}.issubset(config.RETIRED_JUDGES)
+    assert {"l3_aggr_limit", "l3_net_flow"}.isdisjoint(config.RETIRED_JUDGES)
+
+    eng = s2.SignalEngine()
+    vol = s2.VolatilityMetrics(atr=2.0)
+    tr = s2.TrendMetrics(adx=28.0, trend_direction="DOWN")
+    fp = s2.FootprintMetrics()
+    vp = s2.VolumeProfileMetrics()
+    mac = s2.MacroMetrics()
+    nw = s2.NewsAndEvents()
+
+    # 80 aggressive sell lots vs 10 buy lots (net -70, sell ratio 80/91 = 0.88):
+    # - On M3 (180s -> aggr thr 66, netflow thr 60): BOTH l3_aggr_limit & l3_net_flow wake up!
+    # - On M5 (300s -> aggr thr 110, netflow thr 100): BOTH stay silent (<100/110)!
+    l3_m3_wave = s2.Level3Events(
+        aggressive_buys=2, aggressive_sells=12,
+        aggressive_buy_volume=10.0, aggressive_sell_volume=80.0,
+    )
+    monkeypatch.setattr(config, "ORDER_FLOW_WINDOW_SECONDS", 180.0, raising=False)
+    _, d_m3, c_m3, notes_m3 = eng.aggregate(
+        4198.0, vol, tr, _mk_of(delta=-70.0), fp, l3_m3_wave, vp, mac, nw,
+        regime="TREND",
+        mtf_trends={"H1": "DOWN", "M15": "DOWN", "M9": "DOWN"},
+        recent_closes=np.array([4200.0, 4199.0, 4198.0]),
+    )
+    pm_m3 = _panel_by_judge(notes_m3)
+    assert pm_m3["l3_aggr_limit"]["dir"] == -1.0
+    assert pm_m3["l3_net_flow"]["dir"] == -1.0
+    fg_m3 = jf.family_gate(list(pm_m3.values()), "SELL", min_families=2, retired=config.RETIRED_JUDGES)
+    assert fg_m3["ok"] is True
+    assert {"MAP", "BOOK"}.issubset(set(fg_m3["agree_families"]))
+    assert d_m3 == "SELL" and c_m3 >= 80.0
+
+    # Against H1:UP anchor (15m pullback inside H1 bull trend), l3_aggr_limit & l3_net_flow stay silent on SELL!
+    _, _, _, notes_against_h1 = eng.aggregate(
+        4198.0, vol, tr, _mk_of(delta=-70.0), fp, l3_m3_wave, vp, mac, nw,
+        regime="TREND",
+        mtf_trends={"H1": "UP", "M15": "DOWN", "M9": "DOWN"},
+        recent_closes=np.array([4200.0, 4199.0, 4198.0]),
+    )
+    pm_against = _panel_by_judge(notes_against_h1)
+    assert "l3_aggr_limit" not in pm_against
+    assert "l3_net_flow" not in pm_against
+
+    # On M5 (300s), 80 sell / -70 net is below M5 110 / 100 lot thresholds -> silent!
+    monkeypatch.setattr(config, "ORDER_FLOW_WINDOW_SECONDS", 300.0, raising=False)
+    _, _, _, notes_m5 = eng.aggregate(
+        4198.0, vol, tr, _mk_of(delta=-70.0), fp, l3_m3_wave, vp, mac, nw,
+        regime="TREND",
+        mtf_trends={"H1": "DOWN", "M15": "DOWN", "M9": "DOWN"},
+        recent_closes=np.array([4200.0, 4199.0, 4198.0]),
+    )
+    pm_m5 = _panel_by_judge(notes_m5)
+    assert "l3_aggr_limit" not in pm_m5
+    assert "l3_net_flow" not in pm_m5

@@ -38,26 +38,27 @@ def _panel_map(notes):
 
 
 def test_stage2c_pure_12_active_winners_and_7_healthy_benched(monkeypatch):
-    """Stage 2c (after 5-day healed M3 replay): 12 winners stay active; 7 healthy underperformers sit on bench."""
-    active_12 = {
-        "mtf", "vwap_trend", "value_area", "cvd_divergence", "cvd_momentum",
-        "l3_large_ofi", "sweep", "spoof_invert", "l3_net_flow", "l3_aggr_limit",
+    """Stage 2c + 2R-b (after 15-day healed M3 replay-15): 10 gross-positive winners stay active; 9 post-healing underperformers sit on bench."""
+    active_10 = {
+        "mtf", "vwap_trend", "value_area", "cvd_divergence",
+        "sweep", "spoof_invert", "l3_net_flow", "l3_aggr_limit",
         "macro_risk", "news_sentiment",
     }
-    benched_7 = {
+    benched_9 = {
         "footprint_delta", "iceberg", "volume_roc", "l3_imbalance",
         "footprint_levels", "absorption", "vwap_bands",
+        "cvd_momentum", "l3_large_ofi",
     }
-    assert active_12.isdisjoint(config.RETIRED_JUDGES)
-    assert benched_7.issubset(config.RETIRED_JUDGES)
+    assert active_10.isdisjoint(config.RETIRED_JUDGES)
+    assert benched_9.issubset(config.RETIRED_JUDGES)
 
-    # Even with an older .env RETIRED_JUDGES list, config._refresh() unions all 7 benched judges:
+    # Even with an older .env RETIRED_JUDGES list, config._refresh() unions all 9 benched judges:
     with monkeypatch.context() as mp:
         mp.setenv("RETIRED_JUDGES", "macro_yield,macro_dxy,whale_walls,htf_poc")
         mp.delenv("UNRETIRE_JUDGES", raising=False)
         config._refresh()
-        assert active_12.isdisjoint(config.RETIRED_JUDGES)
-        assert benched_7.issubset(config.RETIRED_JUDGES)
+        assert active_10.isdisjoint(config.RETIRED_JUDGES)
+        assert benched_9.issubset(config.RETIRED_JUDGES)
     config._refresh()
 
     # Benched judges cast 0 active votes in SignalEngine while still emitting notes for [7b] & Scout Map:

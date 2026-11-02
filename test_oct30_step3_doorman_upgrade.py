@@ -350,6 +350,7 @@ def test_startup_judge_report_card_refresh_and_evening_script_wiring(monkeypatch
     panel_csv = (
         "judge,votes,participation_pct,buy,sell,quiet,right_pct,scored,points_after_spread,avg_points\n"
         "vwap_trend,90,45.0,50,40,0,64.0,50,28.5,0.57\n"
+        "cvd_divergence,80,40.0,40,40,0,58.0,40,22.0,0.55\n"
         "cvd_momentum,80,40.0,40,40,0,38.0,40,-18.0,-0.45\n"
     )
     (tmp_path / "judge_panel_2026-10-28.csv").write_text(panel_csv, encoding="utf-8")

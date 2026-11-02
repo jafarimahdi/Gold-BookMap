@@ -1291,4 +1291,21 @@ The committed `4f71043` follow-up supersedes the three audit-tool findings above
   3. **`value_area` (`Steidlmayer 1986; Dalton 2013`):** Silences responsive fades in `NEUTRAL` (`20<=ADX<25`), tightens `RANGE` fades to `<=0.45*ATR` with bar rejection + non-opposing delta + `_mtf_bias` alignment at `w=0.45`, and requires `>0.15*ATR` accepted `TREND` breakouts aligned with anchor HTF at `w=0.50`.
   4. **`spoof_invert` (`Cont, Kukanov & Stoikov 2014; Cartea et al. 2015`):** Restricts `spoof_levels` to near-touch (`<= max(1.5*ATR, $2.00)`), requires `>=2` layered spoof cancels (`0` opposite) + squeeze delta + advancing bar + anchor-HTF seatbelt at `w=0.55`.
   5. **`cvd_momentum` & `l3_large_ofi` (`Bouchaud 2018; Easley, López de Prado & O'Hara 2012; Cartea et al. 2015`):** Scales `cvd_momentum` dynamically by active bar window (`Law #11`: `35*tf_scale` lots, `>=60%` pressure, `CLV` in winning `40%`, anchor-HTF seatbelt) and requires real aggressive tape follow-through (`>=4` near-touch large adds, `|near_OFI|>=40`, `|aggr_net|>=15`, bar + anchor-HTF alignment) in `l3_large_ofi`.
-  - **Next (`Step B: Stage 3R/4R` After `current_version_replay-15.txt` Verifies `Stage 2R`):** Unplugged-MBO Eye Guard, Daily Loss Circuit Breaker, and `M3` `3m` cooldown.
+
+---
+
+## Check-in stamp — `2026-11-02 16:30 CET` `current_version_replay-15.txt` Flips `value_area` (`-1,197 -> +475.5G`) & `vwap_trend` (`-587 -> +672.6G`) Into Winners + Cuts Max DD `-30%` (`93.3 -> 65.8`), & `Stage 2R-b` Final Heart Polish Installed (`nov02_stage2rb_final_heart_polish.patch`)
+
+- **15-Day `Stage 2R` Isolated Replay Receipt (`current_version_replay-15.txt`, `2026-10-12..30`, `9,783` cycles):**
+  - **`[7]` Judge Cardiology Breakthrough (`replay-14` -> `replay-15`):**
+    - `value_area`: **`-1,197.0G / -2,956.0N` (`46.4%`, `3,518`c) -> `+475.5G / -20.5N` (`51.4%`, `992`c)** — **`+1,672.5G / +2,935.5N` swing!**
+    - `vwap_trend`: **`-587.3G / -1,783.8N` (`49.9%`, `2,393`c) -> `+672.6G / -137.4N` (`51.6%`, `1,620`c)** — **`+1,259.9G / +1,646.4N` swing!**
+    - `spoof_invert`: `494` fake far-book calls (`-188.7G`) -> **`0` toxic calls**; `sweep` `48.3%->56.1%` (`+269.5G / +241.0N`, `+3.43 @+12m`), `cvd_divergence` `54.9%->58.4%` (`+189.6N`), `l3_net_flow` `58.3%->60.4%` (`+38.8N`, `+3.07 @+12m`), `l3_aggr_limit` `53.8%->57.2%` (`+2.3N`, `8/15`d).
+    - `[8d]` Max Drawdown dropped **`-29.5%` (`93.3 -> 65.8 pts` at `10m` CD; `66.4 -> 49.4 pts` at `0m` CD)**, `SELL|RANGE` surged `+81.5 -> +205.5 PM`, `SELL|TREND` rose `+1.68 -> +2.43/sig` (`53.1%` WR), and `Stage-4b Strict` flipped `-27.7 -> +2.4 pts` (`PF 0.83 -> 1.03`).
+  - **Two Exact Remaining Step-2 Heart Leaks Unmasked by Law #9 Isolation:**
+    1. **Two Unhealable Mean-Reverting Voters (`[7]`):** Even after `Stage 2a` + `Stage 2R` healing, `cvd_momentum` (`111`c, **`40.5%` right, `-95.8G / -151.3N`**, `-0.99 @+12m`) and `l3_large_ofi` (`21`c, **`33.3%` right, `-12.0G / -22.5N`**, `-1.20 @+3m`) remained negative gross alpha, feeding `BUY|TREND` bounce-top losses (`-141.2 PM`).
+    2. **Law #11 `M5 -> M3` `BOOK` Family Starvation (`+1,221` extra `Family Gate` solo-`MAP` blocks: `7,685 -> 8,906`):** `l3_aggr_limit` (`110` lots, `159`c) and `l3_net_flow` (`100` net lots, `48`c) were still using hardcoded `M5` (`300s`) volume thresholds on `M3` (`180s`), starving `MAP` of its `57%–60%`-accurate `BOOK` partner on major `M3` trend waterfalls (`Oct 12`, `Oct 23`, `Oct 30`).
+- **Owner Decision `Option 1: Stage 2R-b` (Finish Step-2 Heart Cleanly Before Step B `Stage 3R/4R`):**
+  1. **Bench Post-Healing Gross Losers (`config.py`):** Adds `cvd_momentum` and `l3_large_ofi` to `_canonical_retired` (`10` proven gross-positive active judges, `0` gross losers left in `[7]`; `judge_families.RETIRED` stays frozen at `14`).
+  2. **Law #11 `M5 -> Active Window` `BOOK` Scaling + Anchor-HTF Seatbelt (`step2_market_analysis.py`):** Scales `l3_aggr_limit` (`110 * tf_scale` = **`66` lots on `M3`**, `110` on `M5`) and `l3_net_flow` (`100 * tf_scale` = **`60` net lots on `M3`**, `100` on `M5`) with active-bar + anchor-HTF (`H1`) non-opposition so `BOOK` partners cleanly with `MAP` on genuine `M3` trend waves while blocking counter-`H1` squeeze tops.
+  - **Next (`Step B: Stage 3R/4R` After `current_version_replay-16.txt` Seals `Stage 2R-b`):** Unplugged-MBO Eye Guard (`Oct 15`), Daily Loss Circuit Breaker (`Oct 20`), and `M3` `3m` cooldown.

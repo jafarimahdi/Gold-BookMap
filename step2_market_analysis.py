@@ -3504,16 +3504,31 @@ class SignalEngine:
         except Exception:
             if abs(float(level3.order_book_imbalance or 0.0)) >= _l3_db and _may_vote("l3_imbalance"):
                 votes.append((np.clip(level3.order_book_imbalance * 2.0, -1.0, 1.0), 0.45))
-        # Aggressive vs limit ratio: require strong dominance + TREND seatbelt
+        # Aggressive vs limit ratio (Law #11 dynamic M5->active window scaling + TREND/anchor seatbelt):
+        # 110 lots was calibrated for M5 (300s); scale proportionally to ORDER_FLOW_WINDOW_SECONDS
+        # (66 lots on M3 180s, 110 lots on M5 300s) so BOOK family wakes up on real M3 trend waves.
+        _l3_win_s = float(getattr(config, "ORDER_FLOW_WINDOW_SECONDS", 300.0) or 300.0)
+        _l3_tf_scale = min(2.0, max(0.50, _l3_win_s / 300.0))
+        _aggr_up_bar = not _has_c2 or float(recent_closes[-1]) >= float(recent_closes[-2])
+        _aggr_dn_bar = not _has_c2 or float(recent_closes[-1]) <= float(recent_closes[-2])
         try:
+            _aggr_vol_thr = 110.0 * _l3_tf_scale
             aggr_total = level3.aggressive_buys + level3.aggressive_sells
             if aggr_total > 0 or (level3.aggressive_buy_volume + level3.aggressive_sell_volume) > 0:
                 aggr_ratio = level3.aggressive_buy_volume / (level3.aggressive_buy_volume + level3.aggressive_sell_volume + 1) if (level3.aggressive_buy_volume + level3.aggressive_sell_volume) > 0 else 0.5
-                if aggr_ratio >= 0.62 and level3.aggressive_buy_volume >= 110 and _allow_buy_in_regime:
+                if (
+                    aggr_ratio >= 0.62
+                    and level3.aggressive_buy_volume >= _aggr_vol_thr
+                    and _aggr_up_bar and _allow_buy_in_regime and _anchor_tf_dir != "DOWN"
+                ):
                     if _may_vote("l3_aggr_limit"):
                         votes.append((+1.0, 0.55))
                     notes.append(f"Aggressive vs limit: buy ratio {aggr_ratio:.2f} vol {level3.aggressive_buy_volume:.0f} w 0.55 -> BUY power")
-                elif aggr_ratio <= 0.38 and level3.aggressive_sell_volume >= 110 and _allow_sell_in_regime:
+                elif (
+                    aggr_ratio <= 0.38
+                    and level3.aggressive_sell_volume >= _aggr_vol_thr
+                    and _aggr_dn_bar and _allow_sell_in_regime and _anchor_tf_dir != "UP"
+                ):
                     if _may_vote("l3_aggr_limit"):
                         votes.append((-1.0, 0.55))
                     notes.append(f"Aggressive vs limit: sell ratio {1-aggr_ratio:.2f} vol {level3.aggressive_sell_volume:.0f} w 0.55 -> SELL power")
@@ -3621,16 +3636,18 @@ class SignalEngine:
                         votes.append((-1.0, _lrg_w))
                     notes.append(f"L3 large orders {_near_lrg} OFI {_near_ofi:.0f} w {_lrg_w:.2f} -> SELL")
 
-            # NEW: L3 Net Aggressive Flow Delta vote (M5 key)
+            # L3 Net Aggressive Flow Delta vote (Law #11 dynamic M5->active window scaling + anchor seatbelt):
+            # L3_NET_FLOW_THRESHOLD=100 was calibrated for M5 (300s); scale proportionally (60 lots on M3 180s).
             try:
+                _nf_eff_thr = netflow_thr * _l3_tf_scale
                 net_flow = float(level3.aggressive_buy_volume - level3.aggressive_sell_volume)
-                if abs(net_flow) >= netflow_thr:
+                if abs(net_flow) >= _nf_eff_thr:
                     flow_mult = trend_boost if regime == "TREND" else 1.0
-                    if net_flow > 0 and _allow_buy_in_regime:
+                    if net_flow > 0 and _aggr_up_bar and _allow_buy_in_regime and _anchor_tf_dir != "DOWN":
                         if _may_vote("l3_net_flow"):
                             votes.append((+1.0, netflow_w * flow_mult))
                         notes.append(f"L3 NET FLOW BUY +{net_flow:.0f} (buys {level3.aggressive_buy_volume:.0f} vs sells {level3.aggressive_sell_volume:.0f}) w {netflow_w*flow_mult:.1f} -> BUY")
-                    elif net_flow < 0 and _allow_sell_in_regime:
+                    elif net_flow < 0 and _aggr_dn_bar and _allow_sell_in_regime and _anchor_tf_dir != "UP":
                         if _may_vote("l3_net_flow"):
                             votes.append((-1.0, netflow_w * flow_mult))
                         notes.append(f"L3 NET FLOW SELL {net_flow:.0f} (buys {level3.aggressive_buy_volume:.0f} vs sells {level3.aggressive_sell_volume:.0f}) w {netflow_w*flow_mult:.1f} -> SELL")

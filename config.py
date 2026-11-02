@@ -519,6 +519,9 @@ def _refresh() -> None:
     #   0/2d; stays Scout door), volume_roc (-12.6n, -0.53 @+12m), l3_imbalance
     #   (-130.6n, 1/5d), footprint_levels (-389.4n, 1/5d), absorption (-444.3n),
     #   vwap_bands (-204.1n; value_area +405.4n guards balance edges).
+    # Stage 2R-b (2026-11-02, after 15-day M3 replay-15 post-healing audit):
+    #   cvd_momentum (40.5% right, -95.8G/-151.3N) & l3_large_ofi (33.3% right,
+    #   -12.0G/-22.5N) remained negative gross alpha even after two healing stages.
     # Union the full canonical retired set into non-empty .env RETIRED_JUDGES unless
     # explicitly overridden via UNRETIRE_JUDGES or RETIRED_JUDGES=none/0/off.
     _canonical_retired = {
@@ -528,6 +531,7 @@ def _refresh() -> None:
         "poc_day", "supply_demand", "microprice", "queue_pos",
         "footprint_delta", "iceberg", "volume_roc", "l3_imbalance",
         "footprint_levels", "absorption", "vwap_bands",
+        "cvd_momentum", "l3_large_ofi",
     }
     _retired_raw = _fget(
         "RETIRED_JUDGES",
