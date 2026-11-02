@@ -6036,6 +6036,64 @@ def analyze_market(market_data: Dict[str, Any],
     except Exception:
         pass
 
+    # 2026-11-02 Stage 3c: DST-Safe Exchange Session Dead-Zone Gate (Europe/London & America/New_York)
+    # Proven on 5-day M3 raw replay (current_version_replay-7.txt):
+    #   - London 16:00-16:59 UK closing fix / European desk squaring: 3/11 TP/SL (21.4% WR, -33.8 FIX).
+    #   - Post-COMEX 14:00-15:59 America/New_York afternoon liquidity vacuum: 3/22 TP/SL (12.0% WR,
+    #     -130.4 FIX, including 15:00-15:59 ET at 0/16 = 0.0% WR, -121.1 FIX) + 13:29-13:30 ET print.
+    #   - Preserves 100% of 10:00-16:59 CET (+625.1 FIX), 13h ET (+77.1 FIX, 85.2% +12m%), and 16h ET (+142.9 FIX).
+    _s3c_shadow_payload: Dict[str, Any] = {}
+    try:
+        from session import _london_local_datetime, _ny_local_datetime, exchange_dead_zone_reason
+        _s3c_live = bool(getattr(config, "STAGE3C_SESSION_GATE_LIVE_ENABLED", False))
+        _blk_uk16 = bool(getattr(config, "STAGE3C_BLOCK_LONDON_16H_CLOSE", True))
+        _blk_ny1415 = bool(getattr(config, "STAGE3C_BLOCK_POST_COMEX_14_15H_ET", True))
+        _fg_capped = bool(_fg_shadow_payload.get("live_capped", False))
+        _s3b_capped = bool(_s3b_shadow_payload.get("live_capped", False))
+        _uk_dt = _london_local_datetime(now)
+        _ny_dt = _ny_local_datetime(now)
+        _dz_reason = exchange_dead_zone_reason(
+            now,
+            block_london_16h=_blk_uk16,
+            block_post_comex_14_15h_et=_blk_ny1415,
+        )
+        _pre_s3c_conf = float(confidence)
+        _s3c_ok = True
+        _s3c_reason = "ok"
+        if (
+            direction in ("BUY", "SELL")
+            and not _fg_capped
+            and not _s3b_capped
+            and bool(_fg_shadow_payload.get("ok", True))
+            and bool(_s3b_shadow_payload.get("ok", True))
+            and _dz_reason is not None
+        ):
+            _s3c_ok = False
+            _s3c_reason = _dz_reason
+        _s3c_shadow_payload = {
+            "ok": _s3c_ok,
+            "reason": _s3c_reason,
+            "london_hm": _uk_dt.strftime("%H:%M"),
+            "ny_hm": _ny_dt.strftime("%H:%M"),
+            "pre_stage3c_confidence": _pre_s3c_conf,
+            "live_capped": False,
+        }
+        if _s3c_live and direction in ("BUY", "SELL") and not _s3c_ok:
+            _thr_s3c = getattr(config, "CONFIDENCE_THRESHOLD", None)
+            if _thr_s3c is None or isinstance(_thr_s3c, bool):
+                _thr_s3c = getattr(config, "AI_CONFIDENCE_THRESHOLD", 70.0)
+            _cap_s3c = max(0.0, min(float(_thr_s3c) - 5.0, 30.0))
+            if confidence > _cap_s3c:
+                confidence = round(_cap_s3c, 2)
+                _s3c_shadow_payload["live_capped"] = True
+                notes.append(
+                    f"STAGE3C_GATE live cap: {_s3c_reason} "
+                    f"(UK={_uk_dt.strftime('%H:%M')}, NY={_ny_dt.strftime('%H:%M')}) -> "
+                    f"confidence {_pre_s3c_conf:.1f}%->{confidence:.1f}%"
+                )
+    except Exception:
+        pass
+
     # ---- D7a: hand the scout its REMEMBERED doors ----------------------------
     # poc_day / htf_poc / supply_demand name prices, so they are door-makers. They now
     # live with the scout instead of shouting street names at the force team.
@@ -6498,6 +6556,8 @@ def analyze_market(market_data: Dict[str, Any],
         _merged_shadows["family_gate"] = _fg_shadow_payload
     if _s3b_shadow_payload:
         _merged_shadows["stage3b_gate"] = _s3b_shadow_payload
+    if _s3c_shadow_payload:
+        _merged_shadows["stage3c_gate"] = _s3c_shadow_payload
     _merged_shadows["l3_passive_mbo_shadow"] = {
         "near_touch_ofi": float(getattr(level3, "near_touch_ofi", 0.0) or 0.0),
         "near_large_order_events": int(getattr(level3, "near_large_order_events", 0) or 0),

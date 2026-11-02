@@ -110,6 +110,49 @@ def _ny_local_datetime(now: Optional[datetime] = None) -> datetime:
     return u_naive + timedelta(hours=_us_eastern_offset_hours(u_naive))
 
 
+def _london_local_datetime(now: Optional[datetime] = None) -> datetime:
+    """Return naive local datetime in Europe/London (DST-aware with pure-Python UK/EU fallback)."""
+    n = _now(now)
+    if n.tzinfo is None:
+        n = n.replace(tzinfo=timezone.utc)
+    try:
+        from zoneinfo import ZoneInfo
+        return n.astimezone(ZoneInfo("Europe/London")).replace(tzinfo=None)
+    except Exception:
+        pass
+    u_naive = n.astimezone(timezone.utc).replace(tzinfo=None)
+    # UK switches between GMT (UTC+0) and BST (UTC+1) at the exact EU 01:00 UTC boundary.
+    return u_naive + timedelta(hours=_eu_offset_hours(u_naive) - 1)
+
+
+def exchange_dead_zone_reason(
+    now: Optional[datetime] = None,
+    *,
+    block_london_16h: bool = True,
+    block_post_comex_14_15h_et: bool = True,
+) -> Optional[str]:
+    """DST-safe institutional exchange dead-zone check for Gold (GC / XAUUSD).
+
+    Proven on 5-day M3 raw replay (current_version_replay-7.txt):
+      1. CME COMEX official daily settlement VWAP print (13:29-13:30 America/New_York).
+      2. London 16:00-16:59 Europe/London WMR/LBMA close & European desk squaring
+         (21.4% WR, 22.2% +12m%, -33.8 FIX_PTS).
+      3. Post-COMEX settlement afternoon liquidity vacuum (14:00-15:59 America/New_York,
+         stopping right before the 16:00 ET US equity close rebalance: 3 TP / 22 SL = 12.0% WR,
+         -130.4 FIX_PTS, including 15:00-15:59 ET at 0 TP / 16 SL = 0.0% WR, -121.1 FIX_PTS),
+         while keeping 13:00-13:59 ET (+77.1 FIX, 85.2% +12m%) and 16:00-16:59 ET (100% WR, +142.9 FIX).
+    """
+    ny = _ny_local_datetime(now)
+    uk = _london_local_datetime(now)
+    if ny.hour == 13 and ny.minute in (29, 30):
+        return "comex_settlement_print_1329_1330_et"
+    if block_london_16h and uk.hour == 16:
+        return "london_close_fix_16h_uk"
+    if block_post_comex_14_15h_et and ny.hour in (14, 15):
+        return "post_comex_vacuum_14_15h_et"
+    return None
+
+
 def is_cme_weekend_closed(now: Optional[datetime] = None) -> bool:
     """True during CME Globex / XAUUSD weekend close (Fri 17:00 NY -> Sun 18:00 NY)."""
     ny = _ny_local_datetime(now)

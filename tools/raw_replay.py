@@ -1778,8 +1778,10 @@ def replay_single_day(
                 s3b = (getattr(snap, "shadow_candidates", None) or {}).get("stage3b_gate") or {}
                 s3b_live_capped = bool(s3b.get("live_capped", False))
                 s3b_reason = str(s3b.get("reason") or "")
+                s3c = (getattr(snap, "shadow_candidates", None) or {}).get("stage3c_gate") or {}
+                s3c_live_capped = bool(s3c.get("live_capped", False))
 
-                # Current-version gate classification (Step 2 -> Family Gate -> Stage 3b -> Shooting -> Threshold)
+                # Current-version gate classification (Step 2 -> Family Gate -> Stage 3b -> Stage 3c -> Shooting)
                 pw_side = "BUY" if pw_dir == "UP" else ("SELL" if pw_dir == "DOWN" else "NEITHER")
                 if sig_dir not in ("BUY", "SELL"):
                     gate_stage = "NEUTRAL (no panel signal)"
@@ -1789,6 +1791,8 @@ def replay_single_day(
                     gate_stage = "BLOCKED: Non-Trend BUY (Stage 3b Guard)"
                 elif sig_conf < conf_thr and s3b_live_capped:
                     gate_stage = "BLOCKED: Conf < 50% (Stage 3b Conflict)"
+                elif sig_conf < conf_thr and s3c_live_capped:
+                    gate_stage = "BLOCKED: Session Dead-Zone (Stage 3c)"
                 elif sig_conf < conf_thr:
                     gate_stage = f"BLOCKED: Conf < {conf_thr:.0f}%"
                 elif shot_act == "GO":

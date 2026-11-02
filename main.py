@@ -1900,6 +1900,12 @@ def _shooting_execution_gate(decision, snapshot):
             return False, (
                 f"Stage 3b Gate failed ({_s3b_gate.get('reason', 'blocked')})"
             )
+    if bool(getattr(config, "STAGE3C_SESSION_GATE_LIVE_ENABLED", False)):
+        _s3c_gate = (getattr(snapshot, "shadow_candidates", None) or {}).get("stage3c_gate")
+        if isinstance(_s3c_gate, dict) and _s3c_gate.get("ok") is False:
+            return False, (
+                f"Stage 3c Session Gate failed ({_s3c_gate.get('reason', 'dead_zone')})"
+            )
     plan = getattr(snapshot, "shot", None) or {}
     power = getattr(snapshot, "power", None) or {}
     if not isinstance(plan, dict):

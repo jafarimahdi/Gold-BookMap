@@ -326,7 +326,9 @@ def _judge_report_card_block(snapshot=None):
             except Exception:
                 return default
 
-        card_path = Path(__file__).resolve().parent / "data" / "judge_report_card.json"
+        _data_root = getattr(config, "DATA_DIR", None)
+        card_dir = Path(_data_root) if _data_root else (Path(__file__).resolve().parent / "data")
+        card_path = card_dir / "judge_report_card.json"
         try:
             mtime = card_path.stat().st_mtime
         except OSError:
@@ -678,8 +680,10 @@ class AIDecisionEngine:
                 low_n = ns.lower()
                 if any(rj in low_n for rj in retired_set) or "whale wall" in low_n or "day poc" in low_n:
                     continue
+                if ns.startswith("RETIRED (not voting):"):
+                    continue
                 clean_notes.append(ns)
-            payload["notes"] = clean_notes[:20]
+            payload["notes"] = clean_notes[:15]
 
         # 3) Trim news, order blocks, footprint, and signal_map for high signal-to-noise
         if isinstance(payload.get("news"), dict):
@@ -794,7 +798,7 @@ class AIDecisionEngine:
         if recent_trades:
             payload["recent_closed_trades"] = recent_trades
 
-        payload["session_context"] = session_context()
+        payload["session_context"] = session_context(now=getattr(snapshot, "timestamp", None))
         return (
             self.SYSTEM_PROMPT + "\n\n"
             "TRADING SESSION CONTEXT (use this to judge volatility/liquidity):\n"

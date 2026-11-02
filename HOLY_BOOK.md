@@ -1182,3 +1182,19 @@ The committed `4f71043` follow-up supersedes the three audit-tool findings above
     3. **`Stage 3d` (After 3c):** `POWER v2` / `Shooting` Climax Handoff (`CONF>=35% ONLY (POWER=NEITHER)` won **`+670.4 FIX` / `+141.7 TR`** while `POWER ALIGNED` `N=39` lost `-94.2 FIX` at `20.0%` WR because `power_team_v2` still weights benched `footprint_delta` / `footprint_levels` / `big_prints`).
 - **Installed `Stage 3b` (`config.py`, `step2_market_analysis.py`, `main.py`, `tools/raw_replay.py`):**
   - Enabled `STAGE3B_GATE_LIVE_ENABLED=True`, `STAGE3B_MIN_CONFIDENCE=50.0` (blocks internally conflicted `<50%` panels while preserving `50–64%` & `>=65%`), and `STAGE3B_NON_TREND_BUY_GUARD_ENABLED=True` (in `RANGE`/`NEUTRAL`, `BUY` requires discounted `price <= VWAP`, zero active `SELL` dissent, and bottom exhaustion/absorption via `cvd_divergence`/`sweep` or `value_area` + `spoof_invert`/`l3_aggr_limit`), plus fail-closed `main._shooting_execution_gate` and `[2]` waterfall buckets.
+
+---
+
+## Check-in stamp — `2026-11-02 05:55 CET` `current_version_replay-7.txt` Lifts 5-Day Sniper Team to `+681.3 FIX` (`+$2.67/sig`, `55.3%` WR) & `Stage 3c` DST-Safe Session Dead-Zone Gate Installed (`nov02_stage3c_session_dead_zone_and_prompt_fix.patch`)
+
+- **5-Day Stage 3b Isolated Replay Receipt (`current_version_replay-7.txt`, `2026-10-26..30`, `3,233` cycles, `255` actionable sniper signals = `51/day`):**
+  - **5-Day Total Climbed Again (`+619.2 -> +681.3 FIX_PTS`, `+$1.89/sig -> +$2.67/sig` net of spread, `120 TP / 97 SL = 55.3% WR`, `+126.4 C3_TRAIL`, `+167.7 TR_1.0A`):**
+    - `10-26` (`LAKE`): `-95.6 -> -85.2 FIX` / `+6.3 C3`; `10-27` (`TREND`): `+112.2 FIX` (`+$3.12/sig`); `10-28` (`LAKE`): **`-79.1 -> -28.6 FIX` / `-0.6 C3` (`64%` Lake loss cut!)**; `10-29` (`MIXED`): **`+137.6 -> +147.5 FIX` / `+50.6 C3`**; `10-30` (`TREND`): **`+535.4 FIX` / `+76.6 C3`**.
+    - `[9]` M3 Path jumped to **`+0.37 (+3m) -> +0.76 (+6m) -> +0.80 (+9m) -> +1.12 (+12m)`** (`146` wins vs `81` losses = `64.3%` `+12m%`; `RANGE` `+1.95`, `NEUTRAL` `+1.31`, `TREND` `+0.83`).
+  - **Why Step-by-Step Saved Another Winner Hour:** `Stage 3b` automatically flipped `18:00 CET` (`13:00–13:59 NY EDT` COMEX close run) from `-6.8` to **`+77.1 FIX_PTS` (`85.2%` `+12m%`)**, isolating the true institutional dead zones:
+    1. **London `16:00–16:59 Europe/London` (`17:00 CET` WMR/LBMA Close Fix):** `3/11` TP/SL (`21.4%` WR, `22.2%` `+12m%`, `-33.8 FIX`).
+    2. **Post-COMEX `14:00–15:59 America/New_York` (`19:00–20:59 CET` during Oct 26–30 EDT, stopping right at `16:00 ET` equity close):** `3/22` TP/SL (`12.0%` WR, `-130.4 FIX` — including `15:00–15:59 ET` / `20:00 CET` at **`0 TP / 16 SL = 0.0% WR`, `-121.1 FIX`**), plus the `13:29–13:30 ET` official COMEX settlement print.
+- **Installed `Stage 3c` (`config.py`, `session.py`, `step2_market_analysis.py`, `main.py`, `step3_ai_decision.py`, `tools/raw_replay.py`):**
+  - Added DST-safe + pure-Python `tzdata`-fallback `session.exchange_dead_zone_reason(now)` anchored to `Europe/London` (`16h`) and `America/New_York` (`13:29–13:30` & `14–15h`), `STAGE3C_SESSION_GATE_LIVE_ENABLED=True`, fail-closed `main._shooting_execution_gate`, and `[2]` `BLOCKED: Session Dead-Zone (Stage 3c)`.
+  - Fixed `step3_ai_decision.py` `_judge_report_card_block` `config.DATA_DIR` isolation, `session_context(now=snapshot.timestamp)`, and note cap (`15` lines, stripping `RETIRED (not voting):`) so Windows `pytest -q` passes `100%` (`< 14,500` chars).
+  - **Next (`Stage 3d`, Final Stage-3 Step After `replay-8`):** Align `POWER v2` / `Shooting` handoff (`CONF>=35% ONLY (POWER=NEITHER)` made **`+716.0 FIX` at `61.3%` WR** while `POWER ALIGNED` lost `-78.5 FIX` at `22.2%` WR).
