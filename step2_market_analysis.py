@@ -6041,7 +6041,11 @@ def analyze_market(market_data: Dict[str, Any],
         from signal_team import build_signal_map, describe as _describe_map
         _spread_now = abs(_f_ask - _f_bid) if (_f_ask := float(market_data.get("ask") or 0.0)) \
             and (_f_bid := float(market_data.get("bid") or 0.0)) else 0.0
-        _signal_map = build_signal_map(l3, price, getattr(volatility, "atr", 0.0) or 0.0,
+        # Step S2b (Law #8/Law #9): Pass analyzed `level3` (`Level3Events` with
+        # `.spoof_levels`, `.iceberg_levels`, `.iceberg_meta`, `.order_book_imbalance`)
+        # instead of raw `l3` (`Level3OrderBookAnalyzer`) so `:00` Bell computes have
+        # 100% parity with `:01/:02` `_a1_refresh_scout` (`replay-18` caught `Bell spoof_cyc=0` vs `Serve=126`).
+        _signal_map = build_signal_map(level3, price, getattr(volatility, "atr", 0.0) or 0.0,
                                        config, order_flow, spread=_spread_now,
                                        now=_now_ep)
         if _signal_map.get("n"):

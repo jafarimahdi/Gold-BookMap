@@ -64,11 +64,12 @@ def find_source_files(data_dir: Path, as_of: str, days_wanted: int):
                 files.append((d, p))
     files.sort(reverse=True)
     epoch = ""
-    try:
-        import config as _cfg
-        epoch = str(getattr(_cfg, "JUDGE_REPORT_CARD_EPOCH_DATE", "") or "").strip()
-    except Exception:
-        epoch = ""
+    if os.environ.get("JUDGE_REPORT_CARD_DISABLE_EPOCH") != "1":
+        try:
+            import config as _cfg
+            epoch = str(getattr(_cfg, "JUDGE_REPORT_CARD_EPOCH_DATE", "") or "").strip()
+        except Exception:
+            epoch = ""
     if len(epoch) == 10 and as_of >= epoch:
         post_epoch = [item for item in files if item[0] >= epoch]
         if post_epoch:

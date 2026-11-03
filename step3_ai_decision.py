@@ -339,7 +339,11 @@ def _judge_report_card_block(snapshot=None):
 
         card = json.loads(card_path.read_text(encoding="utf-8"))
         days = [str(d) for d in (card.get("source_days") or [])]
-        epoch_date = str(getattr(config, "JUDGE_REPORT_CARD_EPOCH_DATE", "2026-11-03") or "").strip()
+        epoch_date = (
+            ""
+            if os.environ.get("JUDGE_REPORT_CARD_DISABLE_EPOCH") == "1"
+            else str(getattr(config, "JUDGE_REPORT_CARD_EPOCH_DATE", "2026-11-03") or "").strip()
+        )
         epoch_ok = True
         if len(epoch_date) == 10 and today >= epoch_date:
             epoch_ok = bool(days) and all(d >= epoch_date for d in days)

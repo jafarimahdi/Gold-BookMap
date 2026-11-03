@@ -456,20 +456,57 @@ class LevelBook:
             if lv and "event" not in lv.sources:
                 lv.sources.append("event")
 
-        # iceberg: hidden size that keeps coming back
-        for p, refills in (ice_levels or {}).items():
-            if _f(refills) < ice_min:
+        # iceberg: hidden size that keeps coming back (Step S2b: fresh <=180s & unbroken
+        # passive resting presence per Frey & Sandås 2017; reads clip-reload counts from
+        # `iceberg_meta[p]["refills"]` when `iceberg_levels[p]` stores event count = 1).
+        ice_candidates = set((ice_levels or {}).keys()) | set((ice_meta or {}).keys())
+        fresh_ice_px = set()
+        for p in ice_candidates:
+            meta = (ice_meta or {}).get(p) or {}
+            eff_refills = max(_f((ice_levels or {}).get(p, 0)), _f(meta.get("refills", 0)))
+            if eff_refills < ice_min:
+                continue
+            last_ice_ts = _f(meta.get("last_seen"), 0.0)
+            if last_ice_ts > 0.0 and (now - last_ice_ts) > 180.0:
                 continue
             pp = _f(p)
-            lv = touch(pp, "bid" if pp < price else "ask")
+            p_r = round(pp, 2)
+            if p_r <= 0.0:
+                continue
+            ice_side = "bid" if pp < price else "ask"
+            rest_sz = 0.0
+            if ice_side == "bid" and min_ob_bid is not None and p_r >= min_ob_bid:
+                rest_sz = ob_bids.get(p_r, 0.0)
+                if rest_sz <= 0.0:
+                    continue
+            elif ice_side == "ask" and max_ob_ask is not None and p_r <= max_ob_ask:
+                rest_sz = ob_asks.get(p_r, 0.0)
+                if rest_sz <= 0.0:
+                    continue
+            lv = touch(pp, ice_side, rest_sz)
             if lv is None:
                 continue
-            lv.refills = int(_f(refills))
-            meta = (ice_meta or {}).get(p) or {}
+            lv.refills = int(eff_refills)
             if _f(meta.get("age_sec")) > 0:
                 lv.first_seen = min(lv.first_seen, now - _f(meta.get("age_sec")))
             if "iceberg" not in lv.sources:
                 lv.sources.append("iceberg")
+            fresh_ice_px.add(p_r)
+
+        # Clear stale/exhausted/breached `"iceberg"` tags so dead icebergs never block Stage 4c corridors.
+        for p_lv, lv in self.levels.items():
+            if "iceberg" not in lv.sources or p_lv in fresh_ice_px:
+                continue
+            broke_through = (
+                (lv.side == "ask" and price > lv.price + max(spread, 0.10))
+                or (lv.side == "bid" and price < lv.price - max(spread, 0.10))
+            )
+            exhausted_in_book = (
+                (lv.side == "bid" and min_ob_bid is not None and p_lv >= min_ob_bid and ob_bids.get(p_lv, 0.0) <= 0.0)
+                or (lv.side == "ask" and max_ob_ask is not None and p_lv <= max_ob_ask and ob_asks.get(p_lv, 0.0) <= 0.0)
+            )
+            if broke_through or exhausted_in_book or (now - lv.last_seen) > 180.0:
+                lv.sources = [s for s in lv.sources if s != "iceberg"]
 
         # spoof_invert: a known liar is BANNED, not penalised (with 10-min clean rehab)
         banned = 0

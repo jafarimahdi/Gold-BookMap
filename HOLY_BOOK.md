@@ -1397,3 +1397,18 @@ The committed `4f71043` follow-up supersedes the three audit-tool findings above
     12. **Macro & News Calendar Analyzers (`macro.py`, `news.py`, `EconomicCalendar`):** **NO Manager Check yet** + needs historical archive / synthetic event-shock replay rig (`raw_replay.py` currently passes empty `macro={}` / `news={}`).
     13. **Step 3 AI Doorman & Council Shadow (`step3_ai_decision.py`, `council_shadow.py`, `judge_report_card.py`):** Manager Check & `rig_memory.py` (`12/12`) DONE (`Stage 5/5b`); scheduled for live shadow log audit after multi-day DEMO runs.
     14. **Step 4 MT5 Execution & Evening Audit Office (`step4_mt5_execution.py`, `audit_day.py`, `tools/xray_report.py`):** MT5 brackets & `selftest_audit_day.py` (`17/17`) DONE; **needs full top-to-bottom Manager Check** of `audit_day.py` & `xray_report.py` against `Stage 4R/5b` fields.
+
+---
+
+## Check-in stamp — `2026-11-02 23:35 CET` 15-Day `--every 60` `replay-18` Scout Baseline Verified & Isolated `Stage S2b` (`:00` `level3` Handoff + Fresh/Unbroken Iceberg) Installed (`nov02_stage_s2b_scout_bell_l3_handoff_and_fresh_iceberg.patch`)
+
+- **`replay-18` (`--every 60`, `15` Days, `9,783` Cycles) Key Receipts vs `replay-16` (`--every 60`):**
+  - **System-Wide Lift (`Stage 3R/4R` + `Stage 5/5b` + `Stage S1` + `Stage S2a`):** `SHOOTING GO` (`N=129`) jumped from `47.7% -> 54.1%` WR and `+433.4 -> +567.4 pts` (`+4.40/go`); `Stage 4b` Live PM `1.5x ATR` Wave Trail jumped `+355.7 -> +456.4 pts` (`65.4%` WR); `Stage 4c` Pebble Bypass went **`33/0` (`100.0%` WR, `+193.1 pts`, `+5.85/go`)**; `Stage 4R` 1-Position Live Account Curve earned **`+59.7 pts` (`PF 1.68`)** vs `Stage 4b Strict` `+9.8 pts` (`PF 1.11` — `6x` gain).
+  - **`[8e]` Scout Scorecard Proof & Two Exact Smoking Guns Caught on 15-Day Raw Tape:**
+    1. **`Stage S1` Proven (`100%` Match):** `Bell(:00) ATR = 3.24` (`3,271` cycles) vs `Serve(:01/:02) ATR = 3.24` (`6,512` cycles), `100.0%` cycles w/ live doors (`Avg Live=12.7`, `Memory=6.0`).
+    2. **`Stage S2a` & `Attraction` / `road_clear` Proven:** `Attraction >= 0.55` reached **`70.3%`** (`N=6,170`) vs `< 0.55` **`35.9%`** (`2x` lift); `road_clear=True` earned **`+1.78 pts/sig`** (`63.4%` `+12m` WR) vs `road_clear=False` `+1.15 pts/sig`; `burn_word` split cleanly (`solid=18,216 | eroding=579 | melting=667 | melting-fast=27`).
+    3. **Smoking Gun #1 (`Step S2b`):** `Bell(:00) spoof_cyc=0, iceberg_cyc=6` vs `Serve(:01/:02) spoof_cyc=126, iceberg_cyc=19` — `analyze_market` (`L6045`) passed raw `l3` (`Level3OrderBookAnalyzer`) instead of `level3` (`Level3Events`) on `:00` entry bells!
+    4. **Smoking Gun #2 (`Step S2c`, Queued Next After `replay-19`):** `Door attacked avg=8.84, max=195` (cumulative rolling `180s` absorption saturating `attack_pen = 0.40` and flattening `Resistance >= 0.55` Hold `40.6%` vs `< 0.55` Hold `39.3%`).
+- **`Stage S2b` Installed Tonight (Strict Single-Variable Isolation — `Step S2c` Held for Next Step):**
+  1. **`step2_market_analysis.py` (`analyze_market` `:00` Bell):** Passes analyzed `level3` (`Level3Events`) instead of raw `l3` into `build_signal_map(...)` on `:00` bar closes so `:00` entry evaluations see real `spoof_levels`, `iceberg_levels`, `iceberg_meta`, and `order_book_imbalance`.
+  2. **`signal_team.py` (`LevelBook.ingest` Iceberg Creator):** Reads clip-reload counts from `iceberg_meta[p]["refills"]` when `iceberg_levels[p] == 1`, enforces `<= 180s` freshness, and clears exhausted (`resting == 0` in covered book) or breached (`price` traded past level + spread) `"iceberg"` tags per *Frey & Sandås (2017)*.

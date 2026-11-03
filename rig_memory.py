@@ -112,6 +112,7 @@ def write_panel(path, rows):
 def run_builder(data_dir, extra=()):
     env = dict(os.environ)
     env["JUDGE_REPORT_CARD_EPOCH_DATE"] = ""
+    env["JUDGE_REPORT_CARD_DISABLE_EPOCH"] = "1"
     return subprocess.run(
         [sys.executable, str(BUILDER), "--data-dir", str(data_dir), *extra],
         capture_output=True, text=True, env=env)
@@ -130,6 +131,7 @@ def load_engines():
     if _ENG:
         return _ENG
     os.environ["JUDGE_REPORT_CARD_EPOCH_DATE"] = ""
+    os.environ["JUDGE_REPORT_CARD_DISABLE_EPOCH"] = "1"
     fake_s2 = types.ModuleType("step2_market_analysis")
     fake_s2.snapshot_to_dict = lambda s: {"price": 4000.0, "timestamp": "fixed",
                                           "order_flow": {}, "level3": {}}
