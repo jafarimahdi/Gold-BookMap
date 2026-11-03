@@ -525,9 +525,14 @@ class LevelBook:
                     lv.spoofed = False
 
         # --- DESCRIBERS ------------------------------------------------------
-        # absorption: a wall being eaten while price does not move. Use per-side
-        # rolling counts when available; fallback to signed absorption_net (+ = bid
-        # wall holding, - = ask wall holding).
+        # Step S2c (Easley et al. 2012; Bouchaud 2018):
+        # 1) Decay prior rolling attack pressure by 1 per cycle when not under active touch attack.
+        # 2) Only attribute touch absorption (`bid_absorbed`/`ask_absorbed`, rolling 180s) to a
+        #    LIVE wall (`size_now > 0`) actually sitting within touch range of `price`
+        #    (prevents blaming untouched $4-$8 distant walls up to `attacked=195`, caught in `replay-18/19`).
+        # 3) Bound rolling `lv.attacked` to `<= 12` instead of unbounded cumulative `+= cnt`.
+        touch_band = max(2.5 * max(_f(spread), 0.20), 0.25 * atr)
+        attacked_this_cycle = set()
         bid_abs = int(_f(getattr(order_flow, "bid_absorbed", 0)))
         ask_abs = int(_f(getattr(order_flow, "ask_absorbed", 0)))
         abs_net = int(_f(getattr(order_flow, "absorption_net", 0)))
@@ -535,18 +540,32 @@ class LevelBook:
             for side_eaten, cnt in (("bid", bid_abs), ("ask", ask_abs)):
                 if cnt <= 0:
                     continue
-                cands = [lv for lv in self.levels.values()
-                         if lv.side == side_eaten and not lv.spoofed]
+                cands = [
+                    lv for lv in self.levels.values()
+                    if lv.side == side_eaten and not lv.spoofed
+                    and (lv.size_now >= whale_thr or "iceberg" in lv.sources)
+                    and abs(lv.price - price) <= touch_band
+                ]
                 if cands:
                     nearest = min(cands, key=lambda l: abs(l.price - price))
-                    nearest.attacked += cnt
+                    nearest.attacked = min(12, max(nearest.attacked, cnt))
+                    attacked_this_cycle.add(nearest.price)
         elif abs_net:
             side_eaten = "bid" if abs_net > 0 else "ask"
-            cands = [lv for lv in self.levels.values()
-                     if lv.side == side_eaten and not lv.spoofed]
+            cands = [
+                lv for lv in self.levels.values()
+                if lv.side == side_eaten and not lv.spoofed
+                and (lv.size_now >= whale_thr or "iceberg" in lv.sources)
+                and abs(lv.price - price) <= touch_band
+            ]
             if cands:
                 nearest = min(cands, key=lambda l: abs(l.price - price))
-                nearest.attacked += abs(abs_net)
+                nearest.attacked = min(12, max(nearest.attacked, abs(abs_net)))
+                attacked_this_cycle.add(nearest.price)
+
+        for lv in self.levels.values():
+            if lv.price not in attacked_this_cycle and lv.attacked > 0:
+                lv.attacked = max(0, lv.attacked - 1)
 
         # l3_large_ofi: were the adds big-player sized
         if _f(getattr(level3, "large_order_events", 0)) > 0:
@@ -595,6 +614,8 @@ class LevelBook:
     def _score(self, lv: Level, price: float, atr: float, whale_thr: float) -> Dict[str, Any]:
         dist_atr = abs(lv.price - price) / atr
         size_t = _saturate(lv.size_now, whale_thr)
+        # Step S2c: Separate routine 10-14 lot quotes from 20-80 lot institutional walls
+        size_hold_t = _saturate(lv.size_now, max(whale_thr * 1.8, 1.0))
         persist = _saturate(lv.cycles_seen, 6.0)          # 6 cycles -> 0.5
         fade = 1.0 if lv.missing == 0 else max(0.3, 1.0 - 0.15 * lv.missing)
 
@@ -602,42 +623,46 @@ class LevelBook:
         # tape, 75% of walls were reached at a median distance of 0.5 ATR.
         attraction = (0.65 / (1.0 + dist_atr) + 0.35 * size_t) * fade
 
-        # RESISTANCE - will it hold? Old, thick and growing holds. Being eaten breaks.
-        attack_pen = min(0.4, 0.05 * lv.attacked)
-        # Growth is SYMMETRIC. Seen live 2026-09-25 22:44: a wall melted 12 -> 10 lots
-        # and its hold score went UP, because persistence kept climbing while
-        # max(0, growth) refused to score the shrink. A door getting thinner is the
-        # clearest sign it is about to break - noticing that is the point of a memory.
-        #
-        # And a melting door's history is worth less: being watched for six cycles
-        # while you dissolve is not a sign of strength, so persistence is discounted
-        # when the level is losing size.
+        # RESISTANCE - will it hold? Old, thick, distant-exhaustion & confluent walls hold;
+        # walls losing size under attack break, whereas walls holding firm under touch
+        # absorption confirm passive institutional defense (Easley et al. 2012; Bouchaud 2018).
+        is_eroding_size = (lv.growth < -0.05) or (lv.burn_rate > 0.5)
+        if lv.attacked > 0 and is_eroding_size:
+            attack_adj = -min(0.35, 0.04 * lv.attacked)
+        elif lv.attacked > 0 and lv.burn_word == "solid":
+            attack_adj = min(0.08, 0.02 * lv.attacked)
+        else:
+            attack_adj = 0.0
         health = 1.0 if lv.growth >= -0.05 else 0.55
-        resistance = (0.45 * size_t + 0.30 * persist * health
-                      + 0.20 * lv.growth + (0.10 if lv.big_player else 0.0)
-                      - attack_pen) * fade
+        dist_cushion = min(0.10, 0.06 * dist_atr)
+        resistance = (0.42 * size_hold_t + 0.28 * persist * health
+                      + 0.18 * lv.growth + dist_cushion
+                      + (0.10 if lv.big_player else 0.0)
+                      + attack_adj) * fade
         if "iceberg" in lv.sources:
-            resistance = min(1.0, resistance + 0.15)      # hidden size is real size
+            resistance = min(1.0, resistance + 0.17)      # hidden size is real size
         # Institutions cluster on round numbers - 4400.0 held 23 lots while every
         # neighbour held 4. A round price is a chosen price.
         if abs(lv.price - round(lv.price)) < 1e-9 and int(round(lv.price)) % 10 == 0:
             resistance = min(1.0, resistance + ROUND_BONUS)
-        # standing far above your neighbours is itself evidence of intent
-        if lv.outlier_x >= OUTLIER_X:
+        # Step S2c: Require >=4.0x local median (not 2.5x admission floor) for dominant outlier bonus
+        if lv.outlier_x >= 4.0:
             resistance = min(1.0, resistance + 0.10)
         # A wall that appears exactly where the market reacted before is the strongest
         # thing the scout can find: live orders AND a memory of the place.
-        # a door being eaten fast will not be there when price arrives
-        if lv.burn_word == "melting-fast":
-            resistance *= 0.45
-        elif lv.burn_word == "melting":
-            resistance *= 0.75
         if lv.size_now > 0 and any(
             s in ("poc_day", "htf_poc", "vwap", "supply", "demand",
                   "cme_settlement", "onh", "onl", "ibh", "ibl")
             for s in lv.sources
         ):
-            resistance = min(1.0, resistance + 0.12)
+            resistance = min(1.0, resistance + 0.15)
+        # Apply collapse discount LAST so a melting wall can never climb back to >=0.55 via bonuses.
+        if lv.burn_word == "melting-fast":
+            resistance *= 0.45
+        elif lv.burn_word == "melting":
+            resistance *= 0.75
+        elif lv.burn_word == "eroding":
+            resistance *= 0.88
 
         return {
             "price": lv.price, "side": lv.side, "size": round(lv.size_now, 1),

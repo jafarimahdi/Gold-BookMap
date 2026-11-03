@@ -687,7 +687,7 @@ def _refresh() -> None:
     g["BOOKMAP_MAX_DEPTH_LEVELS"] = _fint("BOOKMAP_MAX_DEPTH_LEVELS", 40)
 
     # ---- CRITICAL v5.2: L3 Whale + Regime Adaptive + AI Fallback + Basis ----
-    g["L3_WHALE_THRESHOLD"] = _ffloat("L3_WHALE_THRESHOLD", 100.0)  # lots
+    g["L3_WHALE_THRESHOLD"] = _ffloat("L3_WHALE_THRESHOLD", 10.0)  # CME GC MBO lots (Step S2c aligned w/ .env & signal_team)
     g["L3_WHALE_PROXIMITY_PCT"] = _ffloat("L3_WHALE_PROXIMITY_PCT", 0.5)  # % near price
     g["L3_WHALE_WEIGHT"] = _ffloat("L3_WHALE_WEIGHT", 1.5)
     g["SIGNAL_W_L3_WHALE"] = _ffloat("SIGNAL_W_L3_WHALE", 1.2)
