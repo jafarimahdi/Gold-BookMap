@@ -1946,6 +1946,7 @@ def replay_single_day(
                 s3c_live_capped = bool(s3c.get("live_capped", False))
                 s3d = (getattr(snap, "shadow_candidates", None) or {}).get("stage3d_gate") or {}
                 s3d_live_capped = bool(s3d.get("live_capped", False))
+                s3d_reason = str(s3d.get("reason") or "")
                 s3d_sniper_auth = bool(s3d.get("sniper_authorized", False))
                 s3r = (getattr(snap, "shadow_candidates", None) or {}).get("stage3r_gate") or {}
                 s3r_live_capped = bool(s3r.get("live_capped", False))
@@ -1962,6 +1963,8 @@ def replay_single_day(
                     gate_stage = "BLOCKED: Conf < 50% (Stage 3b Conflict)"
                 elif sig_conf < conf_thr and s3c_live_capped:
                     gate_stage = "BLOCKED: Session Dead-Zone (Stage 3c)"
+                elif sig_conf < conf_thr and s3d_live_capped and s3d_reason == "power_opposes_direction":
+                    gate_stage = "BLOCKED: POWER Opposes (Stage P3)"
                 elif sig_conf < conf_thr and s3d_live_capped:
                     gate_stage = "BLOCKED: Late POWER Climax (Stage 3d)"
                 elif sig_conf < conf_thr and s3r_live_capped:
@@ -1972,6 +1975,8 @@ def replay_single_day(
                     gate_stage = f"SHOOTING GO ({shot_style})"
                 elif s3d_sniper_auth:
                     gate_stage = f"CONF>={conf_thr:.0f}% + SNIPER AUTH (Shooting={shot_act})"
+                elif s3d_reason == "non_trend_regime":
+                    gate_stage = f"CONF>={conf_thr:.0f}% + NON-TREND WAIT (Stage P3)"
                 elif pw_side == sig_dir:
                     gate_stage = f"CONF>={conf_thr:.0f}% + POWER ALIGNED (Shooting={shot_act})"
                 else:
@@ -2296,6 +2301,9 @@ def replay_single_day(
                     "regime": str(pw_rg_d.get("market_regime") or "UNKNOWN").upper(),
                     "shadow_fl": bool(pw_rg_d.get("shadow_flat_lake")),
                     "shadow_vr": bool(pw_rg_d.get("shadow_vr_mean_reverting")),
+                    "s3d_reason": s3d_reason,
+                    "s3d_auth": bool(s3d_sniper_auth),
+                    "s3d_capped": bool(s3d_live_capped),
                     "l3_status": str((pw_av_d.get("l3_aggr_limit") or {}).get("status") or "MISSING"),
                     "j_vals": {
                         str(jk): float(jv.get("value"))
@@ -3277,6 +3285,34 @@ def synthesize_multi_day(results: List[Dict[str, Any]]) -> Tuple[str, str, Dict[
         lines.append(
             f"  4) Step-P2 Sensor Health (Bell avg_cov={avg_cov:.2f}, l3_valid={l3_valid}/{len(bell_pw)}, l3_not_emitted={l3_not_em}/{len(bell_pw)}): "
             + " | ".join(sens_parts)
+        )
+        clean_tr_pw = [
+            c for c in bell_pw
+            if c["power_diag"].get("regime") == "TREND"
+            and not c["power_diag"].get("shadow_fl")
+            and not c["power_diag"].get("shadow_vr")
+        ]
+        fl_pw = [c for c in bell_pw if c["power_diag"].get("shadow_fl")]
+        vr_pw = [c for c in bell_pw if c["power_diag"].get("shadow_vr")]
+        s3d_auth_n = sum(1 for c in pw_cycles if c["power_diag"].get("s3d_auth"))
+        s3d_clim_n = sum(
+            1 for c in pw_cycles
+            if c["power_diag"].get("s3d_capped") and c["power_diag"].get("s3d_reason") == "late_power_climax"
+        )
+        s3d_opp_n = sum(
+            1 for c in pw_cycles
+            if c["power_diag"].get("s3d_capped") and c["power_diag"].get("s3d_reason") == "power_opposes_direction"
+        )
+        s3d_nt_n = sum(
+            1 for c in pw_cycles
+            if c["power_diag"].get("s3d_reason") == "non_trend_regime"
+            and not c["power_diag"].get("s3d_auth")
+        )
+        lines.append(
+            f"  5) Step-P3 Regime & Envelope Audit: Clean_TREND={_pw_fwd_stats(clean_tr_pw)} | "
+            f"shadow_flat_lake={_pw_fwd_stats(fl_pw)} | shadow_vr_chop={_pw_fwd_stats(vr_pw)} || "
+            f"Stage3d/P3: sniper_auth={s3d_auth_n}, climax_veto={s3d_clim_n}, "
+            f"oppose_veto={s3d_opp_n}, non_trend_veto={s3d_nt_n}"
         )
     else:
         lines.append("  0 POWER cycles recorded.")

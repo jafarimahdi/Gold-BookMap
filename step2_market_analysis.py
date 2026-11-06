@@ -6768,9 +6768,20 @@ def analyze_market(market_data: Dict[str, Any],
     try:
         _s3d_live = bool(getattr(config, "STAGE3D_SNIPER_GATE_LIVE_ENABLED", False))
         _s3d_blk_climax = bool(getattr(config, "STAGE3D_BLOCK_POWER_CLIMAX", True))
+        _s3d_blk_oppose = bool(getattr(config, "STAGE3D_BLOCK_POWER_OPPOSITION", True))
+        _s3d_req_trend = bool(getattr(config, "STAGE3D_REQUIRE_TREND_REGIME", True))
         _s3d_entry_on = bool(getattr(config, "STAGE3D_SNIPER_ENTRY_ENABLED", True))
         _raw_pw_dir = str(_power_v2.get("direction", "NEITHER") or "NEITHER").upper()
         _raw_pw_side = "BUY" if _raw_pw_dir == "UP" else ("SELL" if _raw_pw_dir == "DOWN" else "NEITHER")
+        _s3d_step2_reg = str(regime or "NEUTRAL").upper()
+        _s3d_pw_reg = str(
+            (_power_v2.get("context") or {}).get(
+                "market_regime",
+                (_power_v2.get("regime_diagnostics") or _regime_v2 or {}).get("market_regime", "UNKNOWN"),
+            )
+            or "UNKNOWN"
+        ).upper()
+        _s3d_either_trend = (_s3d_step2_reg == "TREND") or (_s3d_pw_reg == "TREND")
         _prior_gates_ok = (
             direction in ("BUY", "SELL")
             and not bool(_fg_shadow_payload.get("live_capped", False))
@@ -6783,13 +6794,23 @@ def analyze_market(market_data: Dict[str, Any],
         _pre_s3d_conf = float(confidence)
         _s3d_ok = True
         _s3d_reason = "ok"
+        _s3d_sniper_block_reason = ""
         if _prior_gates_ok and _s3d_blk_climax and _raw_pw_side == direction:
             _s3d_ok = False
             _s3d_reason = "late_power_climax"
+        elif _prior_gates_ok and _s3d_blk_oppose and _raw_pw_side in ("BUY", "SELL") and _raw_pw_side != direction:
+            _s3d_ok = False
+            _s3d_reason = "power_opposes_direction"
+        elif _prior_gates_ok and _s3d_req_trend and not _s3d_either_trend:
+            _s3d_sniper_block_reason = "non_trend_regime"
         _s3d_shadow_payload = {
             "ok": _s3d_ok,
-            "reason": _s3d_reason,
+            "reason": _s3d_reason if not _s3d_ok else (_s3d_sniper_block_reason or "ok"),
             "raw_power_direction": _raw_pw_dir,
+            "step2_regime": _s3d_step2_reg,
+            "power_regime": _s3d_pw_reg,
+            "either_trend_confirmed": bool(_s3d_either_trend),
+            "sniper_blocked_reason": _s3d_sniper_block_reason or None,
             "pre_stage3d_confidence": _pre_s3d_conf,
             "sniper_authorized": False,
             "live_capped": False,
@@ -6803,10 +6824,18 @@ def analyze_market(market_data: Dict[str, Any],
                 confidence = round(_cap_s3d, 2)
                 _s3d_shadow_payload["live_capped"] = True
                 notes.append(
-                    f"STAGE3D_GATE live cap: {_s3d_reason} (POWER={_raw_pw_dir} agrees with {direction}) -> "
+                    f"STAGE3D_GATE live cap: {_s3d_reason} "
+                    f"(POWER={_raw_pw_dir}, step2_regime={_s3d_step2_reg}, power_regime={_s3d_pw_reg}) -> "
                     f"confidence {_pre_s3d_conf:.1f}%->{confidence:.1f}%"
                 )
-        elif _s3d_live and _s3d_entry_on and _prior_gates_ok and _s3d_ok and confidence >= 50.0:
+        elif (
+            _s3d_live
+            and _s3d_entry_on
+            and _prior_gates_ok
+            and _s3d_ok
+            and not _s3d_sniper_block_reason
+            and confidence >= 50.0
+        ):
             _auth_dir = "UP" if direction == "BUY" else "DOWN"
             _auth_rc = "UPWARD_FORCE_DOMINATES" if direction == "BUY" else "DOWNWARD_FORCE_DOMINATES"
             _pw_ctx_raw = dict(_power_v2.get("context") or {})

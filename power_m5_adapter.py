@@ -379,6 +379,12 @@ def build_m5_inputs(
     big_count = 0
     big_volume_share = 0.0
     big_quality = 0.0
+    big_absorption_damped = False
+    bar_disp = (
+        (current_timed[-1][1] - current_timed[0][1])
+        if len(current_timed) >= 2
+        else 0.0
+    )
     total_current_volume = sum(volume for _, volume, _ in current)
     if volumes and len(volumes) >= min_trades:
         idx = min(len(volumes) - 1, max(0, math.ceil(0.98 * len(volumes)) - 1))
@@ -390,6 +396,12 @@ def build_m5_inputs(
             big_total = sum(volume for volume, _ in big)
             if big_total > 0 and total_current_volume > 0:
                 big_value = sum(volume * side for volume, side in big) / total_current_volume
+                # Stage P3 Kyle's lambda absorption damper (Easley et al. 2012; Bouchaud 2018):
+                # when large aggressive block prints push one way yet actual completed bar price
+                # displaces >= 2 ticks the opposite way, passive limit liquidity absorbed the burst.
+                if big_value * bar_disp < 0.0 and abs(bar_disp) >= 2.0 * step:
+                    big_value *= 0.35
+                    big_absorption_damped = True
                 big_volume_share = big_total / total_current_volume
                 big_quality = current_quality
 
@@ -472,11 +484,6 @@ def build_m5_inputs(
             # Kyle's lambda / passive absorption check (Easley et al. 2012; Bouchaud 2018):
             # if net order flow pushes one way while actual bar price displaces >= 2 ticks
             # the opposite way, passive institutional limit liquidity is absorbing aggressors.
-            bar_disp = (
-                (current_timed[-1][1] - current_timed[0][1])
-                if len(current_timed) >= 2
-                else 0.0
-            )
             if l3_aggr_val * bar_disp < 0.0 and abs(bar_disp) >= 2.0 * step:
                 l3_aggr_val *= 0.35
                 l3_absorption_damped = True
@@ -597,6 +604,7 @@ def build_m5_inputs(
             "big_print_cutoff": big_cutoff,
             "big_print_count": big_count,
             "big_print_volume_share": round(big_volume_share, 4),
+            "big_print_absorption_damped": bool(big_absorption_damped),
             "big_print_signed_share_of_total_volume": round(big_value, 4),
             "current_delta_imbalance": round(current_imbalance, 4),
             "previous_delta_imbalance": round(previous_imbalance, 4),
