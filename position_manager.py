@@ -1201,8 +1201,16 @@ class PositionManager:
                 and str(shot_obj.get("side", "")).upper() == side
                 and str(shot_obj.get("stop_source", "")).upper() == "A2_BURST_FIXED"
             )
+            _pos_time_raw = float(getattr(position, "time", 0.0) or 0.0)
+            _opened_ts = (
+                _pos_time_raw
+                if (0.0 < _pos_time_raw <= now + 5.0 and (now - _pos_time_raw) <= 86400.0 * 14)
+                else now
+            )
+            _entry_div = round(float(getattr(snapshot, "divergence", 0.0) or 0.0), 4)
             st = {"initial_sl": cur_sl if cur_sl > 0 else 0.0,
-                  "be_done": False, "adopted_ts": now, "last_modify_ts": 0.0,
+                  "be_done": False, "adopted_ts": now, "opened_ts": _opened_ts,
+                  "entry_divergence": _entry_div, "last_modify_ts": 0.0,
                   "is_a2_burst": bool(comment_is_a2 or snap_is_a2)}
             self._state[ticket] = st
             self._save_state()
@@ -1283,15 +1291,59 @@ class PositionManager:
                         f"flow against={flow_against}", ctx)
             return
 
-        # 2) DIVERGENCE_EXIT — CVD diverges while the trade isn't paid yet
+        # 2) DIVERGENCE_EXIT — Stage PM-1 (2026-11-06): disabled by default (`PM_DIVERGENCE_EXIT=0`)
+        # so Stage-4b wave brackets are never panic-closed 49-84s after entry on pre-existing
+        # waterfall absorption. When explicitly enabled, require >= 1 active-timeframe bar age
+        # (`PM_DIVERGENCE_MIN_AGE_SECONDS`), >= 0.50 divergence strength, fresh post-entry
+        # divergence (not pre-existing at entry), and confirmed Step-2 `cvd_divergence` + flow_against.
         div = float(getattr(snapshot, "divergence", 0.0) or 0.0)
-        if (config.PM_DIVERGENCE_EXIT and div != 0.0
-                and ((div < 0 and is_buy) or (div > 0 and not is_buy))
-                and r_now < config.PM_DIVERGENCE_MIN_R):
-            self._close(position, "DIVERGENCE_EXIT",
-                        f"CVD divergence {div:+.0f} against {side} at "
-                        f"{r_now:+.2f}R", ctx)
-            return
+        if bool(getattr(config, "PM_DIVERGENCE_EXIT", False)):
+            _div_min_str = float(getattr(config, "PM_DIVERGENCE_STRENGTH_MIN", 0.50) or 0.50)
+            _div_min_age = float(
+                getattr(
+                    config,
+                    "PM_DIVERGENCE_MIN_AGE_SECONDS",
+                    getattr(config, "POWER_BAR_SECONDS", 180),
+                )
+                or 0.0
+            )
+            _open_ts = float(st.get("opened_ts", st.get("adopted_ts", now)) or now)
+            _pos_age_s = max(0.0, now - _open_ts)
+            _div_against = (div <= -_div_min_str and is_buy) or (div >= _div_min_str and not is_buy)
+            _entry_div_prev = float(st.get("entry_divergence", 0.0) or 0.0)
+            _pre_existing_div = (
+                (_entry_div_prev <= -0.20 and is_buy and (div - _entry_div_prev) > -0.35)
+                or (_entry_div_prev >= 0.20 and not is_buy and (div - _entry_div_prev) < 0.35)
+            )
+            _div_judge_ok = True
+            if bool(getattr(config, "PM_DIVERGENCE_REQUIRE_CONFIRMED_JUDGE", True)):
+                _opp_side = "SELL" if is_buy else "BUY"
+                _jp = getattr(snapshot, "judge_panel", None) or []
+                _panel_has_div = any(
+                    isinstance(jr, dict)
+                    and str(jr.get("judge", "")).strip() == "cvd_divergence"
+                    and str(jr.get("dir", "")).upper() == _opp_side
+                    for jr in _jp
+                )
+                if not _panel_has_div:
+                    _expect_note = "bearish cvd divergence" if is_buy else "bullish cvd divergence"
+                    _panel_has_div = any(
+                        _expect_note in str(nt).lower()
+                        for nt in (getattr(snapshot, "notes", None) or [])
+                    )
+                _div_judge_ok = bool(_panel_has_div and flow_against)
+            if (
+                not adopted
+                and _div_against
+                and _pos_age_s >= _div_min_age
+                and not _pre_existing_div
+                and _div_judge_ok
+                and r_now < float(getattr(config, "PM_DIVERGENCE_MIN_R", 0.3) or 0.3)
+            ):
+                self._close(position, "DIVERGENCE_EXIT",
+                            f"CVD divergence {div:+.2f} against {side} at "
+                            f"{r_now:+.2f}R (age {_pos_age_s:.0f}s)", ctx)
+                return
 
         # 3) TIME_STOP — old and going nowhere (A3 burst = 12m; M3 scalp = 45m)
         age_min = (now - float(st.get("adopted_ts", now))) / 60.0

@@ -2326,6 +2326,7 @@ def replay_single_day(
                     "direction": sig_dir,
                     "confidence": round(sig_conf, 1),
                     "strength": round(sig_str, 1),
+                    "divergence": round(float(getattr(snap, "divergence", 0.0) or 0.0), 4),
                     "regime": regime,
                     "atr": round(atr_live, 2),
                     "power_dir": pw_dir,
@@ -2374,6 +2375,38 @@ def replay_single_day(
             config.DATA_SOURCE = orig_data_source
             config.DATA_SYMBOL = orig_data_symbol
             _reset_step2_singletons()
+
+    # Stage PM-1 (2026-11-06): Evaluate what legacy buggy DIVERGENCE_EXIT (`div != 0.0` & `r_now < 0.30`)
+    # would have done on subsequent cycles vs healed Stage PM-1 / Stage-4b Live PM (`Bookmark #12` Leak #1).
+    for idx_c, gc_row in enumerate(cycles_out):
+        if gc_row.get("shot_action") != "GO" or gc_row.get("shot_pm4b_pts") is None:
+            gc_row["old_div_panic"] = False
+            gc_row["old_div_pts"] = gc_row.get("shot_pm4b_pts")
+            continue
+        _g_dir = str(gc_row.get("direction") or "")
+        _g_px = float(gc_row.get("price") or 0.0)
+        _g_sl_d = max(0.50, float(gc_row.get("shot_sl_dist") or (2.0 * float(gc_row.get("atr") or 1.0))))
+        _g_end_ep = float(gc_row.get("shot_pm4b_exit_ep") or (float(gc_row["entry_ep"]) + max_hold_min * 60.0))
+        _panic_hit = False
+        _panic_pts = float(gc_row["shot_pm4b_pts"])
+        for nxt_row in cycles_out[idx_c + 1:]:
+            if nxt_row.get("error"):
+                continue
+            _nxt_ep = float(nxt_row.get("entry_ep") or 0.0)
+            if _nxt_ep >= _g_end_ep:
+                break
+            _nxt_px = float(nxt_row.get("price") or 0.0)
+            if _nxt_px <= 0.0 or _g_px <= 0.0:
+                continue
+            _gain_now = (_nxt_px - _g_px) if _g_dir == "BUY" else (_g_px - _nxt_px)
+            _r_cur = _gain_now / _g_sl_d
+            _nxt_div = float(nxt_row.get("divergence") or 0.0)
+            if ((_nxt_div < 0.0 and _g_dir == "BUY") or (_nxt_div > 0.0 and _g_dir == "SELL")) and _r_cur < 0.30:
+                _panic_hit = True
+                _panic_pts = round(_gain_now - spread_cost, 2)
+                break
+        gc_row["old_div_panic"] = _panic_hit
+        gc_row["old_div_pts"] = _panic_pts
 
     pxs_win = [px for ep, px in trades if win_start_utc.timestamp() <= ep <= win_end_utc.timestamp()]
     day_range = (max(pxs_win) - min(pxs_win)) if pxs_win else 0.0
@@ -2936,6 +2969,15 @@ def synthesize_multi_day(results: List[Dict[str, Any]]) -> Tuple[str, str, Dict[
             lines.append(
                 f"  * Law #9 Isolated Stage-4c Pebble-Bypass Subset: N={len(peb_cycles)} | "
                 f"W/L={p_w}/{p_l} ({p_wr:.1f}% WR) | PM4B_PTS={p_tot:+.1f} ({p_tot/len(peb_cycles):+.2f}/go)"
+            )
+        pm1_eval = [c for c in go_cycles if c.get("shot_pm4b_pts") is not None and "old_div_pts" in c]
+        if pm1_eval:
+            old_panics = sum(1 for c in pm1_eval if c.get("old_div_panic"))
+            old_tot = sum(float(c["old_div_pts"]) for c in pm1_eval)
+            healed_tot = sum(float(c["shot_pm4b_pts"]) for c in pm1_eval)
+            lines.append(
+                f"  * Law #9 Stage PM-1 Divergence-Exit Audit: Old_Panic_Closes={old_panics}/{len(pm1_eval)} "
+                f"(Old_DivExit_PTS={old_tot:+.1f} vs Healed_PM1_PTS={healed_tot:+.1f}, Saved={healed_tot - old_tot:+.1f} pts)"
             )
     else:
         lines.append("  0 SHOOTING GO cycles executed on this sample.")
