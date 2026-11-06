@@ -2265,6 +2265,39 @@ def replay_single_day(
                     "dir_burn": str(dir_door.get("burn_word") or "solid") if isinstance(dir_door, dict) else None,
                     "dir_atk": int(dir_door.get("attacked") or 0) if isinstance(dir_door, dict) else 0,
                 }
+                pw_bar_lag_s = None
+                if isinstance(pw, dict) and pw.get("bar_end_utc"):
+                    try:
+                        _be_ep = datetime.fromisoformat(
+                            str(pw["bar_end_utc"]).replace("Z", "+00:00")
+                        ).timestamp()
+                        pw_bar_lag_s = round(max(0.0, float(tc_ep) - _be_ep), 1)
+                    except Exception:
+                        pw_bar_lag_s = None
+                pw_rg_d = (pw.get("regime_diagnostics") or {}) if isinstance(pw, dict) else {}
+                pw_av_d = (pw.get("judge_availability") or {}) if isinstance(pw, dict) else {}
+                pw_in_j = (pw.get("input_judges") or {}) if isinstance(pw, dict) else {}
+                power_diag = {
+                    "is_serve": bool(is_a1_serve),
+                    "bar_lag_s": pw_bar_lag_s,
+                    "dir": pw_dir,
+                    "reason": str(pw.get("reason_code") or "UNKNOWN") if isinstance(pw, dict) else "UNKNOWN",
+                    "dom_pct": max(
+                        float(pw.get("up_power_pct") or 50.0),
+                        float(pw.get("down_power_pct") or 50.0),
+                    ) if isinstance(pw, dict) else 50.0,
+                    "coverage": float(pw.get("coverage") or 0.0) if isinstance(pw, dict) else 0.0,
+                    "streak": int(pw.get("power_streak_cycles") or 0) if isinstance(pw, dict) else 0,
+                    "regime": str(pw_rg_d.get("market_regime") or "UNKNOWN").upper(),
+                    "shadow_fl": bool(pw_rg_d.get("shadow_flat_lake")),
+                    "shadow_vr": bool(pw_rg_d.get("shadow_vr_mean_reverting")),
+                    "l3_status": str((pw_av_d.get("l3_aggr_limit") or {}).get("status") or "MISSING"),
+                    "j_vals": {
+                        str(jk): float(jv.get("value"))
+                        for jk, jv in pw_in_j.items()
+                        if isinstance(jv, dict) and isinstance(jv.get("value"), (int, float))
+                    },
+                }
                 cycles_out.append({
                     "entry_ep": tc_ep,
                     "dt_utc": tc_dt,
@@ -2317,6 +2350,7 @@ def replay_single_day(
                     "shot_c3p_out": shot_c3p_out, "shot_c3p_pts": shot_c3p_pts,
                     "a2_fix_pts": a2_fix_pts, "a2_atr_pts": a2_atr_pts,
                     "scout": scout_diag,
+                    "power_diag": power_diag,
                 })
                 tc_ep += every_s
         finally:
@@ -3102,6 +3136,144 @@ def synthesize_multi_day(results: List[Dict[str, Any]]) -> Tuple[str, str, Dict[
         lines.append("  4) road_vacuum Corridor Travel: " + " | ".join(vac_parts))
     else:
         lines.append("  0 Scout cycles recorded.")
+
+    # [8f] POWER Team ("The Legs") Raw-Data Scorecard (Bell Sync, Streak Age, Dominance & Sensor Health)
+    pw_cycles = [
+        c for r in ok_days for c in r["cycles"]
+        if not c.get("error") and isinstance(c.get("power_diag"), dict)
+    ]
+    lines.append(
+        f"\n[8f] POWER TEAM RAW-DATA SCORECARD (+{h4}m = 4x {tf_lbl} FORWARD TAPE, N={len(pw_cycles):,} CYCLES)"
+    )
+    if pw_cycles:
+        _bar_s_ref = max(60, 60 * int(h1))
+        p_bells = [
+            c for c in pw_cycles
+            if not c["power_diag"].get("is_serve")
+            and c["power_diag"].get("bar_lag_s") is not None
+            and int(round(float(c.get("entry_ep") or 0.0))) % _bar_s_ref == 0
+        ]
+        if not p_bells:
+            p_bells = [c for c in pw_cycles if not c["power_diag"].get("is_serve") and c["power_diag"].get("bar_lag_s") is not None]
+        p_servs = [c for c in pw_cycles if c["power_diag"].get("is_serve") and c["power_diag"].get("bar_lag_s") is not None]
+        b_lag_avg = (sum(c["power_diag"]["bar_lag_s"] for c in p_bells) / len(p_bells)) if p_bells else 0.0
+        b_lag_max = max((c["power_diag"]["bar_lag_s"] for c in p_bells), default=0.0)
+        s_lag_avg = (sum(c["power_diag"]["bar_lag_s"] for c in p_servs) / len(p_servs)) if p_servs else 0.0
+        n_up = sum(1 for c in pw_cycles if c["power_diag"]["dir"] == "UP")
+        n_dn = sum(1 for c in pw_cycles if c["power_diag"]["dir"] == "DOWN")
+        n_ne = sum(1 for c in pw_cycles if c["power_diag"]["dir"] == "NEITHER")
+        spk_pct = 100.0 * (n_up + n_dn) / len(pw_cycles)
+        lines.append(
+            f"  1) Stage-P1 Bell Sync & Census: Bell(:00) bar_lag avg={b_lag_avg:.1f}s (max={b_lag_max:.1f}s) | "
+            f"Serve(:01/:02) bar_lag avg={s_lag_avg:.1f}s | Speak={n_up + n_dn:,}/{len(pw_cycles):,} ({spk_pct:.1f}%: UP={n_up}, DOWN={n_dn}, NEITHER={n_ne})"
+        )
+        rc_counts: Dict[str, int] = defaultdict(int)
+        for c in pw_cycles:
+            if c["power_diag"]["dir"] == "NEITHER":
+                rc_counts[c["power_diag"]["reason"]] += 1
+        top_rc = ", ".join(f"{k}={v}" for k, v in sorted(rc_counts.items(), key=lambda kv: -kv[1])[:5]) or "none"
+        rg_counts: Dict[str, int] = defaultdict(int)
+        fl_cnt = vr_cnt = 0
+        for c in pw_cycles:
+            rg_counts[c["power_diag"]["regime"]] += 1
+            if c["power_diag"].get("shadow_fl"):
+                fl_cnt += 1
+            if c["power_diag"].get("shadow_vr"):
+                vr_cnt += 1
+        lines.append(
+            f"     Regime & Silence Census: TREND={rg_counts['TREND']:,} | RANGE={rg_counts['RANGE']:,} | "
+            f"UNKNOWN={rg_counts['UNKNOWN']:,} (shadow_flat_lake={fl_cnt}, shadow_vr_chop={vr_cnt}) | Top NEITHER: {top_rc}"
+        )
+
+        # 2) Forward +1b / +4b accuracy on Bell(:00) POWER directional calls (Streak=1 vs Streak>=2 & Dominance)
+        def _pw_fwd_stats(sub_c: List[Dict[str, Any]]) -> str:
+            ev = [
+                c for c in sub_c
+                if c["power_diag"]["dir"] in ("UP", "DOWN")
+                and c.get("pb4") is not None and c.get("price")
+            ]
+            if not ev:
+                return "N=0"
+            t4 = [
+                (1.0 if c["power_diag"]["dir"] == "UP" else -1.0) * (float(c["pb4"]) - float(c["price"]))
+                for c in ev
+            ]
+            t1 = [
+                (1.0 if c["power_diag"]["dir"] == "UP" else -1.0) * (float(c["pb1"]) - float(c["price"]))
+                for c in ev if c.get("pb1") is not None
+            ]
+            wr4 = 100.0 * sum(1 for x in t4 if x > 0) / len(t4)
+            m1 = (sum(t1) / len(t1)) if t1 else 0.0
+            m4 = sum(t4) / len(t4)
+            return f"N={len(ev)} ({wr4:.1f}% +{h4}m WR, +{h1}m={m1:+.2f}, +{h4}m={m4:+.2f} pts)"
+
+        bell_pw = [c for c in pw_cycles if not c["power_diag"].get("is_serve")]
+        st1 = [c for c in bell_pw if c["power_diag"]["streak"] == 1]
+        st2p = [c for c in bell_pw if c["power_diag"]["streak"] >= 2]
+        dom_60 = [c for c in bell_pw if 60.0 <= c["power_diag"]["dom_pct"] < 75.0]
+        dom_75 = [c for c in bell_pw if c["power_diag"]["dom_pct"] >= 75.0]
+        lines.append(
+            f"  2) Bell(:00) Directional Edge: ALL={_pw_fwd_stats(bell_pw)} | "
+            f"Fresh(Streak=1)={_pw_fwd_stats(st1)} | Continuation(Streak>=2)={_pw_fwd_stats(st2p)}"
+        )
+        lines.append(
+            f"     Dominance Calibration: Dom 60-75%={_pw_fwd_stats(dom_60)} | Dom >=75%={_pw_fwd_stats(dom_75)}"
+        )
+
+        # 3) Heart x POWER Interaction on Actionable Signals (Conf>=thr)
+        act_hp = [
+            c for c in pw_cycles
+            if c.get("direction") in ("BUY", "SELL") and float(c.get("confidence") or 0.0) >= conf_thr
+            and c.get("pb4") is not None and c.get("price")
+        ]
+        def _hp_side(c_item: Dict[str, Any]) -> str:
+            pd_s = c_item["power_diag"]["dir"]
+            return "BUY" if pd_s == "UP" else ("SELL" if pd_s == "DOWN" else "NEITHER")
+
+        hp_agree = [c for c in act_hp if _hp_side(c) == c.get("direction")]
+        hp_neith = [c for c in act_hp if _hp_side(c) == "NEITHER"]
+        hp_opp = [c for c in act_hp if _hp_side(c) in ("BUY", "SELL") and _hp_side(c) != c.get("direction")]
+        def _hp_stat(sub_h: List[Dict[str, Any]]) -> str:
+            if not sub_h:
+                return "N=0"
+            d4 = [
+                (1.0 if c.get("direction") == "BUY" else -1.0) * (float(c["pb4"]) - float(c["price"]))
+                for c in sub_h
+            ]
+            wr_h = 100.0 * sum(1 for x in d4 if x > 0) / len(d4)
+            return f"N={len(sub_h)} ({wr_h:.1f}% +{h4}m WR, {sum(d4)/len(d4):+.2f} pts/sig)"
+
+        lines.append(
+            f"  3) Heart x POWER (Conf>={conf_thr:.0f}%): Agree(Climax)={_hp_stat(hp_agree)} | "
+            f"POWER=NEITHER(Sniper)={_hp_stat(hp_neith)} | Oppose={_hp_stat(hp_opp)}"
+        )
+
+        # 4) Sub-Sensor & Step-P2 L3 Availability Check on Bell(:00)
+        l3_not_em = sum(1 for c in bell_pw if c["power_diag"]["l3_status"] == "NOT_EMITTED")
+        avg_cov = (sum(c["power_diag"]["coverage"] for c in bell_pw) / len(bell_pw)) if bell_pw else 0.0
+        sens_parts = []
+        for s_key in ("footprint_delta", "cvd_momentum", "big_prints", "footprint_levels", "l3_aggr_limit"):
+            s_ev = [
+                c for c in bell_pw
+                if abs(float((c["power_diag"]["j_vals"] or {}).get(s_key, 0.0))) >= 0.25
+                and c.get("pb4") is not None and c.get("price")
+            ]
+            if s_ev:
+                s_pts = [
+                    (1.0 if float(c["power_diag"]["j_vals"][s_key]) > 0 else -1.0)
+                    * (float(c["pb4"]) - float(c["price"]))
+                    for c in s_ev
+                ]
+                s_wr = 100.0 * sum(1 for x in s_pts if x > 0) / len(s_pts)
+                sens_parts.append(f"{s_key}: N={len(s_ev)} ({s_wr:.1f}% WR, {sum(s_pts)/len(s_pts):+.2f})")
+            else:
+                sens_parts.append(f"{s_key}: N=0")
+        lines.append(
+            f"  4) Step-P2 Sensor Health (Bell avg_cov={avg_cov:.2f}, l3_not_emitted={l3_not_em}/{len(bell_pw)}): "
+            + " | ".join(sens_parts)
+        )
+    else:
+        lines.append("  0 POWER cycles recorded.")
 
     # [9] Stage 1: Timeframe-linked 1..4-bar path & Market Trick Detector
     lines.append(

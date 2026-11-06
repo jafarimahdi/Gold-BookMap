@@ -534,6 +534,10 @@ def _refresh() -> None:
     g["SHOOT_ROAD_HISTORY_MIN"] = _ffloat("SHOOT_ROAD_HISTORY_MIN", 12)
     g["SHOOT_ROAD_HISTORY_SECONDS"] = _ffloat("SHOOT_ROAD_HISTORY_SECONDS", 2700.0)
     g["POWER_MAX_TICK_AGE_SECONDS"] = _ffloat("POWER_MAX_TICK_AGE_SECONDS", 60.0)
+    # Stage P1 (2026-11-03): A1 already gates analyze_market() on _a1_last_closed_bucket(now)
+    # after Step 1 drains the live bridge queue; 0.0s default prevents a 5.0s grace from
+    # rolling POWER & classify_m5_regime back one full bar (180s stale on M3) at :00..:04 bells.
+    g["POWER_BELL_GRACE_SECONDS"] = max(0.0, min(60.0, _ffloat("POWER_BELL_GRACE_SECONDS", 0.0)))
     g["SHOOT_PAPER_LIMIT_TTL_SECONDS"] = _ffloat("SHOOT_PAPER_LIMIT_TTL_SECONDS", 300.0)
     # what counts as ONE BIG ORDER (not a wall). Measured on GC: p99.9 of a single
     # order is 9 lots, max 46. The whale threshold (total size at a price) is a

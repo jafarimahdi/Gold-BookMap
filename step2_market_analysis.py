@@ -6466,6 +6466,7 @@ def analyze_market(market_data: Dict[str, Any],
         return _tf_default_s
 
     _power_bar_seconds = _resolve_active_power_bar_seconds()
+    _power_grace_s = max(0.0, float(getattr(config, "POWER_BELL_GRACE_SECONDS", 0.0) or 0.0))
     try:
         from power_v2_regime import classify_m5_regime
         from power_v2_regime import set_bar_seconds as _p2_set_bar_seconds
@@ -6486,7 +6487,8 @@ def analyze_market(market_data: Dict[str, Any],
                 _probe_history_bars = _cached_tf_bars
                 _probe_diagnostics["local_tf_cache_bars"] = len(_cached_tf_bars)
         _regime_v2 = classify_m5_regime(
-            _regime_ticks, now=now, history_bars=_probe_history_bars)
+            _regime_ticks, now=now, history_bars=_probe_history_bars,
+            grace_seconds=_power_grace_s)
         if (_regime_v2.get("completed_bars")
                 and str(_regime_v2.get("reason", "")) != "HISTORY_PRICE_SCALE_MISMATCH"):
             _save_local_regime_bar_cache(
@@ -6525,6 +6527,10 @@ def analyze_market(market_data: Dict[str, Any],
         _pw_tick_sz = float(getattr(config, "POWER_M5_TICK_SIZE", 0.0) or 0.0)
         if _pw_tick_sz <= 0.0:
             _md_ts = market_data.get("tick_size")
+            if _md_ts is None and isinstance(market_data.get("data_quality"), dict):
+                _md_ts = market_data["data_quality"].get("tick_size")
+            if _md_ts is None and isinstance(market_data.get("l2_diagnostics"), dict):
+                _md_ts = market_data["l2_diagnostics"].get("tick_size")
             if _md_ts is not None and not isinstance(_md_ts, bool):
                 try:
                     _pw_tick_sz = max(0.0, float(_md_ts))
@@ -6534,6 +6540,7 @@ def analyze_market(market_data: Dict[str, Any],
             tick_data, now=now, symbol=symbol,
             tick_size=_pw_tick_sz,
             bar_seconds=_power_bar_seconds,  # same clock as regime and warm-up
+            grace_seconds=_power_grace_s,
             memory_root=_memory_root,
             market_regime=_regime_v2.get("market_regime", "UNKNOWN"),
             breakout_confirmed=bool(_regime_v2.get("breakout_confirmed", False)),
