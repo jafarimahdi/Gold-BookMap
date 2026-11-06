@@ -136,6 +136,7 @@ def run_power_v2(
     regime_diagnostics: Optional[Mapping[str, Any]] = None,
     grace_seconds: float = 5.0,
     bar_seconds: int = 300,  # fusionv1: TIMEFRAME-driven bar length
+    order_events: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Evaluate the active v2 Power contract from Step 2 market data.
 
@@ -158,18 +159,25 @@ def run_power_v2(
             2.0 if _is_micro
             else float(getattr(_cfg_mod, "POWER_MIN_BIG_PRINT_LOTS", 5.0) or 5.0)
         )
+        _near_touch_usd = max(
+            0.50, float(getattr(_cfg_mod, "L3_NEAR_TOUCH_USD", 2.50) or 2.50)
+        )
     except Exception:
         _min_big_lots = 2.0 if str(symbol or "").strip().upper().startswith("MGC") else 5.0
-    # Law #11: Scale minimum trade count proportionally with active bar_seconds
+        _near_touch_usd = 2.50
+    # Law #11: Scale minimum trade & MBO event counts proportionally with active bar_seconds
     # (20 prints per 300s M5 = 4.0/min -> 12 prints per 180s M3 = 4.0/min).
-    _scaled_min_trades = max(
-        5, int(round(20.0 * (float(max(60, int(bar_seconds))) / 300.0)))
-    )
+    _bar_scale = float(max(60, int(bar_seconds))) / 300.0
+    _scaled_min_trades = max(5, int(round(20.0 * _bar_scale)))
+    _scaled_min_mbo = max(3, int(round(6.0 * _bar_scale)))
     built = build_m5_inputs(
         tick_data or [], now=evaluation_end, tick_size=tick_size,
         min_trades=_scaled_min_trades,
         min_big_print_size=_min_big_lots,
-        bar_seconds=bar_seconds)  # fusionv1 + Law #11
+        bar_seconds=bar_seconds,
+        order_events=order_events,
+        min_mbo_events=_scaled_min_mbo,
+        near_touch_usd=_near_touch_usd)  # fusionv1 + Law #11 + Stage P2
     raw_pre_gain = {
         k: round(float(v.get("value", 0.0)), 4)
         for k, v in (built.get("judges") or {}).items()

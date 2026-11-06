@@ -6536,6 +6536,16 @@ def analyze_market(market_data: Dict[str, Any],
                     _pw_tick_sz = max(0.0, float(_md_ts))
                 except (TypeError, ValueError):
                     _pw_tick_sz = 0.0
+        _pw_order_events = None
+        if bool(getattr(config, "POWER_L3_MBO_SENSOR_ENABLED", True)):
+            _raw_dq_pw = market_data.get("data_quality")
+            _is_synth_l3 = (
+                isinstance(_raw_dq_pw, dict)
+                and str(_raw_dq_pw.get("level3", "")).strip().lower() == "synthetic"
+            )
+            _raw_oe_pw = market_data.get("order_events")
+            if not _is_synth_l3 and isinstance(_raw_oe_pw, (list, tuple)) and len(_raw_oe_pw) > 0:
+                _pw_order_events = _fresh_l3_order_events(market_data, now_epoch=_now_ep)
         _power_v2 = run_power_v2(
             tick_data, now=now, symbol=symbol,
             tick_size=_pw_tick_sz,
@@ -6546,7 +6556,8 @@ def analyze_market(market_data: Dict[str, Any],
             breakout_confirmed=bool(_regime_v2.get("breakout_confirmed", False)),
             high_impact_news=(str(getattr(news, "news_state", "QUIET") or "QUIET").upper()
                               == "BLACKOUT"),
-            regime_diagnostics=_regime_v2)
+            regime_diagnostics=_regime_v2,
+            order_events=_pw_order_events)
     except Exception as _pw2_err:
         # Active Power errors fail closed; never fall back to a legacy direction.
         _power_v2 = {

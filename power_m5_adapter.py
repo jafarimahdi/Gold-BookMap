@@ -8,11 +8,17 @@ resting-book votes, range states, or breakout confirmations.
 """
 from __future__ import annotations
 
+from bisect import bisect_right
 from datetime import datetime, timedelta, timezone
 import math
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 __all__ = ["build_m5_inputs"]
+
+_INVALID_MBO_OIDS = {"", "0", "-1", "NONE", "NULL"}
+_UNTRUSTED_TS_SOURCES = {
+    "receive", "receive_time", "local", "local_receive", "local_receive_time",
+}
 
 
 def _number(value: Any) -> Optional[float]:
@@ -58,15 +64,15 @@ def _side(raw: Any) -> Optional[int]:
     return None
 
 
-def _collect(
+def _collect_timed(
     rows: List[Dict[str, Any]],
     start: datetime,
     end: datetime,
     *,
     trust_explicit_side: bool,
     include_end: bool = True,
-) -> Tuple[List[Tuple[float, float, int]], int, int]:
-    out: List[Tuple[float, float, int]] = []
+) -> Tuple[List[Tuple[datetime, float, float, int]], int, int]:
+    out: List[Tuple[datetime, float, float, int]] = []
     timestamped = 0
     in_window = 0
     for row in rows:
@@ -90,8 +96,202 @@ def _collect(
         direction = _side(row.get("side"))
         if direction is None:
             continue
-        out.append((price, volume, direction))
+        out.append((ts, price, volume, direction))
+    out.sort(key=lambda item: item[0])
     return out, timestamped, in_window
+
+
+def _collect(
+    rows: List[Dict[str, Any]],
+    start: datetime,
+    end: datetime,
+    *,
+    trust_explicit_side: bool,
+    include_end: bool = True,
+) -> Tuple[List[Tuple[float, float, int]], int, int]:
+    timed, timestamped, in_window = _collect_timed(
+        rows,
+        start,
+        end,
+        trust_explicit_side=trust_explicit_side,
+        include_end=include_end,
+    )
+    return [(px, vol, sgn) for _, px, vol, sgn in timed], timestamped, in_window
+
+
+def _mbo_book_side(raw_type: str, raw_side: str) -> Optional[int]:
+    if "BID" in raw_type or raw_side in {"BUY", "BID", "B"}:
+        return 1
+    if "ASK" in raw_type or raw_side in {"SELL", "ASK", "S", "A"}:
+        return -1
+    return None
+
+
+def _ref_price_at(
+    ts: datetime,
+    trade_times: List[datetime],
+    trade_prices: List[float],
+    fallback_px: float,
+) -> float:
+    if not trade_times:
+        return fallback_px
+    idx = bisect_right(trade_times, ts) - 1
+    if idx < 0:
+        return trade_prices[0]
+    return trade_prices[min(idx, len(trade_prices) - 1)]
+
+
+def _collect_near_mbo_flow(
+    order_events: List[Dict[str, Any]],
+    start: datetime,
+    end: datetime,
+    *,
+    current_timed: List[Tuple[datetime, float, float, int]],
+    step: float,
+    near_touch_usd: float,
+) -> Dict[str, Any]:
+    """Compute Cont-Kukanov-Stoikov (2014) near-touch passive MBO order-flow imbalance.
+
+    Uses contemporaneous trade price lookup so fast trending bars never mismeasure
+    touch distance against a stale bar-open or bar-close anchor. Rejects unkeyed
+    order_ids, local-receive timestamps, deep-book spoofing (> near_cap), orphan
+    modifications without explicit old_size, and any event outside [start, end].
+    """
+    near_cap = max(float(near_touch_usd), 10.0 * step)
+    decay_len = max(0.5 * near_cap, step)
+    trade_times = [ts for ts, _, _, _ in current_timed]
+    trade_prices = [px for _, px, _, _ in current_timed]
+    fallback_px = trade_prices[-1] if trade_prices else 0.0
+
+    bid_add = bid_pull = ask_add = ask_pull = 0.0
+    near_events = 0
+    in_window_events = 0
+    first_near_ts: Optional[datetime] = None
+
+    for ev in order_events:
+        if not isinstance(ev, Mapping):
+            continue
+        if ev.get("timestamp_is_source") is False or ev.get("has_source_timestamp") is False:
+            continue
+        ts_src = str(ev.get("timestamp_source", "") or "").strip().lower()
+        if ts_src in _UNTRUSTED_TS_SOURCES:
+            continue
+        ts = _timestamp(ev.get("timestamp", ev.get("time")))
+        if ts is None or ts < start or ts > end:
+            continue
+        oid = str(ev.get("order_id") or ev.get("id") or ev.get("orderId") or "").strip()
+        if oid.upper() in _INVALID_MBO_OIDS:
+            continue
+        raw_type = str(ev.get("type", ev.get("event_type", "")) or "").strip().upper()
+        raw_side = str(ev.get("side", "") or "").strip().upper()
+        bside = _mbo_book_side(raw_type, raw_side)
+        if bside is None:
+            continue
+        in_window_events += 1
+        ref_px = _ref_price_at(ts, trade_times, trade_prices, fallback_px)
+        if ref_px <= 0:
+            continue
+
+        price = _number(ev.get("price"))
+        size = _number(ev.get("size", ev.get("volume")))
+        is_new = ("NEW" in raw_type) or (raw_type in {"ADD", "OPEN"})
+        is_cancel = any(k in raw_type for k in ("CANCEL", "DELETE", "REMOVE"))
+        is_modify = any(k in raw_type for k in ("REPLACE", "MODIFY", "UPDATE"))
+        is_fill = raw_type in {"FILL", "TRADE", "EXECUTED", "MATCH"}
+
+        touched = False
+        if is_new:
+            if price is not None and price > 0 and size is not None and size > 0:
+                dist = abs(price - ref_px)
+                if dist <= near_cap:
+                    w = math.exp(-dist / decay_len)
+                    if bside > 0:
+                        bid_add += size * w
+                    else:
+                        ask_add += size * w
+                    touched = True
+        elif is_cancel:
+            if price is not None and price > 0 and size is not None and size > 0:
+                dist = abs(price - ref_px)
+                if dist <= near_cap:
+                    w = math.exp(-dist / decay_len)
+                    if bside > 0:
+                        bid_pull += size * w
+                    else:
+                        ask_pull += size * w
+                    touched = True
+        elif is_modify:
+            old_sz = _number(ev.get("old_size"))
+            if old_sz is not None and old_sz >= 0 and size is not None and size >= 0:
+                old_px = _number(ev.get("old_price"))
+                if old_px is None or old_px <= 0:
+                    old_px = price
+                if (
+                    price is not None and price > 0
+                    and old_px is not None and old_px > 0
+                    and abs(price - old_px) > 0.5 * step
+                ):
+                    if old_sz > 0 and abs(old_px - ref_px) <= near_cap:
+                        w_old = math.exp(-abs(old_px - ref_px) / decay_len)
+                        if bside > 0:
+                            bid_pull += old_sz * w_old
+                        else:
+                            ask_pull += old_sz * w_old
+                        touched = True
+                    if size > 0 and abs(price - ref_px) <= near_cap:
+                        w_new = math.exp(-abs(price - ref_px) / decay_len)
+                        if bside > 0:
+                            bid_add += size * w_new
+                        else:
+                            ask_add += size * w_new
+                        touched = True
+                elif price is not None and price > 0:
+                    dist = abs(price - ref_px)
+                    diff = size - old_sz
+                    if dist <= near_cap and abs(diff) > 1e-9:
+                        w = math.exp(-dist / decay_len)
+                        if diff > 0:
+                            if bside > 0:
+                                bid_add += diff * w
+                            else:
+                                ask_add += diff * w
+                        else:
+                            if bside > 0:
+                                bid_pull += (-diff) * w
+                            else:
+                                ask_pull += (-diff) * w
+                        touched = True
+        elif is_fill and bool(ev.get("is_market_order", False)):
+            if price is not None and price > 0 and size is not None and size > 0:
+                dist = abs(price - ref_px)
+                if dist <= near_cap:
+                    w = math.exp(-dist / decay_len)
+                    if bside > 0:
+                        ask_pull += size * w
+                    else:
+                        bid_pull += size * w
+                    touched = True
+
+        if touched:
+            near_events += 1
+            if first_near_ts is None or ts < first_near_ts:
+                first_near_ts = ts
+
+    gross = bid_add + bid_pull + ask_add + ask_pull
+    net = (bid_add - bid_pull) - (ask_add - ask_pull)
+    imb = max(-1.0, min(1.0, net / gross)) if gross > 0 else 0.0
+    return {
+        "in_window_events": in_window_events,
+        "near_events": near_events,
+        "first_near_ts": first_near_ts,
+        "bid_add": bid_add,
+        "bid_pull": bid_pull,
+        "ask_add": ask_add,
+        "ask_pull": ask_pull,
+        "gross": gross,
+        "net": net,
+        "imbalance": imb,
+    }
 
 
 def _delta_imbalance(trades: List[Tuple[float, float, int]]) -> float:
@@ -113,6 +313,9 @@ def build_m5_inputs(
     trust_explicit_side: bool = False,
     min_big_print_size: float = 1.0,
     bar_seconds: int = 300,  # fusionv1: TIMEFRAME-driven window (M3 -> 180)
+    order_events: Optional[List[Dict[str, Any]]] = None,
+    min_mbo_events: int = 5,
+    near_touch_usd: float = 2.50,
 ) -> Dict[str, Any]:
     """Return judges, per-judge availability, context, and diagnostics for Power v2.
 
@@ -143,8 +346,9 @@ def build_m5_inputs(
     _bar_s = max(60, int(bar_seconds))
     current_start = current_time - timedelta(seconds=_bar_s)
     previous_start = current_time - timedelta(seconds=2 * _bar_s)
-    current, timestamped_n, current_raw_n = _collect(
+    current_timed, timestamped_n, current_raw_n = _collect_timed(
         rows, current_start, current_time, trust_explicit_side=trust_explicit_side)
+    current = [(px, vol, sgn) for _, px, vol, sgn in current_timed]
     previous, _prev_ts_n, previous_raw_n = _collect(
         rows, previous_start, current_start, trust_explicit_side=trust_explicit_side,
         include_end=False)
@@ -226,12 +430,74 @@ def build_m5_inputs(
         and not feed_stale
     )
 
+    # Stage P2 (2026-11-06): Validated near-touch MBO passive queue flow + matched-horizon
+    # direct executed flow (`l3_aggr_limit`, Cont, Kukanov & Stoikov 2014; Easley et al. 2012).
+    # Remains NOT_EMITTED when caller omits `order_events` (tick-only callers/tests).
+    _min_mbo = max(1, int(min_mbo_events))
+    mbo_flow: Optional[Dict[str, Any]] = None
+    l3_aggr_val = 0.0
+    l3_aggr_quality = 0.0
+    l3_matched_aggr_imb = 0.0
+    l3_absorption_damped = False
+    if order_events is not None:
+        mbo_flow = _collect_near_mbo_flow(
+            list(order_events),
+            current_start,
+            current_time,
+            current_timed=current_timed,
+            step=step,
+            near_touch_usd=near_touch_usd,
+        )
+        if (
+            enough_current
+            and mbo_flow["near_events"] >= _min_mbo
+            and mbo_flow["gross"] > 0.0
+        ):
+            first_mbo_ts = mbo_flow["first_near_ts"]
+            mbo_span_start = (
+                max(current_start, first_mbo_ts - timedelta(seconds=5))
+                if first_mbo_ts is not None
+                else current_start
+            )
+            sub_trades = [
+                (px, vol, sgn)
+                for ts, px, vol, sgn in current_timed
+                if ts >= mbo_span_start
+            ]
+            if len(sub_trades) < max(5, min_trades // 2):
+                sub_trades = current
+            l3_matched_aggr_imb = _delta_imbalance(sub_trades)
+            mbo_imb = float(mbo_flow["imbalance"])
+            l3_aggr_val = 0.55 * mbo_imb + 0.45 * l3_matched_aggr_imb
+            # Kyle's lambda / passive absorption check (Easley et al. 2012; Bouchaud 2018):
+            # if net order flow pushes one way while actual bar price displaces >= 2 ticks
+            # the opposite way, passive institutional limit liquidity is absorbing aggressors.
+            bar_disp = (
+                (current_timed[-1][1] - current_timed[0][1])
+                if len(current_timed) >= 2
+                else 0.0
+            )
+            if l3_aggr_val * bar_disp < 0.0 and abs(bar_disp) >= 2.0 * step:
+                l3_aggr_val *= 0.35
+                l3_absorption_damped = True
+            _tf_scale = max(0.20, float(_bar_s) / 300.0)
+            _micro_scale = 0.40 if float(min_big_print_size) <= 2.5 else 1.0
+            _min_bar_vol = max(8.0, 60.0 * _tf_scale * _micro_scale)
+            vol_q = min(1.0, total_current_volume / _min_bar_vol)
+            mbo_q = min(1.0, mbo_flow["near_events"] / float(max(_min_mbo * 2, 10)))
+            l3_aggr_quality = current_quality * max(0.25, min(1.0, vol_q * mbo_q))
+
     judges: Dict[str, Any] = {}
     if current:
         judges["footprint_delta"] = {
             "value": current_imbalance,
             "quality": current_quality,
         }
+        if l3_aggr_quality > 0:
+            judges["l3_aggr_limit"] = {
+                "value": max(-1.0, min(1.0, l3_aggr_val)),
+                "quality": l3_aggr_quality,
+            }
         if big_quality > 0:
             judges["big_prints"] = {
                 "value": max(-1.0, min(1.0, big_value)),
@@ -255,10 +521,21 @@ def build_m5_inputs(
         if isinstance(reading, Mapping) and _number(reading.get("quality")) is not None \
                 and float(reading.get("quality", 0.0)) > 0:
             judge_availability[name] = {"status": "VALID", "reason": "usable M5 input"}
-        elif name == "l3_aggr_limit":
+        elif name == "l3_aggr_limit" and order_events is None:
             judge_availability[name] = {
                 "status": "NOT_EMITTED",
                 "reason": "current M5 adapter does not map a validated L3 executed-flow field",
+            }
+        elif name == "l3_aggr_limit" and not enough_current:
+            judge_availability[name] = {
+                "status": "MISSING",
+                "reason": f"current window has {len(current)} usable direct trades; {min_trades} required",
+            }
+        elif name == "l3_aggr_limit":
+            _near_n = int(mbo_flow["near_events"]) if mbo_flow is not None else 0
+            judge_availability[name] = {
+                "status": "MISSING",
+                "reason": f"near-touch window has {_near_n} usable MBO events; {_min_mbo} required",
             }
         elif name == "cvd_momentum" and len(previous) < min_trades:
             judge_availability[name] = {
@@ -323,6 +600,11 @@ def build_m5_inputs(
             "big_print_signed_share_of_total_volume": round(big_value, 4),
             "current_delta_imbalance": round(current_imbalance, 4),
             "previous_delta_imbalance": round(previous_imbalance, 4),
-            "note": "No M5 range/breakout judgement or L3 resting-book vote is inferred here.",
+            "mbo_in_window_events": int(mbo_flow["in_window_events"]) if mbo_flow is not None else None,
+            "mbo_near_touch_events": int(mbo_flow["near_events"]) if mbo_flow is not None else None,
+            "mbo_near_touch_imbalance": round(float(mbo_flow["imbalance"]), 4) if mbo_flow is not None else None,
+            "mbo_matched_aggr_imbalance": round(l3_matched_aggr_imb, 4) if mbo_flow is not None else None,
+            "l3_aggr_limit_absorption_damped": bool(l3_absorption_damped),
+            "note": "No M5 range/breakout judgement is inferred here; l3_aggr_limit requires validated MBO events.",
         },
     }

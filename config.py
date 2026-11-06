@@ -538,6 +538,9 @@ def _refresh() -> None:
     # after Step 1 drains the live bridge queue; 0.0s default prevents a 5.0s grace from
     # rolling POWER & classify_m5_regime back one full bar (180s stale on M3) at :00..:04 bells.
     g["POWER_BELL_GRACE_SECONDS"] = max(0.0, min(60.0, _ffloat("POWER_BELL_GRACE_SECONDS", 0.0)))
+    # Stage P2 (2026-11-06): Wire validated near-touch MBO order_events + executed-flow
+    # l3_aggr_limit sensor into POWER v2 (Cont, Kukanov & Stoikov 2014; Easley et al. 2012).
+    g["POWER_L3_MBO_SENSOR_ENABLED"] = _fget("POWER_L3_MBO_SENSOR_ENABLED", "1") == "1"
     g["SHOOT_PAPER_LIMIT_TTL_SECONDS"] = _ffloat("SHOOT_PAPER_LIMIT_TTL_SECONDS", 300.0)
     # what counts as ONE BIG ORDER (not a wall). Measured on GC: p99.9 of a single
     # order is 9 lots, max 46. The whale threshold (total size at a price) is a

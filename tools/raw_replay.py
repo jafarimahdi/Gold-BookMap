@@ -1321,6 +1321,11 @@ def _evaluate_retired_and_previous_bench(
                 fl_v = float(fl_j["value"])
                 if abs(fl_v) >= 0.25:
                     _emit("power_breadth_sqrt", "POWER", 15, 1.0 if fl_v > 0 else -1.0)
+            l3_j = inp_j.get("l3_aggr_limit")
+            if isinstance(l3_j, dict) and isinstance(l3_j.get("value"), (int, float)):
+                l3_v = float(l3_j["value"])
+                if abs(l3_v) >= 0.25:
+                    _emit("power_l3_aggr_limit", "POWER", 15, 1.0 if l3_v > 0 else -1.0)
 
     sig_map = getattr(snap, "signal_map", None)
     if isinstance(sig_map, dict) and sig_map:
@@ -3249,6 +3254,7 @@ def synthesize_multi_day(results: List[Dict[str, Any]]) -> Tuple[str, str, Dict[
         )
 
         # 4) Sub-Sensor & Step-P2 L3 Availability Check on Bell(:00)
+        l3_valid = sum(1 for c in bell_pw if c["power_diag"]["l3_status"] == "VALID")
         l3_not_em = sum(1 for c in bell_pw if c["power_diag"]["l3_status"] == "NOT_EMITTED")
         avg_cov = (sum(c["power_diag"]["coverage"] for c in bell_pw) / len(bell_pw)) if bell_pw else 0.0
         sens_parts = []
@@ -3269,7 +3275,7 @@ def synthesize_multi_day(results: List[Dict[str, Any]]) -> Tuple[str, str, Dict[
             else:
                 sens_parts.append(f"{s_key}: N=0")
         lines.append(
-            f"  4) Step-P2 Sensor Health (Bell avg_cov={avg_cov:.2f}, l3_not_emitted={l3_not_em}/{len(bell_pw)}): "
+            f"  4) Step-P2 Sensor Health (Bell avg_cov={avg_cov:.2f}, l3_valid={l3_valid}/{len(bell_pw)}, l3_not_emitted={l3_not_em}/{len(bell_pw)}): "
             + " | ".join(sens_parts)
         )
     else:
