@@ -186,6 +186,7 @@ def _discover_raw_files(
             use_env_paths = False
 
     seen_real: set[str] = set()
+    seen_chunk_stems: set[str] = set()
     chunks: List[Path] = []
     live_files: List[Path] = []
 
@@ -195,6 +196,14 @@ def _discover_raw_files(
         rp = os.path.realpath(str(p))
         if rp in seen_real:
             return
+        if not is_live:
+            # Stage B1b: Match `_BridgeTail._replay_recorded_history` by deduplicating
+            # rotated chunks by canonical `.csv` stem so an unremoved `.csv` alongside
+            # its archived `.csv.gz` is never replayed twice.
+            stem = re.sub(r"\.gz$", "", p.name.lower())
+            if stem in seen_chunk_stems:
+                return
+            seen_chunk_stems.add(stem)
         seen_real.add(rp)
         if is_live:
             live_files.append(p)
@@ -232,10 +241,28 @@ def _discover_raw_files(
                         continue
                 _add(f, is_live=False)
 
+    # Stage B1b: Match live `_resolve_bridge_file` / `_resolve_mbo_file` single-live-file
+    # selection so a stale copy in `data/ticks.csv` never interleaves with `ticks.csv`.
+    live_candidates: List[Path] = []
     if env_val:
-        _add(Path(env_val), is_live=True)
-    _add(root_dir / f"{kind}.csv", is_live=True)
-    _add(data_dir / f"{kind}.csv", is_live=True)
+        live_candidates.append(Path(env_val))
+    live_candidates.append(root_dir / f"{kind}.csv")
+    live_candidates.append(data_dir / f"{kind}.csv")
+    chosen_live: Optional[Path] = None
+    for lc in live_candidates:
+        try:
+            if lc.exists() and lc.is_file() and lc.stat().st_size > 0:
+                chosen_live = lc
+                break
+        except OSError:
+            continue
+    if chosen_live is None:
+        for lc in live_candidates:
+            if lc.exists() and lc.is_file():
+                chosen_live = lc
+                break
+    if chosen_live is not None:
+        _add(chosen_live, is_live=True)
 
     chunks.sort(key=lambda p: p.name)
     return chunks + live_files
@@ -488,15 +515,28 @@ def _iter_filtered_csv_events(
     allowed_prefixes: set[str],
     inst_filter: Optional[str] = None,
 ) -> Iterator[Tuple[float, str]]:
-    """Yield `(epoch_utc, raw_line)` within `[start_ep, end_ep]` from ordered chunks."""
-    seen_recent: set[str] = set()
-    recent_ring: collections.deque = collections.deque()
+    """Yield `(epoch_utc, raw_line)` within `[start_ep, end_ep]` from ordered chunks.
+
+    Stage B1b (Step-1 Replay Fidelity): NEVER deduplicate lines within the same file!
+    BookMap stamps `ticks.csv` & `mbo.csv` at 1ms resolution (`timespec='milliseconds'`),
+    so real HFT `Remove -> Update(k) -> Remove` transitions and split institutional fills
+    produce identical line strings within the same millisecond; intra-file dedup swallowed
+    the 2nd `Remove`, creating 15-minute zombie quotes (`crossed_book`). Deduplication is
+    applied strictly as an exact suffix-prefix seam check across file boundaries only.
+    """
+    prior_lines: List[str] = []
+    prior_line_set: set[str] = set()
     prev_ts_raw = ""
     prev_ep: Optional[float] = None
     early_stop_ep = end_ep + 300.0
     for path in files:
         is_live_tail = path.name.lower() in ("ticks.csv", "mbo.csv")
         over_end_streak = 0
+        cur_tail: collections.deque = collections.deque(maxlen=30_000)
+        seam_checked = not bool(prior_lines)
+        seam_buf: List[Tuple[float, str]] = []
+        alive_cands: List[int] = []
+        best_completed_len = 0
         try:
             with _open_fast_text(path) as fh:
                 for line in fh:
@@ -526,16 +566,61 @@ def _iter_filtered_csv_events(
                         continue
                     over_end_streak = 0
                     norm_line = line if line.endswith("\n") else (line + "\n")
-                    if norm_line in seen_recent:
-                        continue
-                    seen_recent.add(norm_line)
-                    recent_ring.append(norm_line)
-                    if len(recent_ring) > 30_000:
-                        old_line = recent_ring.popleft()
-                        seen_recent.discard(old_line)
+                    if not seam_checked:
+                        if not seam_buf:
+                            if norm_line not in prior_line_set:
+                                seam_checked = True
+                                cur_tail.append(norm_line)
+                                yield ep, norm_line
+                                continue
+                            alive_cands = [i for i, pln in enumerate(prior_lines) if pln == norm_line]
+                            seam_buf.append((ep, norm_line))
+                            next_alive: List[int] = []
+                            n_prior = len(prior_lines)
+                            for s_idx in alive_cands:
+                                if s_idx + 1 == n_prior:
+                                    best_completed_len = max(best_completed_len, 1)
+                                else:
+                                    next_alive.append(s_idx)
+                            alive_cands = next_alive
+                            if not alive_cands:
+                                seam_checked = True
+                                for y_ep, y_ln in seam_buf[best_completed_len:]:
+                                    cur_tail.append(y_ln)
+                                    yield y_ep, y_ln
+                                seam_buf.clear()
+                            continue
+                        else:
+                            k_off = len(seam_buf)
+                            seam_buf.append((ep, norm_line))
+                            n_prior = len(prior_lines)
+                            next_alive = []
+                            for s_idx in alive_cands:
+                                if prior_lines[s_idx + k_off] == norm_line:
+                                    if s_idx + k_off + 1 == n_prior:
+                                        best_completed_len = max(best_completed_len, k_off + 1)
+                                    else:
+                                        next_alive.append(s_idx)
+                            alive_cands = next_alive
+                            if not alive_cands:
+                                seam_checked = True
+                                for y_ep, y_ln in seam_buf[best_completed_len:]:
+                                    cur_tail.append(y_ln)
+                                    yield y_ep, y_ln
+                                seam_buf.clear()
+                            continue
+                    cur_tail.append(norm_line)
                     yield ep, norm_line
+                if seam_buf:
+                    for y_ep, y_ln in seam_buf[best_completed_len:]:
+                        cur_tail.append(y_ln)
+                        yield y_ep, y_ln
+                    seam_buf.clear()
         except OSError:
             continue
+        if cur_tail:
+            prior_lines = list(cur_tail)
+            prior_line_set = set(prior_lines)
 
 
 # --------------------------------------------------------------------------- #
@@ -2510,6 +2595,8 @@ def replay_single_day(
                     "order_flow_status": str(dq.get("order_flow") or "?"),
                     "fresh_bid_levels": int(l2d.get("fresh_bid_levels") or 0),
                     "fresh_ask_levels": int(l2d.get("fresh_ask_levels") or 0),
+                    "raw_best_bid": float(l2d.get("best_bid") or 0.0),
+                    "raw_best_ask": float(l2d.get("best_ask") or 0.0),
                     "depth_levels": f"{l2d.get('fresh_bid_levels', 0)}/{l2d.get('fresh_ask_levels', 0)}",
                     "mbo_window": len(oe_list),
                     "mbo_near_cnt": mbo_near_cnt,
@@ -3816,9 +3903,24 @@ def synthesize_multi_day(results: List[Dict[str, Any]]) -> Tuple[str, str, Dict[
         near_band_lbl = float(getattr(config, "BOOKMAP_MBO_NEAR_CORRIDOR_USD", 8.0) or 8.0)
         max_oe_lbl = int(getattr(config, "BOOKMAP_MAX_ORDER_EVENTS", 2000) or 2000)
         max_dl_lbl = int(getattr(config, "BOOKMAP_MAX_DEPTH_LEVELS", 40) or 40)
+        per_day_crossed = []
+        sample_cross = ""
+        for r_d in ok_days:
+            d_cycs = r_d.get("cycles") or []
+            c_n = sum(1 for c in d_cycs if str(c.get("quote_status") or "") == "crossed")
+            per_day_crossed.append(f"{r_d.get('day', '?')}={c_n}/{len(d_cycs)}")
+            if not sample_cross and c_n > 0:
+                for c in d_cycs:
+                    if str(c.get("quote_status") or "") == "crossed":
+                        sample_cross = (
+                            f" (sample {r_d.get('day')} {c.get('buda_hhmmss')}: "
+                            f"bid={float(c.get('raw_best_bid') or 0.0):.1f}>=ask={float(c.get('raw_best_ask') or 0.0):.1f})"
+                        )
+                        break
         lines.append(
             f"  Quote Integrity ({n_cyc_b1} cyc): "
             + " | ".join(f"{k}={v} ({100.0*v/n_cyc_b1:.1f}%)" for k, v in q_cnt.most_common(4))
+            + f" || Per-Day Crossed: {', '.join(per_day_crossed)}{sample_cross}"
         )
         lines.append(
             f"  L2 Book Hygiene (cfg_max={max_dl_lbl}): "

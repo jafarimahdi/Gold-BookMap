@@ -361,3 +361,94 @@ def test_stage_b1_law11_mbo_window_and_replay_scorecard_8i(tmp_path, monkeypatch
     assert "Near_Corridor_Share=75.0%" in txt
     assert "Quote Integrity (" in txt
     assert "L2 Book Hygiene (" in txt
+
+
+def test_stage_b1b_raw_replay_preserves_same_ms_depth_remove_and_dedupes_chunk_overlap(
+    tmp_path, monkeypatch
+):
+    """Stage B1b: Same-ms `Remove -> Update(k) -> Remove` transitions must never be dropped
+    intra-file (preventing 15m zombie `crossed_book` levels), while true cross-file suffix-prefix
+    seam overlaps and `.csv`/`.csv.gz` duplicate chunk stems are cleanly deduplicated.
+    """
+    import tools.raw_replay as rr
+
+    data_dir = tmp_path / "data"
+    arch_dir = data_dir / "archive"
+    arch_dir.mkdir(parents=True)
+    inst = "GCZ6.COMEX@RITHMIC"
+
+    header_t = "time,event,price,size,level,operation,instrument\n"
+    header_m = "time,event_type,order_id,price,size,instrument\n"
+
+    chunk_lines = [header_t]
+    mbo_lines = [header_m]
+    start_dt = datetime(2026, 11, 6, 10, 56, 0, tzinfo=timezone.utc)
+    for sec in range(0, 300, 10):
+        dt_s = start_dt + timedelta(seconds=sec)
+        ts_s = dt_s.strftime("%Y-%m-%dT%H:%M:%S.100Z")
+        chunk_lines.append(f"{ts_s},DepthBid,2700.0000,15.0000,-1,Update,{inst}\n")
+        chunk_lines.append(f"{ts_s},DepthAsk,2700.2000,15.0000,-1,Update,{inst}\n")
+        chunk_lines.append(f"{ts_s},Last,2700.1000,2.0000,-1,Buy,{inst}\n")
+        mbo_lines.append(f"{ts_s},BID_NEW,oid_{sec},2700.0,10,{inst}\n")
+
+    # Write BOTH `.csv` and `.csv.gz` of the same chunk stem to verify stem dedup
+    (tmp_path / "ticks_20261106_110100.csv").write_text("".join(chunk_lines), encoding="utf-8")
+    with gzip.open(arch_dir / "ticks_20261106_110100.csv.gz", "wt", encoding="utf-8", newline="\n") as gz:
+        gz.writelines(chunk_lines)
+
+    # Live `ticks.csv` overlaps the final 3 data lines of the chunk AND then executes a
+    # same-millisecond `Remove -> Update(3) -> Remove` at 2700.2000 before sweeping up to 2700.4!
+    live_lines = [header_t] + chunk_lines[-3:]
+    sweep_ms = "2026-11-06T11:01:05.123Z"
+    live_lines.extend([
+        f"{sweep_ms},DepthAsk,2700.2000,0.0000,-1,Remove,{inst}\n",
+        f"{sweep_ms},DepthAsk,2700.2000,3.0000,-1,Update,{inst}\n",
+        f"{sweep_ms},DepthAsk,2700.2000,0.0000,-1,Remove,{inst}\n",
+        # Same-ms institutional split fills (3 x 4.0 lots in identical millisecond)
+        f"{sweep_ms},Last,2700.2000,4.0000,-1,Buy,{inst}\n",
+        f"{sweep_ms},Last,2700.2000,4.0000,-1,Buy,{inst}\n",
+        f"{sweep_ms},Last,2700.2000,4.0000,-1,Buy,{inst}\n",
+        f"{sweep_ms},DepthBid,2700.3000,12.0000,-1,Update,{inst}\n",
+        f"{sweep_ms},DepthAsk,2700.5000,12.0000,-1,Update,{inst}\n",
+    ])
+    for sec in range(310, 540, 10):
+        dt_s = start_dt + timedelta(seconds=sec)
+        ts_s = dt_s.strftime("%Y-%m-%dT%H:%M:%S.100Z")
+        live_lines.append(f"{ts_s},DepthBid,2700.3000,12.0000,-1,Update,{inst}\n")
+        live_lines.append(f"{ts_s},DepthAsk,2700.5000,12.0000,-1,Update,{inst}\n")
+        live_lines.append(f"{ts_s},Last,2700.4000,2.0000,-1,Buy,{inst}\n")
+        mbo_lines.append(f"{ts_s},BID_NEW,oid_{sec},2700.3,10,{inst}\n")
+
+    (tmp_path / "ticks.csv").write_text("".join(live_lines), encoding="utf-8")
+    # Also plant a stale conflicting `data/ticks.csv` with a poisonous 2705.0 bid to prove
+    # `_discover_raw_files` selects ONLY the single primary `ticks.csv`!
+    (data_dir / "ticks.csv").write_text(
+        header_t + f"2026-11-06T11:01:06.000Z,DepthBid,2705.0000,99.0000,-1,Update,{inst}\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "mbo.csv").write_text("".join(mbo_lines), encoding="utf-8")
+
+    disc = rr._discover_raw_files("ticks", tmp_path, data_dir, day_str="2026-11-06", use_env_paths=False)
+    assert len(disc) == 2  # 1 deduplicated chunk + 1 primary live `ticks.csv`
+
+    # Verify exact stream count: 3 overlapping seam lines dropped once, all 3 same-ms split fills kept
+    streamed = list(
+        rr._iter_filtered_csv_events(
+            disc,
+            start_dt.timestamp(),
+            (start_dt + timedelta(minutes=10)).timestamp(),
+            {"2026-11-06"},
+            inst_filter=inst,
+        )
+    )
+    split_fills = [ln for _, ln in streamed if f"{sweep_ms},Last,2700.2000,4.0000" in ln]
+    assert len(split_fills) == 3
+
+    day_res = rr.replay_single_day(
+        "2026-11-06", tmp_path, data_dir, every_s=60, window_str="12:00-12:04", prewarm_min=10
+    )
+    assert day_res["ok"] is True
+    assert all(c["quote_status"] == "valid" for c in day_res["cycles"])
+    assert all(c["l2_status"] == "validated" for c in day_res["cycles"])
+    txt, _, _ = rr.synthesize_multi_day([day_res])
+    assert "Per-Day Crossed: 2026-11-06=0/" in txt
