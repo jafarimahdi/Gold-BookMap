@@ -502,6 +502,106 @@ class MT5Executor:
             if int(getattr(p, "magic", -1) or -1) == int(self.magic)
         ]
 
+    # ------------------------------------------------------------------ #
+    # Stage X2 (Section #14): broker-agnostic retcode taxonomy
+    # ------------------------------------------------------------------ #
+    # Codes are identical on every MT5 platform and every broker (demo or live),
+    # and they mean the same thing on hedging and netting accounts for the
+    # purposes of this executor: either the send produced a NEW position of OUR
+    # volume, or it produced nothing traceable and must be retried / reported.
+    _RETCODE_OK = 10009          # TRADE_RETCODE_DONE
+    _RETCODE_PARTIAL = 10010     # TRADE_RETCODE_DONE_PARTIAL  (money IS live)
+    _RETCODE_REQUOTE = 10004
+    _RETCODE_REJECT = 10006
+    _RETCODE_CANCEL = 10007
+    _RETCODE_PLACED = 10008      # TRADE_RETCODE_PLACED (pending order accepted)
+    _RETCODE_PRICE_CHANGED = 10020
+    _RETCODE_PRICE_OFF = 10021
+    _RETCODE_INVALID_STOPS = 10016
+    _RETCODE_NO_MONEY = 10019
+    #: retcodes worth ONE more attempt with a fresh tick / fresh price
+    _RETCODE_RETRYABLE = frozenset({10004, 10020, 10021})
+    #: retcodes that will never fix themselves in this cycle
+    _RETCODE_FATAL = frozenset({10006, 10007, 10016, 10019, 10013, 10014, 10015, 10018})
+
+    def _retcode_taxonomy(self, retcode: Optional[int]) -> str:
+        """Classify an `order_send` retcode into one stable bucket."""
+        if retcode is None:
+            return "NONE"
+        if retcode == self._RETCODE_OK:
+            return "OK"
+        if retcode == self._RETCODE_PARTIAL:
+            return "PARTIAL"
+        if retcode == self._RETCODE_PLACED:
+            return "PLACED"
+        if retcode in self._RETCODE_RETRYABLE:
+            return "RETRYABLE"
+        if retcode in self._RETCODE_FATAL:
+            return "FATAL"
+        return "UNKNOWN"
+
+    def _send_market_order(self, request: dict, *, action: str, lot_size: float,
+                           info, now: datetime, sl: float, tp: float,
+                           price: float) -> tuple:
+        """Send ONE market order with a bounded, tick-refreshed retry.
+
+        Returns ``(result, bucket, reason, attempts)``. Stage X2:
+          * ``PARTIAL`` is reported as a LIVE fill, not as an error;
+          * `10004 REQUOTE` / `10020 PRICE_CHANGED` / `10021 PRICE_OFF` get up to
+            ``config.MT5_RETRY_MAX`` extra sends with a **fresh** tick price and a
+            re-derived SL/TP offset (a retried order must never keep the stale
+            bracket that the broker just rejected);
+          * the same ``request_id`` is reused across attempts so MT5 can
+            deduplicate on platforms that honour it;
+          * anything else is returned immediately with its bucket.
+        """
+        max_retry = int(getattr(config, "MT5_RETRY_MAX", 2) or 0)
+        backoff_s = float(getattr(config, "MT5_RETRY_BACKOFF_MS", 250) or 0) / 1000.0
+        attempts = 0
+        result = None
+        bucket = "NONE"
+        reason = ""
+        while True:
+            attempts += 1
+            try:
+                result = mt5.order_send(request)
+            except Exception as exc:          # network / IPC failure mid-send
+                result = None
+                reason = f"order_send raised {type(exc).__name__}: {exc}"
+            bucket = self._retcode_taxonomy(getattr(result, "retcode", None))
+            # terminal buckets stop immediately
+            if bucket in ("OK", "PLACED", "PARTIAL", "FATAL", "UNKNOWN"):
+                return result, bucket, reason, attempts
+            # `RETRYABLE` (broker price race) and `NONE` (the send itself raised /
+            # returned nothing) are both worth another attempt -- but strictly
+            # inside the configured budget, so a dead IPC can never spin here.
+            if attempts > max_retry:
+                return result, bucket, reason, attempts
+            # ---- retryable: refresh the tick, re-derive the bracket, resend ----
+            if backoff_s > 0:
+                time.sleep(backoff_s)
+            fresh = mt5.symbol_info_tick(self.symbol)
+            if fresh is None:
+                return result, bucket, (reason or "no fresh tick to retry on"), attempts
+            is_buy = action == "BUY"
+            new_price = fresh.ask if is_buy else fresh.bid
+            if not new_price:
+                return result, bucket, "fresh tick has no price", attempts
+            sl_dist = abs(float(price) - float(sl)) if sl else 0.0
+            tp_dist = abs(float(tp) - float(price)) if tp else 0.0
+            request = dict(request)
+            request["price"] = self._normalize_price(new_price, info)
+            if sl:
+                request["sl"] = self._normalize_price(
+                    new_price - sl_dist if is_buy else new_price + sl_dist, info)
+            if tp:
+                request["tp"] = self._normalize_price(
+                    new_price + tp_dist if is_buy else new_price - tp_dist, info)
+            logger.warning(
+                "STEP 4 X2: retcode %s on attempt %d -> resending at %.2f (SL %.2f / TP %.2f)",
+                getattr(result, "retcode", None), attempts,
+                request["price"], request.get("sl") or 0.0, request.get("tp") or 0.0)
+
     def _position_id_from_deal(self, deal_id: Optional[int]) -> Optional[int]:
         """Resolve which POSITION a fill belongs to (authoritative identity).
 
@@ -588,6 +688,10 @@ class MT5Executor:
                         return None
                     time.sleep(0.2)
                     continue
+                # Stage X2 hysteresis: cheap positional filters first, and only a
+                # position of EXACTLY the requested volume may represent this entry.
+                # (A netting account can leave a grown/merged position behind, so a
+                # "bigger" position is never silently adopted.)
                 candidates = []
                 for position in positions:
                     try:
@@ -644,7 +748,7 @@ class MT5Executor:
             "type": close_type,
             "position": int(ticket),
             "price": price,
-            "deviation": 20,
+            "deviation": int(getattr(config, "MT5_DEVIATION", 20)),
             "magic": self.magic,
             "comment": "gold-trading-bot close",
             "type_time": mt5.ORDER_TIME_GTC,
@@ -1411,7 +1515,7 @@ class MT5Executor:
                 "price": limit_price,
                 "sl": sl,
                 "tp": tp,
-                "deviation": 20,
+                "deviation": int(getattr(config, "MT5_DEVIATION", 20)),
                 "magic": self.magic,
                 "comment": "gold-bot B3 limit",
                 "type_time": mt5.ORDER_TIME_GTC,
@@ -1426,7 +1530,7 @@ class MT5Executor:
                 "price": price,
                 "sl": sl,
                 "tp": tp,
-                "deviation": 20,
+                "deviation": int(getattr(config, "MT5_DEVIATION", 20)),
                 "magic": self.magic,
                 "comment": "gold-bot A2 burst" if is_a2_burst_order else "gold-trading-bot",
                 "type_time": mt5.ORDER_TIME_GTC,
@@ -1459,7 +1563,36 @@ class MT5Executor:
                                        symbol=self.symbol, volume=lot_size,
                                        price=price, sl=sl, tp=tp, timestamp=now)
 
-        result = mt5.order_send(request)
+        # Stage X2: request_id gives MT5 platforms that honour it a dedupe key,
+        # so a retried send can never be executed twice.
+        try:
+            request.setdefault("request_id", int(time.time() * 1000) % 2_000_000_000)
+        except Exception:
+            pass
+
+        if use_limit:
+            result = mt5.order_send(request)
+        else:
+            result, bucket, reason, attempts = self._send_market_order(
+                request, action=action, lot_size=lot_size, info=info, now=now,
+                sl=sl, tp=tp, price=price)
+            if bucket == "PARTIAL":
+                logger.warning(
+                    "STEP 4 X2: DONE_PARTIAL (retcode %s) — money is LIVE at a "
+                    "smaller volume; verifying the position instead of reporting an error.",
+                    getattr(result, "retcode", None))
+            elif bucket not in ("OK", "PLACED"):
+                if reason:
+                    logger.error("STEP 4 X2: %s", reason)
+                logger.error("STEP 4: order_send failed retcode=%s (%s, %d attempt(s))",
+                             getattr(result, "retcode", None), bucket, attempts)
+                return ExecutionResult(
+                    status="ERROR",
+                    reason=(f"order_send retcode={getattr(result, 'retcode', None)} "
+                            f"({bucket}{'; ' + reason if reason else ''})"),
+                    symbol=self.symbol, volume=lot_size,
+                    price=price, sl=sl, tp=tp, timestamp=now)
+
         # For pending limit orders, DONE means order placed, not filled yet
         if use_limit:
             if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
@@ -1498,13 +1631,13 @@ class MT5Executor:
                                        symbol=self.symbol, volume=lot_size,
                                        price=limit_price, sl=sl, tp=tp, timestamp=now)
 
-        if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
-            logger.error("STEP 4: order_send failed retcode=%s",
-                         getattr(result, "retcode", None))
-            return ExecutionResult(status="ERROR",
-                                   reason=f"order_send retcode={getattr(result, 'retcode', None)}",
-                                   symbol=self.symbol, volume=lot_size,
-                                   price=price, sl=sl, tp=tp, timestamp=now)
+        # Stage X2: status handling moved above (`_send_market_order`), so a
+        # PARTIAL fill is no longer discarded by re-checking `retcode == DONE` here.
+        if result is None:
+            return ExecutionResult(
+                status="ERROR", reason="order_send returned no result",
+                symbol=self.symbol, volume=lot_size,
+                price=price, sl=sl, tp=tp, timestamp=now)
 
         order_id = getattr(result, "order", None)
         deal_id = getattr(result, "deal", None)

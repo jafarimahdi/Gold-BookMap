@@ -324,6 +324,13 @@ def _refresh() -> None:
     g["AI_L3_OFI_REF_DEPTH_LOTS"] = max(10.0, _ffloat("AI_L3_OFI_REF_DEPTH_LOTS", 100.0))
     g["EXECUTION_FRESH_REACQUIRE_SECONDS"] = max(0.0, _ffloat("EXECUTION_FRESH_REACQUIRE_SECONDS", 2.0))
     g["EXECUTION_VERIFY_SECONDS"] = _fint("EXECUTION_VERIFY_SECONDS", 5)
+    # Stage X2 (Section #14): broker-agnostic retcode handling for order_send().
+    # Every MT5 platform/broker (demo or live) reports the same retcodes, so the
+    # taxonomy below is account-type independent (hedging vs netting included).
+    # MT5_RETRY_MAX=0 disables the bounded retry (single send, legacy behaviour).
+    g["MT5_DEVIATION"] = max(1, min(200, _fint("MT5_DEVIATION", 20)))
+    g["MT5_RETRY_MAX"] = max(0, min(5, _fint("MT5_RETRY_MAX", 2)))
+    g["MT5_RETRY_BACKOFF_MS"] = max(0, min(2000, _fint("MT5_RETRY_BACKOFF_MS", 250)))
     g["RISK_PER_TRADE_PCT"] = _ffloat("RISK_PER_TRADE_PCT", 1.0)
     g["STOP_LOSS_ATR_MULT"] = _ffloat("STOP_LOSS_ATR_MULT", 2.0)
     g["TAKE_PROFIT_ATR_MULT"] = _ffloat("TAKE_PROFIT_ATR_MULT", 3.5)
