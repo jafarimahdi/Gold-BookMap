@@ -3401,7 +3401,9 @@ def synthesize_multi_day(results: List[Dict[str, Any]]) -> Tuple[str, str, Dict[
             f"  1) Stage-S1 Parity & Coverage: Bell(:00)={len(bell_sc):,} (ATR={bell_atr:.2f}) | "
             f"Serve(:01/:02)={len(serv_sc):,} (ATR={serv_atr:.2f}) | "
             f"Cycles w/ Live Door={has_live_pct:.1f}% | Avg Live={avg_live:.1f}, Tracked={avg_trk:.1f}, "
-            f"Memory={avg_mem:.1f}, TooClose={avg_tc:.1f}"
+            f"Memory={avg_mem:.1f}, TooClose={avg_tc:.1f} | "
+            f"Bell_Share={100.0 * len(bell_sc) / max(1, len(bell_sc) + len(serv_sc)):.1f}% "
+            f"(target ~{100.0 / max(1, h1):.1f}% for a 60s cadence on {tf_lbl})"
         )
         b_sp = sum(1 for c in bell_sc if c["scout"].get("banned_spoof", 0) > 0)
         b_ic = sum(1 for c in bell_sc if c["scout"].get("has_iceberg"))

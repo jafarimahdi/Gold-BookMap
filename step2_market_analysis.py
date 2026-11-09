@@ -1109,6 +1109,11 @@ class NewsAndEvents:
     news_state: str = "QUIET"         # "QUIET" | "WARNING" | "BLACKOUT"
     minutes_to_next_event: float = 0.0  # minutes until next event (neg = after)
     next_event_title: str = ""
+    # Stage N2: signed minutes to the nearest HIGH-impact event (None = no HIGH event in
+    # the calendar window). The HIGH boost window reads THIS, never the nearest-event
+    # minutes, so a distant HIGH event can never open a HIGH window by proxy.
+    high_impact_minutes: Optional[float] = None
+    high_impact_title: str = ""
     timestamp: Optional[datetime] = None
 
 
@@ -3109,10 +3114,20 @@ class EconomicCalendar:
         self.timeout = timeout
 
     # -- local cache (the free calendar host rate-limits, so fetch rarely) ----
+    @staticmethod
+    def _data_dir() -> "Path":
+        """Resolve `config.DATA_DIR` dynamically (Stage N2: test/replay isolation)."""
+        from pathlib import Path
+        data_dir = getattr(config, "DATA_DIR", None)
+        base = Path(data_dir) if data_dir else (Path(__file__).resolve().parent / "data")
+        return base
+
+    def _cache_path(self) -> "Path":
+        return self._data_dir() / "calendar_cache.json"
+
     def _read_cached_events(self) -> tuple:
         """Return (events, is_fresh) from the on-disk cache."""
-        from pathlib import Path
-        path = Path(__file__).resolve().parent / "data" / "calendar_cache.json"
+        path = self._cache_path()
         try:
             if path.exists():
                 state = json.loads(path.read_text(encoding="utf-8"))
@@ -3127,8 +3142,7 @@ class EconomicCalendar:
         return [], False
 
     def _write_cached_events(self, events: List[Dict]) -> None:
-        from pathlib import Path
-        path = Path(__file__).resolve().parent / "data" / "calendar_cache.json"
+        path = self._cache_path()
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(
@@ -3223,8 +3237,24 @@ class EconomicCalendar:
         ]
 
     def get_upcoming_events(self, max_events: int = 20) -> List[Dict]:
+        """Upcoming events from the live/cached feed.
+
+        Stage N2: an empty calendar is returned as EMPTY. The legacy
+        `fallback_events()` placeholders invented FOMC/CPI/NFP dates, and because
+        `news_state()` trusts the calendar, a feed outage could manufacture a real
+        `BLACKOUT` window and block trading on fiction. Opt back in with
+        `NEWS_ALLOW_FAKE_EVENTS=1` if a simulated calendar is ever wanted.
+        """
         events = self.fetch_live_events(max_events=max_events)
-        return events or self.fallback_events()
+        if events:
+            return events
+        if bool(getattr(config, "NEWS_ALLOW_FAKE_EVENTS", False)):
+            logger.warning("Economic calendar empty -> using PLACEHOLDER events "
+                           "(NEWS_ALLOW_FAKE_EVENTS=1). Never trade off these.")
+            return self.fallback_events()
+        logger.info("Economic calendar empty (feed/cache unavailable) -> perimeter "
+                    "stays QUIET (no fabricated events, Stage N2).")
+        return []
 
     # -- datetime parsing ------------------------------------------------------
     @staticmethod
@@ -3305,6 +3335,32 @@ class EconomicCalendar:
             return "QUIET", minutes, title     # far in the future
 
         return "QUIET", 0.0, ""
+
+    # -- nearest HIGH-impact event (Stage N2 perimeter alignment) --------------
+    def nearest_high_event(self, events: List[Dict],
+                          now: Optional[datetime] = None
+                          ) -> Tuple[Optional[float], str]:
+        """Signed minutes to the NEAREST HIGH-impact event (None when there is none).
+
+        `classify()` answers "which event of the week matters most", which is a
+        display question; the HIGH-boost window must instead answer "how far away is
+        the next HIGH event", because `minutes_to_next_event` describes the nearest
+        event of ANY impact. Mixing the two let a HIGH event days away open a HIGH
+        window next to a nearby LOW event.
+        """
+        now = now or datetime.now(timezone.utc)
+        best: Optional[Tuple[float, str]] = None
+        for e in events or []:
+            if str(e.get("impact", "")).upper() != "HIGH":
+                continue
+            dt = self._parse_event_time(e.get("date"), now)
+            if dt is None:
+                continue
+            mins = (dt - now).total_seconds() / 60.0
+            title = str(e.get("title", ""))
+            if best is None or abs(mins) < abs(best[0]):
+                best = (mins, title)
+        return (best if best is not None else (None, ""))
 
     # -- event classification --------------------------------------------------
     @classmethod
@@ -3444,9 +3500,23 @@ class SignalEngine:
             _mins = abs(float(getattr(news, "minutes_to_next_event", 0.0) or 0.0))
         except Exception:
             _mins = 0.0
-        _high_now = (getattr(news, "impact_level", "LOW") == "HIGH") and (_mins <= _hi_win)
-        if getattr(news, "impact_level", "LOW") == "HIGH" and not _high_now:
-            notes.append(f"HIGH event is {_mins:.0f} min away (> {_hi_win:.0f} window) "
+        # Stage N2: the HIGH window is driven by the NEAREST HIGH event when the
+        # snapshot supplies it; `minutes_to_next_event` is only the nearest event of
+        # ANY impact, so pairing it with the week's most important impact level could
+        # open a HIGH window for a LOW event that happens to be close.
+        _hi_mins_raw = getattr(news, "high_impact_minutes", None)
+        if _hi_mins_raw is None:
+            _hi_mins = _mins
+            _high_level = getattr(news, "impact_level", "LOW") == "HIGH"
+        else:
+            try:
+                _hi_mins = abs(float(_hi_mins_raw))
+            except (TypeError, ValueError):
+                _hi_mins = _mins
+            _high_level = True
+        _high_now = bool(_high_level) and (_hi_mins <= _hi_win)
+        if _high_level and not _high_now:
+            notes.append(f"HIGH event is {_hi_mins:.0f} min away (> {_hi_win:.0f} window) "
                          f"-> treated as a normal day, no boost")
 
         # ---- 0) NEWS-TIME GATE ----------------------------------------------
@@ -6308,13 +6378,15 @@ def analyze_market(market_data: Dict[str, Any],
         events = EconomicCalendar().get_upcoming_events()
     sent_score, sent_label = NewsAnalyzer().analyze_headlines(headlines)
     event_type, impact = EconomicCalendar.classify(events)
-    news_state, minutes_to_event, next_title = EconomicCalendar().news_state(
-        events, now=now)
+    _cal = EconomicCalendar()
+    news_state, minutes_to_event, next_title = _cal.news_state(events, now=now)
+    high_mins, high_title = _cal.nearest_high_event(events, now=now)
     news = NewsAndEvents(
         event_type=event_type, impact_level=impact, sentiment_score=sent_score,
         sentiment_label=sent_label, upcoming_events=events,
         news_headlines=headlines, news_state=news_state,
         minutes_to_next_event=minutes_to_event, next_event_title=next_title,
+        high_impact_minutes=high_mins, high_impact_title=high_title,
         timestamp=now)
 
     # ---- regime & divergence (Law #11: active TIMEFRAME chart bars) ----------

@@ -338,6 +338,9 @@ def _refresh() -> None:
     g["NEWS_BLACKOUT_BEFORE_MINUTES"] = _ffloat("NEWS_BLACKOUT_BEFORE_MINUTES", 15.0)
     g["NEWS_BLACKOUT_AFTER_MINUTES"] = _ffloat("NEWS_BLACKOUT_AFTER_MINUTES", 30.0)
     g["NEWS_PERIMETER_IGNORE_LOW"] = _fget("NEWS_PERIMETER_IGNORE_LOW", "1") == "1"
+    # Stage N2 (Section #12): never fabricate calendar events. The legacy placeholder
+    # FOMC/CPI/NFP dates could manufacture a real BLACKOUT window during a feed outage.
+    g["NEWS_ALLOW_FAKE_EVENTS"] = _fget("NEWS_ALLOW_FAKE_EVENTS", "0") == "1"
     g["NEWS_WIDEN_STOP_MULT"] = _ffloat("NEWS_WIDEN_STOP_MULT", 1.5)
     g["NEWS_REDUCE_SIZE_PCT"] = _ffloat("NEWS_REDUCE_SIZE_PCT", 0.5)
 
