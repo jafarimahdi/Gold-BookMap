@@ -819,6 +819,18 @@ def _refresh() -> None:
     g["DXY_CORR_THRESHOLD"] = _ffloat("DXY_CORR_THRESHOLD", -0.15)
     g["SIGNAL_W_MACRO_HIGH"] = _ffloat("SIGNAL_W_MACRO_HIGH", 1.0)
 
+    # Stage N1 (Section #12): WORLD-vote calibration for the two live macro/news judges.
+    # `news_sentiment`: a headline score inside `NEWS_SENTIMENT_DEADBAND` (default +-0.15)
+    # never votes, and the weight ramps linearly to full at `NEWS_SENTIMENT_FULL_WEIGHT_AT`,
+    # so a +0.02 shoulder-shrug headline can no longer speak as loud as a +1.00 crisis.
+    # `macro_risk`: RISK_OFF only votes BUY when gold's OWN tape confirms a safe-haven bid
+    # (positive gold/VIX log-return correlation + price not breaking under VWAP).
+    g["NEWS_SENTIMENT_DEADBAND"] = _ffloat("NEWS_SENTIMENT_DEADBAND", 0.15)
+    g["NEWS_SENTIMENT_FULL_WEIGHT_AT"] = _ffloat("NEWS_SENTIMENT_FULL_WEIGHT_AT", 0.60)
+    g["MACRO_RISK_CONFIRM_ENABLED"] = _fget("MACRO_RISK_CONFIRM_ENABLED", "1") == "1"
+    g["MACRO_RISK_MIN_VIX_CORR"] = _ffloat("MACRO_RISK_MIN_VIX_CORR", 0.0)
+    g["MACRO_RISK_VWAP_TOL_ATR"] = _ffloat("MACRO_RISK_VWAP_TOL_ATR", 0.10)
+
     # M5 MBO archival
     g["BOOKMAP_MBO_ROTATE_MB"] = _ffloat_first(["BOOKMAP_MBO_ROTATE_MB", "MBO_ROTATE_MB"], 100.0)
     g["BOOKMAP_MBO_ARCHIVE_KEEP_DAYS"] = _ffloat_first(["BOOKMAP_MBO_ARCHIVE_KEEP_DAYS", "MBO_ARCHIVE_KEEP_DAYS"], 0.0)

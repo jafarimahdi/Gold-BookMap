@@ -3348,6 +3348,60 @@ class SignalEngine:
         return (float(getattr(config, "SIGNAL_BUY_THRESHOLD", self.BUY_THRESHOLD)),
                 float(getattr(config, "SIGNAL_SELL_THRESHOLD", self.SELL_THRESHOLD)))
 
+    # ---- Stage N1 (Section #12): WORLD-vote calibration helpers ---------------
+    @staticmethod
+    def news_sentiment_ramp(score: float) -> float:
+        """Trust ramp for a headline sentiment score (0.0 = never vote, 1.0 = full weight).
+
+        A score inside `NEWS_SENTIMENT_DEADBAND` is statistical noise and votes not
+        at all (`0.0`); above the dead-band the weight ramps linearly to `1.0` at
+        `NEWS_SENTIMENT_FULL_WEIGHT_AT`. Setting both knobs to `0` restores the
+        legacy "any non-zero score votes at full weight" behaviour.
+        """
+        try:
+            sb = max(0.0, float(getattr(config, "NEWS_SENTIMENT_DEADBAND", 0.15) or 0.0))
+            full = max(0.0, float(getattr(config, "NEWS_SENTIMENT_FULL_WEIGHT_AT", 0.60) or 0.0))
+            a = abs(float(score or 0.0))
+        except (TypeError, ValueError):
+            return 0.0
+        if a <= sb + 1e-12:
+            return 0.0
+        if full <= sb + 1e-12:
+            return 1.0
+        return float(min(1.0, (a - sb) / (full - sb)))
+
+    @staticmethod
+    def macro_risk_confirmed(
+        macro: MacroMetrics,
+        price: float,
+        volume_profile: VolumeProfileMetrics,
+        volatility: VolatilityMetrics,
+    ) -> Tuple[bool, str]:
+        """Does gold's OWN tape confirm the safe-haven bid a RISK_OFF VIX reading implies?
+
+        `Baur & Lucey (2010)` show gold's safe-haven property is (a) only present after
+        extreme shocks and (b) short-lived (~15 trading days), so a high VIX level is
+        context -- never a directional M3 signal by itself. We therefore require a
+        measured positive gold/VIX log-return correlation plus price not breaking under
+        VWAP before `macro_risk` may cast a BUY vote.
+        """
+        if not bool(getattr(config, "MACRO_RISK_CONFIRM_ENABLED", True)):
+            return True, "legacy (confirmation disabled)"
+        try:
+            corr_min = float(getattr(config, "MACRO_RISK_MIN_VIX_CORR", 0.0) or 0.0)
+            corr = float(getattr(macro, "vix_correlation", 0.0) or 0.0)
+            vwap = float(getattr(volume_profile, "vwap", 0.0) or 0.0)
+            atr = float(getattr(volatility, "atr", 0.0) or 0.0)
+            tol_mult = max(0.0, float(getattr(config, "MACRO_RISK_VWAP_TOL_ATR", 0.10) or 0.0))
+            px = float(price or 0.0)
+        except (TypeError, ValueError):
+            return False, "confirmation inputs unreadable"
+        if corr <= corr_min + 1e-12:
+            return False, f"gold/VIX corr {corr:+.2f} <= {corr_min:+.2f}: no measured safe-haven co-move"
+        if vwap > 0.0 and px > 0.0 and px < vwap - tol_mult * max(atr, 0.0):
+            return False, f"price {px:.2f} under VWAP {vwap:.2f}: bid missing from the tape"
+        return True, f"gold/VIX corr {corr:+.2f}, price {px:.2f} vs VWAP {vwap:.2f}"
+
     def aggregate(self, price: float, volatility: VolatilityMetrics,
                   trend: TrendMetrics, order_flow: OrderFlowMetrics,
                   footprint: FootprintMetrics, level3: Level3Events,
@@ -4471,24 +4525,37 @@ class SignalEngine:
             notes.append("VIX stress +%.0f%% vs 20d median (w %.1f)" % (v_spk * 100.0, w_vix))
         if macro.risk_sentiment == "RISK_OFF":
             w_risk = macro_high_w if _high_now else 0.5
-            v = (+1.0, w_risk)
-            macro_pairs.append(v)
-            if _may_vote("macro_risk"):
-                votes.append(v)
-            notes.append(f"risk-off -> safe haven bid (w {w_risk})")
+            _risk_ok, _risk_why = self.macro_risk_confirmed(
+                macro, price, volume_profile, volatility)
+            if _risk_ok:
+                v = (+1.0, w_risk)
+                macro_pairs.append(v)
+                if _may_vote("macro_risk"):
+                    votes.append(v)
+                notes.append(f"risk-off -> safe haven bid (w {w_risk})")
+            else:
+                # Stage N1: a bare VIX level is weather, not a direction. No vote and
+                # no macro-pair brake until gold's own tape confirms the haven bid.
+                notes.append(f"RISK_OFF unconfirmed by gold tape ({_risk_why}) -> macro_risk silent")
         elif macro.risk_sentiment == "RISK_ON" and _ghost_on:
             v = (-1.0, 0.4)
             votes.append(v); macro_pairs.append(v)
 
-        # ---- 9) News sentiment (U-09: vote ONLY during active HIGH window <=120m) ----
+        # ---- 9) News sentiment (U-09 window + Stage N1 dead-band / trust ramp) ----
         sentiment_w = news_high_w if _high_now else news_low_w
-        if abs(news.sentiment_score) > 1e-6:
+        _sent = float(getattr(news, "sentiment_score", 0.0) or 0.0)
+        _sent_ramp = self.news_sentiment_ramp(_sent)
+        if _sent_ramp > 0.0:
+            _sent_w_eff = sentiment_w * _sent_ramp
             if _high_now:
                 if _may_vote("news_sentiment"):
-                    votes.append((news.sentiment_score, sentiment_w))
-                notes.append(f"HIGH impact sentiment {news.sentiment_score:+.2f} weight {sentiment_w} (boosted)")
+                    votes.append((_sent, _sent_w_eff))
+                notes.append(f"HIGH impact sentiment {_sent:+.2f} weight {_sent_w_eff:.2f} (boosted)")
             elif _ghost_on:
-                votes.append((news.sentiment_score, sentiment_w))
+                votes.append((_sent, _sent_w_eff))
+        elif abs(_sent) > 1e-6:
+            _sb_lbl = float(getattr(config, "NEWS_SENTIMENT_DEADBAND", 0.15) or 0.0)
+            notes.append(f"news sentiment {_sent:+.2f} inside dead-band +-{_sb_lbl:.2f} -> silent (no vote)")
 
         # ---- v6.0 4 Teams + Filter hierarchical ensemble (bank-grade) ----
         # Partition votes by exact domain section boundaries (replaces legacy positional

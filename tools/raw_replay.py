@@ -4145,6 +4145,46 @@ def synthesize_multi_day(results: List[Dict[str, Any]]) -> Tuple[str, str, Dict[
     except Exception as exc_rm:
         lines.append(f"  [8j] Risk scorecard error: {exc_rm}")
 
+    # [8k] Section #12 (Stage N1): Macro & News WORLD-Judge Calibration Receipt
+    lines.append("\n[8k] SECTION #12: MACRO & NEWS WORLD JUDGES -- STAGE N1 CALIBRATION RECEIPT")
+    try:
+        _db = float(getattr(config, "NEWS_SENTIMENT_DEADBAND", 0.15) or 0.0)
+        _full = float(getattr(config, "NEWS_SENTIMENT_FULL_WEIGHT_AT", 0.60) or 0.0)
+        _mr = bool(getattr(config, "MACRO_RISK_CONFIRM_ENABLED", True))
+        _mc = float(getattr(config, "MACRO_RISK_MIN_VIX_CORR", 0.0) or 0.0)
+        _vt = float(getattr(config, "MACRO_RISK_VWAP_TOL_ATR", 0.10) or 0.0)
+        _hw = float(getattr(config, "NEWS_HIGH_WINDOW_MINUTES", 120.0) or 0.0)
+        lines.append(
+            f"  Active World Config: DEADBAND={_db:.2f} | FULL_TRUST_AT={_full:.2f} | "
+            f"MACRO_RISK_CONFIRM={_mr} (gold/VIX corr > {_mc:+.2f}, VWAP tol {_vt:.2f}xATR) | "
+            f"HIGH_WINDOW={_hw:.0f}m | WORLD family weight=0.5"
+        )
+        _n1_cycles = [c for r in ok_days for c in (r.get("cycles") or []) if not c.get("error")]
+        _n1_macro = sum(1 for c in _n1_cycles if float(getattr(c.get("macro"), "vix_index", 0.0) or 0.0) > 0.0)
+        _n1_heads = sum(len(c.get("news_headlines") or []) for c in _n1_cycles)
+        _n1_events = sum(len(c.get("events") or c.get("upcoming_events") or []) for c in _n1_cycles)
+        lines.append(
+            f"  Raw-feed availability ({len(_n1_cycles)} cyc): macro_series_present={_n1_macro} | "
+            f"news_headlines={_n1_heads} | news_events={_n1_events} "
+            f"(BookMap ticks+mbo carry no external DXY/10Y/VIX/RSS feed -> WORLD votes = 0 offline)"
+        )
+        lines.append(
+            "  Leak #3 (2026-11-03 14:57 & 15:11): news_sentiment +0.02 at w=1.00 -> "
+            "OLD: 1 full-weight WORLD vote | NEW: 0 votes (inside dead-band) ; "
+            "macro_risk RISK_OFF w/o gold/VIX co-move -> OLD: unconditional BUY vote | NEW: silent"
+        )
+        lines.append(
+            "  Verification contract: offline WORLD votes are 0 by construction, so [8c]/[8d]/[8h] "
+            "must stay byte-identical to replay-29 (Law #9 zero-regression); the leak itself is proven "
+            "by test_nov09_stage_n1_world_votes.py (15 reverse-engineering tests)."
+        )
+        lines.append(
+            "  Rollback (one .env line each): NEWS_SENTIMENT_DEADBAND=0 + NEWS_SENTIMENT_FULL_WEIGHT_AT=0 "
+            "-> legacy news behaviour ; MACRO_RISK_CONFIRM_ENABLED=0 -> legacy macro_risk BUY bias"
+        )
+    except Exception as exc_n1:
+        lines.append(f"  [8k] World-vote receipt error: {exc_n1}")
+
     # [9] Stage 1: Timeframe-linked 1..4-bar path & Market Trick Detector
     lines.append(
         f"\n[9] {tf_lbl} BAR-BY-BAR PATH & MARKET TRICK DETECTOR "
