@@ -151,13 +151,15 @@ def test_b2a_csv_shadow_candidates_compaction_non_mutating(monkeypatch):
 def test_b2b_news_and_macro_stale_while_revalidate_non_blocking(monkeypatch, tmp_path):
     """B2b: expired cache returns immediately in <50ms while background thread refreshes."""
     monkeypatch.setattr(config, "reload_env", lambda *a, **k: None)
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path, raising=False)
     monkeypatch.setattr(config, "NEWS_ENABLED", True, raising=False)
     monkeypatch.setattr(config, "NEWS_ASYNC_REFRESH", True, raising=False)
     monkeypatch.setattr(config, "MACRO_ENABLED", True, raising=False)
     monkeypatch.setattr(config, "MACRO_ASYNC_REFRESH", True, raising=False)
 
-    # Seed stale in-memory caches (1 hour old)
-    monkeypatch.setattr(news, "_MEMO", {"fetched_at": time.time() - 3600, "headlines": ["Old headline"]})
+    # Seed stale in-memory caches (1 hour old), isolated from any live Terminal 1 disk cache
+    monkeypatch.setattr(news, "_MEMO", {"fetched_at": time.time() - 3600, "headlines": ["Old headline"], "disk": {}})
+    monkeypatch.setattr(news, "_MEMO_LOADED", True)
     monkeypatch.setattr(news, "_BG_REFRESHING", False)
     monkeypatch.setattr(macro, "_MEMO", {"fetched_at": time.time() - 3600, "macro": {"usd_index": 104.2}})
     monkeypatch.setattr(macro, "_BG_REFRESHING", False)

@@ -1870,20 +1870,24 @@ def replay_single_day(
                                 pass
                     nxt_tick = next(tick_iter, None)
 
-                # Advance raw MBO strictly <= tc_ep (ZERO look-ahead!):
-                # Overflow rows (>3000 before tc_ep) fast-update active_orders; final <=3000 run exact _handle_line.
+                # Advance raw MBO strictly <= tc_ep (ZERO look-ahead!, Stage B1 parity):
+                # Pre-window rows (< mbo_cutoff_step) fast-update active_orders; active-window rows
+                # run exact _handle_line and _prune_old keeps full 1-bar MBO retention + mbo_epochs sync.
                 mbo_step_ring.clear()
+                mbo_cutoff_step = tc_ep - (bbp._active_mbo_window_seconds() + 15.0)
+                max_mbo_step_buf = max(5000, int(getattr(config, "BOOKMAP_MBO_MAX_BUFFER", 45000) or 45000))
                 while nxt_mbo is not None and nxt_mbo[0] <= tc_ep:
-                    if len(mbo_step_ring) >= 3000:
-                        _fast_mbo_track_only(mbo_tail, mbo_step_ring.popleft())
-                    mbo_step_ring.append(nxt_mbo[1])
+                    if nxt_mbo[0] < mbo_cutoff_step:
+                        _fast_mbo_track_only(mbo_tail, nxt_mbo[1])
+                    else:
+                        if len(mbo_step_ring) >= max_mbo_step_buf:
+                            _fast_mbo_track_only(mbo_tail, mbo_step_ring.popleft())
+                        mbo_step_ring.append(nxt_mbo[1])
                     mbo_streamed += 1
                     nxt_mbo = next(mbo_iter, None)
                 for m_line in mbo_step_ring:
                     mbo_tail._handle_line(m_line)
-                for mst in mbo_tail.instruments.values():
-                    if len(mst.mbo_events) > 5000:
-                        del mst.mbo_events[:-3200]
+                mbo_tail._prune_old(0.0)
 
                 # Keep 8h rolling tick window matching live `config.BOOKMAP_WINDOW_SECONDS = 28800`
                 if step_idx % 15 == 1:
@@ -2474,6 +2478,23 @@ def replay_single_day(
                             "aggr_pm4b_pts": shot_pm4b_pts,
                         })
 
+                oe_list = md.get("order_events") or []
+                mbo_span_s = 0.0
+                mbo_near_cnt = 0
+                near_band_cfg = float(getattr(config, "BOOKMAP_MBO_NEAR_CORRIDOR_USD", 8.0) or 8.0)
+                if oe_list:
+                    ep_first = bbp._event_epoch(oe_list[0])
+                    ep_last = bbp._event_epoch(oe_list[-1])
+                    if ep_first > 0 and ep_last >= ep_first:
+                        mbo_span_s = round(ep_last - ep_first, 1)
+                    if px > 0:
+                        for _oe in oe_list:
+                            try:
+                                if abs(float(_oe.get("price") or 0.0) - px) <= near_band_cfg:
+                                    mbo_near_cnt += 1
+                            except (TypeError, ValueError):
+                                pass
+
                 cycles_out.append({
                     "entry_ep": tc_ep,
                     "dt_utc": tc_dt,
@@ -2483,9 +2504,16 @@ def replay_single_day(
                     "bid": float(md.get("bid") or 0.0),
                     "ask": float(md.get("ask") or 0.0),
                     "spread_pts": spread_cur,
+                    "quote_status": str(dq.get("quote") or "?"),
                     "l2_status": str(dq.get("level2") or "?"),
+                    "l3_status": str(dq.get("level3") or "?"),
+                    "order_flow_status": str(dq.get("order_flow") or "?"),
+                    "fresh_bid_levels": int(l2d.get("fresh_bid_levels") or 0),
+                    "fresh_ask_levels": int(l2d.get("fresh_ask_levels") or 0),
                     "depth_levels": f"{l2d.get('fresh_bid_levels', 0)}/{l2d.get('fresh_ask_levels', 0)}",
-                    "mbo_window": len(md.get("order_events") or []),
+                    "mbo_window": len(oe_list),
+                    "mbo_near_cnt": mbo_near_cnt,
+                    "mbo_span_s": mbo_span_s,
                     "direction": sig_dir,
                     "confidence": round(sig_conf, 1),
                     "strength": round(sig_str, 1),
@@ -3760,6 +3788,54 @@ def synthesize_multi_day(results: List[Dict[str, Any]]) -> Tuple[str, str, Dict[
             f"  Passive-Limit Shadow Audit (1-Tick Trade-Through, TTL={int(getattr(config, 'SHOOT_PAPER_LIMIT_TTL_SECONDS', 180))}s): "
             f"Filled={len(pl_fills)}/{n_pl} ({fill_pct:.1f}%) -> Passive_PM4B={pl_pts:+.1f} pts | "
             f"Missed_Runaways={missed_pts:+.1f} pts | Aggr_Market_PM4B={ag_pts:+.1f} pts"
+        )
+
+    # [8i] Section #10 (Stage B1): Step 1 Live BookMap Bridge & Feed Integrity Scorecard
+    lines.append("\n[8i] SECTION #10: STEP 1 LIVE BOOKMAP BRIDGE & FEED INTEGRITY SCORECARD (Stage B1)")
+    all_cyc_b1 = [c for r in ok_days for c in (r.get("cycles") or [])]
+    n_cyc_b1 = len(all_cyc_b1)
+    if n_cyc_b1 > 0:
+        q_cnt = Counter(str(c.get("quote_status") or "?") for c in all_cyc_b1)
+        l2_cnt = Counter(str(c.get("l2_status") or "?") for c in all_cyc_b1)
+        l3_cnt = Counter(str(c.get("l3_status") or "?") for c in all_cyc_b1)
+        of_cnt = Counter(str(c.get("order_flow_status") or "?") for c in all_cyc_b1)
+        mbo_counts = [int(c.get("mbo_window") or 0) for c in all_cyc_b1]
+        mbo_active = [c for c in all_cyc_b1 if int(c.get("mbo_window") or 0) > 0]
+        avg_mbo = (sum(mbo_counts) / n_cyc_b1) if n_cyc_b1 else 0.0
+        avg_span = (
+            sum(float(c.get("mbo_span_s") or 0.0) for c in mbo_active) / len(mbo_active)
+            if mbo_active else 0.0
+        )
+        tot_oe = sum(int(c.get("mbo_window") or 0) for c in mbo_active)
+        tot_near = sum(int(c.get("mbo_near_cnt") or 0) for c in mbo_active)
+        near_pct = (100.0 * tot_near / tot_oe) if tot_oe > 0 else 0.0
+        avg_bid_lv = sum(int(c.get("fresh_bid_levels") or 0) for c in all_cyc_b1) / n_cyc_b1
+        avg_ask_lv = sum(int(c.get("fresh_ask_levels") or 0) for c in all_cyc_b1) / n_cyc_b1
+        max_bid_lv = max((int(c.get("fresh_bid_levels") or 0) for c in all_cyc_b1), default=0)
+        max_ask_lv = max((int(c.get("fresh_ask_levels") or 0) for c in all_cyc_b1), default=0)
+        near_band_lbl = float(getattr(config, "BOOKMAP_MBO_NEAR_CORRIDOR_USD", 8.0) or 8.0)
+        max_oe_lbl = int(getattr(config, "BOOKMAP_MAX_ORDER_EVENTS", 2000) or 2000)
+        max_dl_lbl = int(getattr(config, "BOOKMAP_MAX_DEPTH_LEVELS", 40) or 40)
+        lines.append(
+            f"  Quote Integrity ({n_cyc_b1} cyc): "
+            + " | ".join(f"{k}={v} ({100.0*v/n_cyc_b1:.1f}%)" for k, v in q_cnt.most_common(4))
+        )
+        lines.append(
+            f"  L2 Book Hygiene (cfg_max={max_dl_lbl}): "
+            + " | ".join(f"{k}={v}" for k, v in l2_cnt.most_common(4))
+            + f" | Fresh_Levels Avg={avg_bid_lv:.1f}b/{avg_ask_lv:.1f}a (Max={max_bid_lv}b/{max_ask_lv}a)"
+        )
+        lines.append(
+            f"  L3 / Order-Flow Tags: L3=["
+            + ", ".join(f"{k}:{v}" for k, v in l3_cnt.most_common(4))
+            + "] | OF=["
+            + ", ".join(f"{k}:{v}" for k, v in of_cnt.most_common(4))
+            + "]"
+        )
+        lines.append(
+            f"  MBO Window & Near-Corridor Priority (cap={max_oe_lbl}, band=+-${near_band_lbl:.1f}): "
+            f"Active_Cyc={len(mbo_active)}/{n_cyc_b1} | Avg_Events={avg_mbo:.0f} | "
+            f"Avg_Span={avg_span:.1f}s | Near_Corridor_Share={near_pct:.1f}% ({tot_near}/{tot_oe})"
         )
 
     # [9] Stage 1: Timeframe-linked 1..4-bar path & Market Trick Detector

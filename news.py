@@ -66,7 +66,9 @@ _BG_REFRESHING = False
 # Caching (memory + disk) — never hammer the free feed
 # --------------------------------------------------------------------------- #
 def _cache_path() -> Path:
-    return Path(__file__).resolve().parent / "data" / "news_cache.json"
+    data_dir = getattr(config, "DATA_DIR", None)
+    base = Path(data_dir) if data_dir else (Path(__file__).resolve().parent / "data")
+    return base / "news_cache.json"
 
 
 def _load_disk_cache() -> Optional[Dict[str, Any]]:

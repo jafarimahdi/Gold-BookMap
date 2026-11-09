@@ -22,6 +22,7 @@ v5.3 MEDIUM:
 
 from __future__ import annotations
 
+import bisect
 import csv
 import gzip
 import logging
@@ -80,6 +81,41 @@ def _parse_ts(raw: str) -> Optional[datetime]:
             except (OSError, ValueError):
                 dt = dt.replace(tzinfo=timezone.utc)
     return dt
+
+
+def _event_epoch(event: Dict[str, Any]) -> float:
+    """Resolve numeric UTC epoch for an MBO/order event dict without mutating it."""
+    raw = event.get("timestamp")
+    if isinstance(raw, datetime):
+        dt = raw if raw.tzinfo is not None else raw.replace(tzinfo=timezone.utc)
+        try:
+            return float(dt.timestamp())
+        except (OverflowError, OSError, ValueError):
+            return 0.0
+    if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+        return float(raw) if math.isfinite(float(raw)) else 0.0
+    dt = _parse_ts(str(raw or ""))
+    if dt is not None:
+        try:
+            return float(dt.timestamp())
+        except (OverflowError, OSError, ValueError):
+            return 0.0
+    return 0.0
+
+
+def _active_mbo_window_seconds() -> float:
+    """Law #11: MBO window covers at least 1 active bar + order-flow/staleness horizon."""
+    vals = []
+    for k, d in (("ORDER_FLOW_WINDOW_SECONDS", 180.0),
+                 ("POWER_BAR_SECONDS", 180.0),
+                 ("STALE_DATA_SECONDS", 300.0)):
+        try:
+            v = float(getattr(config, k, d) or d)
+            if math.isfinite(v) and v > 0:
+                vals.append(v)
+        except (TypeError, ValueError, OverflowError):
+            pass
+    return max(vals) if vals else 300.0
 
 
 def _resolve_bridge_file() -> str:
@@ -149,7 +185,7 @@ def _file_identity(path: str):
 
 class _InstrumentState:
     __slots__ = ("bids", "asks", "ticks", "best_bid", "best_ask", "last_dt",
-                 "mbo_events", "depth_touch", "level_ts_b", "level_ts_a",
+                 "mbo_events", "mbo_epochs", "depth_touch", "level_ts_b", "level_ts_a",
                  "active_orders")
 
     def __init__(self):
@@ -160,6 +196,7 @@ class _InstrumentState:
         self.best_ask: float = 0.0
         self.last_dt: Optional[datetime] = None
         self.mbo_events: List[Dict[str, Any]] = []
+        self.mbo_epochs: List[float] = []
         # bridge-fix-2026-10-07: rolling (ts, "B"/"A", price) of fresh depth
         # events — the only live top-of-book source (no Bid/Ask events exist).
         self.depth_touch: List[Any] = []
@@ -177,6 +214,7 @@ class _InstrumentState:
         self.best_bid = self.best_ask = 0.0
         self.last_dt = None
         self.mbo_events = []
+        self.mbo_epochs = []
         self.depth_touch = []
         self.level_ts_b, self.level_ts_a = {}, {}
         self.active_orders = {}
@@ -312,6 +350,8 @@ class _BridgeTail:
                     "timestamp": dt.isoformat(),
                     "order_id": raw_oid,
                 })
+                if hasattr(st, "mbo_epochs"):
+                    st.mbo_epochs.append(float(dt.timestamp()))
             except Exception:
                 pass
 
@@ -319,28 +359,45 @@ class _BridgeTail:
         threshold = float(getattr(config, "BOOKMAP_ROTATE_MB", getattr(config, "NT_ROTATE_MB", 200.0)) or 0) * 1048576.0
         if threshold <= 0:
             return f
+        now_mono = time.monotonic()
+        if now_mono < float(getattr(self, "_rotate_retry_after", 0.0) or 0.0):
+            return f
         try:
             size = os.path.getsize(self.path)
         except OSError:
             return f
         if size < threshold:
             return f
+        saved_pos = None
+        try:
+            saved_pos = f.tell()
+        except (OSError, ValueError):
+            saved_pos = None
         try:
             f.close()
         except OSError:
             pass
         chunk = None
-        for _ in range(20):
+        for _ in range(3):
             candidate = os.path.join(os.path.dirname(self.path) or ".", "ticks_" + datetime.now().strftime("%Y%m%d_%H%M%S") + ".csv")
             try:
                 os.rename(self.path, candidate)
                 chunk = candidate
                 break
             except OSError:
-                time.sleep(0.05)
+                time.sleep(0.01)
         if chunk is None:
-            logger.warning("BookMap bridge: ticks.csv rotation deferred (rename blocked); retrying")
-            return open(self.path, "r", encoding="utf-8", errors="replace")
+            self._rotate_retry_after = time.monotonic() + 60.0
+            logger.warning("BookMap bridge: ticks.csv rotation deferred (rename blocked; retry in 60s)")
+            nf = open(self.path, "r", encoding="utf-8", errors="replace")
+            if saved_pos is not None:
+                try:
+                    if os.path.getsize(self.path) >= 0:
+                        nf.seek(saved_pos)
+                except (OSError, ValueError):
+                    pass
+            return nf
+        self._rotate_retry_after = 0.0
         with open(self.path, "w", encoding="utf-8") as fh:
             fh.write(_CSV_HEADER)
         logger.info("BookMap bridge: rotated ticks.csv at %.0f MB -> %s", size / 1048576.0, os.path.basename(chunk))
@@ -805,11 +862,19 @@ class _MboTail:
         if old_price is not None:
             ev_rec["old_price"] = old_price
         st.mbo_events.append(ev_rec)
+        if hasattr(st, "mbo_epochs"):
+            if len(st.mbo_epochs) == len(st.mbo_events) - 1:
+                st.mbo_epochs.append(float(dt.timestamp()))
+            else:
+                st.mbo_epochs = [_event_epoch(e) for e in st.mbo_events]
         st.last_dt = dt
 
     def _maybe_rotate(self, f) -> Any:
         threshold = float(getattr(config, "BOOKMAP_MBO_ROTATE_MB", 100.0) or 0) * 1048576.0
         if threshold <= 0:
+            return f
+        now_mono = time.monotonic()
+        if now_mono < float(getattr(self, "_rotate_retry_after", 0.0) or 0.0):
             return f
         try:
             size = os.path.getsize(self.path)
@@ -817,22 +882,36 @@ class _MboTail:
             return f
         if size < threshold:
             return f
+        saved_pos = None
+        try:
+            saved_pos = f.tell()
+        except (OSError, ValueError):
+            saved_pos = None
         try:
             f.close()
         except OSError:
             pass
         chunk = None
-        for _ in range(20):
+        for _ in range(3):
             candidate = os.path.join(os.path.dirname(self.path) or ".", "mbo_" + datetime.now().strftime("%Y%m%d_%H%M%S") + ".csv")
             try:
                 os.rename(self.path, candidate)
                 chunk = candidate
                 break
             except OSError:
-                time.sleep(0.05)
+                time.sleep(0.01)
         if chunk is None:
-            logger.warning("BookMap MBO: rotation deferred (rename blocked)")
-            return open(self.path, "r", encoding="utf-8", errors="replace")
+            self._rotate_retry_after = time.monotonic() + 60.0
+            logger.warning("BookMap MBO: rotation deferred (rename blocked; retry in 60s)")
+            nf = open(self.path, "r", encoding="utf-8", errors="replace")
+            if saved_pos is not None:
+                try:
+                    if os.path.getsize(self.path) >= 0:
+                        nf.seek(saved_pos)
+                except (OSError, ValueError):
+                    pass
+            return nf
+        self._rotate_retry_after = 0.0
         with open(self.path, "w", encoding="utf-8") as fh:
             fh.write(_MBO_CSV_HEADER)
         logger.info("BookMap MBO: rotated mbo.csv at %.0f MB -> %s", size / 1048576.0, os.path.basename(chunk))
@@ -884,25 +963,120 @@ class _MboTail:
         threading.Thread(target=_worker, name="bookmap-mbo-archive", daemon=True).start()
 
     def _prune_old(self, window: float) -> None:
-        cutoff = time.time() - window
+        mbo_win = max(60.0, _active_mbo_window_seconds() + 60.0)
+        cutoff = _now_utc_epoch() - mbo_win
+        max_buf = max(5000, int(getattr(config, "BOOKMAP_MBO_MAX_BUFFER", 45000) or 45000))
         for st in self.instruments.values():
             if not st.mbo_events:
                 continue
-            # Keep only recent window + max 5000
-            if len(st.mbo_events) > 5000:
-                st.mbo_events = st.mbo_events[-5000:]
+            eps = getattr(st, "mbo_epochs", None)
+            if isinstance(eps, list) and len(eps) == len(st.mbo_events):
+                cut_idx = bisect.bisect_left(eps, cutoff)
+                if cut_idx > 0:
+                    del st.mbo_events[:cut_idx]
+                    del eps[:cut_idx]
+                if len(st.mbo_events) > max_buf:
+                    drop_n = len(st.mbo_events) - max_buf
+                    del st.mbo_events[:drop_n]
+                    del eps[:drop_n]
+            elif len(st.mbo_events) > max_buf:
+                st.mbo_events = st.mbo_events[-max_buf:]
+                if isinstance(eps, list):
+                    st.mbo_epochs = [_event_epoch(e) for e in st.mbo_events]
+
+    def _replay_recorded_history(self) -> Optional[int]:
+        """Warm recent MBO window across rotated mbo_*.csv[.gz] + live mbo.csv with seek cookie."""
+        live_offset: Optional[int] = None
+        if not self.path:
+            return None
+        live_key = os.path.normcase(os.path.abspath(self.path))
+        try:
+            folder = os.path.dirname(self.path) or "."
+            names = [n for n in os.listdir(folder) if _MBO_CHUNK_RE.match(n)]
+            outdir = os.path.join(folder, "data", "archive")
+            if os.path.isdir(outdir):
+                names += [
+                    n for n in os.listdir(outdir)
+                    if re.match(r"^mbo_\d{8}_\d{6}\.csv\.gz$", n, re.I)
+                ]
+            names = sorted(set(names))[-2:]
+            candidates: List[str] = []
+            for n in names:
+                p1 = os.path.join(folder, n)
+                p2 = os.path.join(outdir, n)
+                if os.path.exists(p1):
+                    candidates.append(p1)
+                elif os.path.exists(p2):
+                    candidates.append(p2)
+            mbo_win = max(60.0, _active_mbo_window_seconds() + 120.0)
+            cutoff_ts = _now_utc_epoch() - mbo_win
+            max_buf = max(5000, int(getattr(config, "BOOKMAP_MBO_MAX_BUFFER", 45000) or 45000))
+            ordered = sorted(candidates)
+            if os.path.exists(self.path) and self.path not in ordered:
+                ordered = ordered + [self.path]
+            replayed = 0
+            for src in ordered:
+                is_live_file = os.path.normcase(os.path.abspath(src)) == live_key
+                if not is_live_file:
+                    try:
+                        st_mtime = os.path.getmtime(src)
+                        if st_mtime < (cutoff_ts - 600.0):
+                            continue
+                    except OSError:
+                        pass
+                try:
+                    opener = gzip.open if src.endswith(".gz") else open
+                    with opener(src, "rt", encoding="utf-8", errors="replace") as fh:
+                        for line in fh:
+                            if not line.endswith("\n"):
+                                continue
+                            ts_raw = line.split(",", 1)[0]
+                            if ts_raw == "time":
+                                continue
+                            dt = _parse_ts(ts_raw)
+                            if dt is None or dt.timestamp() < cutoff_ts:
+                                continue
+                            self._handle_line(line)
+                            replayed += 1
+                        if is_live_file:
+                            live_offset = fh.tell()
+                except Exception as exc:
+                    if is_live_file:
+                        live_offset = None
+                    logger.warning("BookMap MBO history replay failed for %s: %s",
+                                   os.path.basename(src), exc)
+            for st in self.instruments.values():
+                if len(st.mbo_events) > max_buf:
+                    drop_n = len(st.mbo_events) - max_buf
+                    del st.mbo_events[:drop_n]
+                    if hasattr(st, "mbo_epochs") and len(st.mbo_epochs) >= drop_n:
+                        del st.mbo_epochs[:drop_n]
+            if replayed:
+                logger.info("BookMap MBO history replay: %d fresh events restored from %d file(s)",
+                            replayed, len(ordered))
+            return live_offset
+        except Exception:
+            logger.exception("BookMap MBO history replay failed")
+            return None
 
     def _catch_up(self, f) -> None:
         try:
-            size = os.path.getsize(self.path)
-            catchup = max(1, int(getattr(config, "BOOKMAP_CATCHUP_MB", 64))) * 1024 * 1024
-            if size > catchup:
-                f.seek(size - catchup)
-                f.readline()
+            live_offset = None
+            if not getattr(self, "_history_replayed", False):
+                self._history_replayed = True
+                live_offset = self._replay_recorded_history()
+            if live_offset is not None:
+                f.seek(live_offset)
+            else:
+                size = os.path.getsize(self.path)
+                catchup = max(1, int(getattr(config, "BOOKMAP_CATCHUP_MB", 64))) * 1024 * 1024
+                if size > catchup:
+                    f.seek(size - catchup)
+                    f.readline()
             for line in f:
                 if line.endswith("\n"):
                     self._handle_line(line)
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
             logger.warning("BookMap MBO catch-up failed: %s", exc)
 
     def _run(self) -> None:
@@ -1269,13 +1443,48 @@ class BookmapBridgeProvider(BaseProvider):
             direct_side_hits = self.tail.direct_side_hits
             total_lines = self.tail.line_count
 
-        mbo_from_file: List[Dict] = []
+        now_epoch = _now_utc_epoch()
+        try:
+            max_order_events = max(500, int(getattr(config, "BOOKMAP_MAX_ORDER_EVENTS", 2000) or 2000))
+        except (TypeError, ValueError):
+            max_order_events = 2000
+        try:
+            max_mbo_buf = max(5000, int(getattr(config, "BOOKMAP_MBO_MAX_BUFFER", 45000) or 45000))
+        except (TypeError, ValueError):
+            max_mbo_buf = 45000
+        mbo_cutoff_ep = now_epoch - (_active_mbo_window_seconds() + 15.0)
+
+        mbo_from_file: List[tuple] = []
         if name and self.mbo_tail:
             try:
                 with self.mbo_tail.lock:
                     mbo_state = self.mbo_tail.instruments.get(name)
+                    if mbo_state is None:
+                        matched = [
+                            st_c for cname, st_c in self.mbo_tail.instruments.items()
+                            if st_c.mbo_events and _instrument_matches(name, cname)
+                        ]
+                        if len(matched) == 1:
+                            mbo_state = matched[0]
                     if mbo_state and mbo_state.mbo_events:
-                        mbo_from_file = list(mbo_state.mbo_events[-3000:])
+                        evs_ref = mbo_state.mbo_events
+                        eps_ref = getattr(mbo_state, "mbo_epochs", None)
+                        if isinstance(eps_ref, list) and len(eps_ref) == len(evs_ref):
+                            lo_i = bisect.bisect_left(eps_ref, mbo_cutoff_ep)
+                            hi_evs = evs_ref[lo_i:]
+                            hi_eps = eps_ref[lo_i:]
+                            if len(hi_evs) > max_mbo_buf:
+                                hi_evs = hi_evs[-max_mbo_buf:]
+                                hi_eps = hi_eps[-max_mbo_buf:]
+                            mbo_from_file = list(zip(hi_eps, hi_evs))
+                        else:
+                            tail_evs = evs_ref[-max_mbo_buf:]
+                            mbo_from_file = [
+                                (ep_e, ev_e)
+                                for ev_e in tail_evs
+                                for ep_e in (_event_epoch(ev_e),)
+                                if ep_e <= 0 or ep_e >= mbo_cutoff_ep
+                            ]
             except Exception:
                 logger.exception("BookMap MBO snapshot failed for %s", name)
 
@@ -1283,25 +1492,69 @@ class BookmapBridgeProvider(BaseProvider):
         # ticks.csv MBO events only when mbo.csv has none. Key dedup by
         # timestamp+order_id+type+price+size so sequential REPLACE updates on
         # the same order_id are preserved in exact chronological order.
-        combined_raw = mbo_from_file if mbo_from_file else mbo_from_ticks
-        filtered = [e for e in combined_raw
-                    if str(e.get("order_id", "")).strip()
-                    not in ("-1", "0", "", "None", "null")]
-        dedup: Dict[tuple, Dict] = {}
-        for event in filtered:
+        if mbo_from_file:
+            combined_pairs = mbo_from_file
+        else:
+            combined_pairs = [(_event_epoch(e), e) for e in mbo_from_ticks]
+        dedup: Dict[tuple, tuple] = {}
+        seq_idx = 0
+        for ep_val, event in combined_pairs:
+            if str(event.get("order_id", "")).strip() in ("-1", "0", "", "None", "null"):
+                continue
             try:
                 key = (str(event.get("timestamp", "")),
                        str(event.get("order_id", "")),
                        str(event.get("type", "")).upper(),
                        round(float(event.get("price", 0)), 2),
                        round(float(event.get("size", 0)), 4))
-                dedup[key] = event
+                seq_idx += 1
+                dedup[key] = (ep_val, seq_idx, event)
             except (TypeError, ValueError, OverflowError):
                 continue
-        order_events = list(dedup.values())
-        order_events.sort(key=lambda event: str(event.get("timestamp", "")))
-        if len(order_events) > 2000:
-            order_events = order_events[-2000:]
+        dedup_rows = list(dedup.values())
+        dedup_rows.sort(key=lambda row: (row[0], row[1]))
+
+        # Stage B1 (Cont, Kukanov & Stoikov 2014): When high-frequency outer-book MBO
+        # churn exceeds `max_order_events` within the active 1-bar window, retain
+        # near-corridor events (`+-BOOKMAP_MBO_NEAR_CORRIDOR_USD` around anchor price)
+        # first so near-touch OFI, spoofs, and execution-corridor icebergs never get
+        # evicted by far-away passive depth churn, then backfill remaining slots.
+        if len(dedup_rows) > max_order_events:
+            anchor_px = 0.0
+            if ticks:
+                try:
+                    anchor_px = float(ticks[-1].get("price") or 0.0)
+                except (TypeError, ValueError):
+                    anchor_px = 0.0
+            if anchor_px <= 0 and raw_bids and raw_asks:
+                anchor_px = 0.5 * (max(raw_bids) + min(raw_asks))
+            try:
+                near_band = max(2.0, float(getattr(config, "BOOKMAP_MBO_NEAR_CORRIDOR_USD", 8.0) or 8.0))
+            except (TypeError, ValueError):
+                near_band = 8.0
+            if anchor_px > 0:
+                near_rows = []
+                far_rows = []
+                for row in dedup_rows:
+                    try:
+                        ev_px = float(row[2].get("price", 0.0) or 0.0)
+                    except (TypeError, ValueError):
+                        ev_px = 0.0
+                    if ev_px > 0 and abs(ev_px - anchor_px) <= near_band:
+                        near_rows.append(row)
+                    else:
+                        far_rows.append(row)
+                if len(near_rows) >= max_order_events:
+                    selected_rows = near_rows[-max_order_events:]
+                else:
+                    rem_slots = max_order_events - len(near_rows)
+                    selected_rows = near_rows + far_rows[-rem_slots:]
+                    selected_rows.sort(key=lambda row: (row[0], row[1]))
+                order_events = [row[2] for row in selected_rows]
+            else:
+                order_events = [row[2] for row in dedup_rows[-max_order_events:]]
+        else:
+            order_events = [row[2] for row in dedup_rows]
 
         # The level-age setting was previously read but not exposed by config;
         # now the documented fallback is also the actual source default.
@@ -1313,7 +1566,6 @@ class BookmapBridgeProvider(BaseProvider):
         except (TypeError, ValueError, OverflowError):
             max_age = 0.0
             max_age_limit_invalid = True
-        now_epoch = _now_utc_epoch()
         fresh_bids, fresh_bid_ts, bid_counts = _fresh_depth_levels(
             raw_bids, bid_level_ts, now_epoch, max_age)
         fresh_asks, fresh_ask_ts, ask_counts = _fresh_depth_levels(
@@ -1322,6 +1574,10 @@ class BookmapBridgeProvider(BaseProvider):
         raw_best_bid = max(fresh_bids) if fresh_bids else 0.0
         raw_best_ask = min(fresh_asks) if fresh_asks else 0.0
         crossed = bool(raw_best_bid and raw_best_ask and raw_best_bid >= raw_best_ask)
+        try:
+            max_book_levels = max(10, int(getattr(config, "BOOKMAP_MAX_DEPTH_LEVELS", _MAX_BOOK_LEVELS) or 40))
+        except (TypeError, ValueError):
+            max_book_levels = _MAX_BOOK_LEVELS
         # Do not silently "repair" a crossed book by dropping levels: that
         # invents a different book. Preserve the raw top in diagnostics and
         # pass no L2 levels to analytics until the source sends a valid book.
@@ -1329,9 +1585,9 @@ class BookmapBridgeProvider(BaseProvider):
             analysis_bids, analysis_asks = {}, {}
         else:
             analysis_bids = dict(sorted(fresh_bids.items(),
-                                        key=lambda item: -item[0])[:_MAX_BOOK_LEVELS])
+                                        key=lambda item: -item[0])[:max_book_levels])
             analysis_asks = dict(sorted(fresh_asks.items(),
-                                        key=lambda item: item[0])[:_MAX_BOOK_LEVELS])
+                                        key=lambda item: item[0])[:max_book_levels])
 
         self.tick_data = [
             {"price": t["price"], "volume": t["volume"], "side": t["side"],
@@ -1357,65 +1613,105 @@ class BookmapBridgeProvider(BaseProvider):
 
         symbol_out = name or symbol or getattr(config, "DATA_SYMBOL", "MGC 12-26")
         has_prebuilt = getattr(self, "_prebuilt_candles", None) is not None
-        data = self.build_market_data(symbol=symbol_out)
-        data["candles_is_m1"] = True
         try:
             base_tf_min = max(1, int(getattr(config, "BASE_TF_MINUTES", 5) or 5))
         except (TypeError, ValueError):
             base_tf_min = 5
-        data["candles_tf_minutes"] = base_tf_min
+
+        fast_m1_candles: Optional[Dict[str, Any]] = None
+        ep_rows: List[tuple] = []
         if not has_prebuilt and ticks:
             try:
                 import numpy as _np
-                ep_rows = []
+                prev_ep = -1.0
+                ordered_ep = True
                 for _t in ticks:
                     _dt_t = _t.get("ts")
                     if isinstance(_dt_t, datetime):
-                        ep_rows.append((_dt_t.timestamp(), float(_t["price"]), float(_t["volume"])))
+                        _ep_v = float(_dt_t.timestamp())
+                        if _ep_v < prev_ep:
+                            ordered_ep = False
+                        prev_ep = _ep_v
+                        ep_rows.append((_ep_v, float(_t["price"]), float(_t["volume"])))
+                if not ordered_ep:
+                    ep_rows.sort(key=lambda r: r[0])
                 if ep_rows:
-                    _ref_ep = float(last_data_dt.timestamp()) if isinstance(last_data_dt, datetime) else ep_rows[-1][0]
+                    o_1, h_1, l_1, c_1, v_1 = [], [], [], [], []
+                    cur_m1 = None
+                    for _ep, _px, _sz in ep_rows:
+                        _k1 = int(_ep // 60)
+                        if _k1 != cur_m1:
+                            o_1.append(_px); h_1.append(_px); l_1.append(_px); c_1.append(_px); v_1.append(_sz)
+                            cur_m1 = _k1
+                        else:
+                            if _px > h_1[-1]:
+                                h_1[-1] = _px
+                            if _px < l_1[-1]:
+                                l_1[-1] = _px
+                            c_1[-1] = _px
+                            v_1[-1] += _sz
+                    fast_m1_candles = {
+                        "open": _np.asarray(o_1, dtype=float),
+                        "high": _np.asarray(h_1, dtype=float),
+                        "low": _np.asarray(l_1, dtype=float),
+                        "close": _np.asarray(c_1, dtype=float),
+                        "volume": _np.asarray(v_1, dtype=float),
+                    }
+            except Exception:
+                fast_m1_candles = None
 
-                    def _bucket_rows(b_min: int, drop_forming_min_bars: int = 15):
-                        b_sec = max(60, int(b_min) * 60)
-                        o_l, h_l, l_l, c_l, v_l, k_l = [], [], [], [], [], []
-                        cur_k = None
-                        for _ep, _px, _sz in ep_rows:
-                            _k = int(_ep // b_sec)
-                            if _k != cur_k:
-                                o_l.append(_px)
-                                h_l.append(_px)
-                                l_l.append(_px)
-                                c_l.append(_px)
-                                v_l.append(_sz)
-                                k_l.append(_k)
-                                cur_k = _k
-                            else:
-                                if _px > h_l[-1]:
-                                    h_l[-1] = _px
-                                if _px < l_l[-1]:
-                                    l_l[-1] = _px
-                                c_l[-1] = _px
-                                v_l[-1] += _sz
-                        # Exclude incomplete forming multi-minute bar once enough closed history exists
-                        if b_min > 1 and len(c_l) > drop_forming_min_bars and (k_l[-1] + 1) * b_sec > _ref_ep:
-                            o_l.pop(); h_l.pop(); l_l.pop(); c_l.pop(); v_l.pop()
-                        if not c_l:
-                            return {}
-                        return {
-                            "open": _np.asarray(o_l, dtype=float),
-                            "high": _np.asarray(h_l, dtype=float),
-                            "low": _np.asarray(l_l, dtype=float),
-                            "close": _np.asarray(c_l, dtype=float),
-                            "volume": _np.asarray(v_l, dtype=float),
-                        }
+        if fast_m1_candles is not None:
+            data = self.build_market_data(symbol=symbol_out, candles=fast_m1_candles)
+        else:
+            data = self.build_market_data(symbol=symbol_out)
+        data["candles_is_m1"] = True
+        data["candles_tf_minutes"] = base_tf_min
+        if not has_prebuilt and ep_rows:
+            try:
+                import numpy as _np
+                _ref_ep = float(last_data_dt.timestamp()) if isinstance(last_data_dt, datetime) else ep_rows[-1][0]
 
-                    data["candles_tf"] = data.get("candles", {}) if base_tf_min == 1 else _bucket_rows(base_tf_min, 15)
-                    ladder_fn = getattr(config, "mtf_ladder_for_base_tf", None)
-                    ladder = ladder_fn(base_tf_min) if callable(ladder_fn) else [("M15", 15), ("H1", 60)]
-                    for _tf_lbl, _tf_m in ladder:
-                        _cd = _bucket_rows(int(_tf_m), 20)
-                        if _cd:
-                            data[f"candles_{str(_tf_lbl).lower()}"] = _cd
+                def _bucket_rows(b_min: int, drop_forming_min_bars: int = 15):
+                    b_sec = max(60, int(b_min) * 60)
+                    o_l, h_l, l_l, c_l, v_l, k_l = [], [], [], [], [], []
+                    cur_k = None
+                    for _ep, _px, _sz in ep_rows:
+                        _k = int(_ep // b_sec)
+                        if _k != cur_k:
+                            o_l.append(_px)
+                            h_l.append(_px)
+                            l_l.append(_px)
+                            c_l.append(_px)
+                            v_l.append(_sz)
+                            k_l.append(_k)
+                            cur_k = _k
+                        else:
+                            if _px > h_l[-1]:
+                                h_l[-1] = _px
+                            if _px < l_l[-1]:
+                                l_l[-1] = _px
+                            c_l[-1] = _px
+                            v_l[-1] += _sz
+                    # Exclude incomplete forming multi-minute bar once enough closed history exists
+                    if b_min > 1 and len(c_l) > drop_forming_min_bars and (k_l[-1] + 1) * b_sec > _ref_ep:
+                        o_l.pop(); h_l.pop(); l_l.pop(); c_l.pop(); v_l.pop()
+                    if not c_l:
+                        return {}
+                    return {
+                        "open": _np.asarray(o_l, dtype=float),
+                        "high": _np.asarray(h_l, dtype=float),
+                        "low": _np.asarray(l_l, dtype=float),
+                        "close": _np.asarray(c_l, dtype=float),
+                        "volume": _np.asarray(v_l, dtype=float),
+                    }
+
+                data["candles_tf"] = data.get("candles", {}) if base_tf_min == 1 else _bucket_rows(base_tf_min, 15)
+                ladder_fn = getattr(config, "mtf_ladder_for_base_tf", None)
+                ladder = ladder_fn(base_tf_min) if callable(ladder_fn) else [("M15", 15), ("H1", 60)]
+                for _tf_lbl, _tf_m in ladder:
+                    _cd = _bucket_rows(int(_tf_m), 20)
+                    if _cd:
+                        data[f"candles_{str(_tf_lbl).lower()}"] = _cd
             except Exception:
                 pass
         data["bid_depth"] = dict(analysis_bids)

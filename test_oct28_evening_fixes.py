@@ -396,15 +396,28 @@ def test_gemini_lowercase_thinking_38_minimal_coercion_slow_demotion_and_no_fals
 
 def test_pytest_and_dynamic_data_dir_never_pollute_live_data_or_logs(monkeypatch, tmp_path):
     import hashlib
+    import re
 
     live_data = Path(__file__).resolve().parent / "data"
     live_logs = Path(__file__).resolve().parent / "logs"
+    # Terminal 2 concurrent safety: ignore live-loop telemetry files that Terminal 1
+    # (`python main.py --loop`) legitimately updates every 10s while pytest runs in Terminal 2.
+    live_loop_stream_re = re.compile(
+        r"^(decisions_\d{8}\.csv|diary_\d{8}\.jsonl|prices_\d{8}\.json|run_config_\d{8}\.json|"
+        r"snapshots_history\.jsonl|mt5_signal\.txt|market_snapshot\.json|last_book_state\.json|"
+        r"session_levels\.json|news_cache\.json|macro_cache\.json|calendar_cache\.json|"
+        r"gemini_keys_state\.json|ai_calls\.json|a2_burst_count\.json|pm_state\.json|"
+        r"trade_guard_state\.json|trade_memory\.json|trade_outcomes\.csv|execution_tca\.jsonl|"
+        r"bot\.log(\.\d+)?)$"
+    )
 
     def _dir_fingerprint(folder: Path) -> dict:
         if not folder.exists():
             return {}
         snap = {}
         for fp in sorted(folder.iterdir()):
+            if live_loop_stream_re.match(fp.name):
+                continue
             if fp.is_file():
                 snap[fp.name] = (fp.stat().st_size, hashlib.sha256(fp.read_bytes()).hexdigest())
             else:
@@ -417,7 +430,7 @@ def test_pytest_and_dynamic_data_dir_never_pollute_live_data_or_logs(monkeypatch
     custom_data = tmp_path / "custom_runtime_data"
     monkeypatch.setattr(config, "DATA_DIR", custom_data)
 
-    # TradeGuard, trade_history, PositionManager, maintenance, main._ai_state_path follow config.DATA_DIR
+    # TradeGuard, trade_history, PositionManager, maintenance, main._ai_state_path, news, macro follow config.DATA_DIR
     tg = trade_guard.TradeGuard(cooldown_minutes=5, max_trades_per_day=10)
     tg.record_trade(datetime(2099, 12, 31, 12, 0, tzinfo=timezone.utc))
     assert (custom_data / "trade_guard_state.json").exists()
@@ -435,7 +448,13 @@ def test_pytest_and_dynamic_data_dir_never_pollute_live_data_or_logs(monkeypatch
     monkeypatch.setattr(main, "_AI_STATE_FILE", None)
     assert main._ai_state_path() == custom_data / "ai_calls.json"
 
-    # Live repo data/ and logs/ remain byte-for-byte untouched whether empty or populated
+    # Sentinel 2099-12-31 test data must NEVER leak into live_data files
+    for state_name in ("trade_guard_state.json", "maintenance_state.json"):
+        lp = live_data / state_name
+        if lp.exists():
+            assert "2099-12-31" not in lp.read_text(encoding="utf-8", errors="replace")
+
+    # Non-daemon repo data/ and logs/ files remain byte-for-byte untouched
     assert _dir_fingerprint(live_data) == before_data
     assert _dir_fingerprint(live_logs) == before_logs
 

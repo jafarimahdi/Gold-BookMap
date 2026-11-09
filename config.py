@@ -718,6 +718,10 @@ def _refresh() -> None:
     g["BOOKMAP_MBO_FILE"] = _fget("BOOKMAP_MBO_FILE", "")  # optional separate MBO file
     g["BOOKMAP_ADDON_NAME"] = _fget("BOOKMAP_ADDON_NAME", "GoldBookMapBridge")
     g["BOOKMAP_MAX_DEPTH_LEVELS"] = _fint("BOOKMAP_MAX_DEPTH_LEVELS", 40)
+    # Stage B1 / Section #10 (2026-11-07): Time-windowed MBO retention + near-corridor priority
+    g["BOOKMAP_MAX_ORDER_EVENTS"] = max(500, _fint("BOOKMAP_MAX_ORDER_EVENTS", 2000))
+    g["BOOKMAP_MBO_NEAR_CORRIDOR_USD"] = max(2.0, _ffloat("BOOKMAP_MBO_NEAR_CORRIDOR_USD", 8.0))
+    g["BOOKMAP_MBO_MAX_BUFFER"] = max(5000, _fint("BOOKMAP_MBO_MAX_BUFFER", 45000))
 
     # ---- CRITICAL v5.2: L3 Whale + Regime Adaptive + AI Fallback + Basis ----
     g["L3_WHALE_THRESHOLD"] = _ffloat("L3_WHALE_THRESHOLD", 10.0)  # CME GC MBO lots (Step S2c aligned w/ .env & signal_team)
