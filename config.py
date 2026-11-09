@@ -224,17 +224,22 @@ def _refresh() -> None:
     # Effective A2 values are exposed for config receipts; aggressive_trigger
     # still gives explicit environment values first priority. Defaults match its
     # own reviewed fallback and do not enable the A2 lane.
+    # Stage A2 / Law #11 (2026-11-06): When unset in .env, A2 panel window, cooldown,
+    # and burst time-stop scale dynamically with BASE_TF_MINUTES (180s / 3m / 12m on M3;
+    # 300s / 5m / 20m on M5). Law #5 keeps A2_PROMOTE_LIVE_EXECUTION=0 until multi-day proof.
+    _a2_tf_min = max(1, int(g["BASE_TF_MINUTES"]))
     g["AGGRESSIVE_ENTRY_ENABLED"] = _fget("AGGRESSIVE_ENTRY_ENABLED", "0") == "1"
+    g["A2_PROMOTE_LIVE_EXECUTION"] = _fget("A2_PROMOTE_LIVE_EXECUTION", "0") == "1"
     g["AGGRESSIVE_SPREAD_MAX_PCT"] = _ffloat("AGGRESSIVE_SPREAD_MAX_PCT", 0.035)
     g["A2_LEAN_MIN"] = _ffloat("A2_LEAN_MIN", 0.25)
     g["A2_LEAN_HOLD_SECONDS"] = _ffloat("A2_LEAN_HOLD_SECONDS", 60.0)
-    g["A2_PANEL_WINDOW_SECONDS"] = _ffloat("A2_PANEL_WINDOW_SECONDS", 300.0)
+    g["A2_PANEL_WINDOW_SECONDS"] = _ffloat("A2_PANEL_WINDOW_SECONDS", max(180.0, 60.0 * _a2_tf_min))
     g["A2_BURST_MAX_PER_DAY"] = _fint("A2_BURST_MAX_PER_DAY", 10)
-    g["A2_BURST_COOLDOWN_MINUTES"] = _ffloat("A2_BURST_COOLDOWN_MINUTES", 5.0)
+    g["A2_BURST_COOLDOWN_MINUTES"] = _ffloat("A2_BURST_COOLDOWN_MINUTES", float(_a2_tf_min))
     g["A2_BURST_SL_PTS"] = _ffloat("A2_BURST_SL_PTS", 1.8)
     g["A2_BURST_TP_PTS"] = _ffloat("A2_BURST_TP_PTS", 1.8)
     g["A2_MIN_RR"] = _ffloat("A2_MIN_RR", 1.0)
-    g["A2_BURST_TIME_STOP_MINUTES"] = max(1.0, _ffloat("A2_BURST_TIME_STOP_MINUTES", 12.0))
+    g["A2_BURST_TIME_STOP_MINUTES"] = max(1.0, _ffloat("A2_BURST_TIME_STOP_MINUTES", float(max(12, 4 * _a2_tf_min))))
     g["POWER_V2_MEMORY_ENABLED"] = _fget("POWER_V2_MEMORY_ENABLED", "0") == "1"
     g["POWER_REGIME_BAR_CACHE_ENABLED"] = _fget("POWER_REGIME_BAR_CACHE_ENABLED", "1") == "1"
     g["DATA_SOURCE"] = _fget("DATA_SOURCE", "demo").lower()
@@ -527,6 +532,15 @@ def _refresh() -> None:
     g["PM_WAVE_MAJOR_WALL_TP_LOTS"] = max(5.0, _ffloat("PM_WAVE_MAJOR_WALL_TP_LOTS", 40.0))
     g["ESCORT_WAVE_LOCK_TRIGGER_R"] = max(0.5, _ffloat("ESCORT_WAVE_LOCK_TRIGGER_R", 1.0))
     g["ESCORT_WAVE_LOCK_GIVEBACK_ATR"] = max(0.5, _ffloat("ESCORT_WAVE_LOCK_GIVEBACK_ATR", 1.50))
+    # Stage E1 / Section #9 (2026-11-07): Law #11 timeframe-coupled Escort time-stop
+    # (15 bars = 45m on M3, 75m on M5) + Stage PM-1 divergence-close parity.
+    g["ESCORT_TIME_STOP_MINUTES"] = max(
+        5.0, _ffloat("ESCORT_TIME_STOP_MINUTES", float(max(15, 15 * _a2_tf_min)))
+    )
+    g["ESCORT_DIVERGENCE_CLOSE_ENABLED"] = _fget("ESCORT_DIVERGENCE_CLOSE_ENABLED", "0") == "1"
+    g["ESCORT_MIN_AGE_SECONDS"] = max(
+        0, _fint("ESCORT_MIN_AGE_SECONDS", int(g["POWER_BAR_SECONDS"]))
+    )
     g["STAGE4C_SNIPER_PEBBLE_BYPASS_ENABLED"] = _fget("STAGE4C_SNIPER_PEBBLE_BYPASS_ENABLED", "1") == "1"
     g["L3_NEAR_TOUCH_USD"] = max(0.5, _ffloat("L3_NEAR_TOUCH_USD", 2.50))
     g["QUEUE_FLOW_WINDOW_SECONDS"] = max(5.0, _ffloat("QUEUE_FLOW_WINDOW_SECONDS", 30.0))
@@ -550,7 +564,10 @@ def _refresh() -> None:
     # Stage P2 (2026-11-06): Wire validated near-touch MBO order_events + executed-flow
     # l3_aggr_limit sensor into POWER v2 (Cont, Kukanov & Stoikov 2014; Easley et al. 2012).
     g["POWER_L3_MBO_SENSOR_ENABLED"] = _fget("POWER_L3_MBO_SENSOR_ENABLED", "1") == "1"
-    g["SHOOT_PAPER_LIMIT_TTL_SECONDS"] = _ffloat("SHOOT_PAPER_LIMIT_TTL_SECONDS", 300.0)
+    # Law #11 (Stage E1): Passive limit TTL defaults to 1 active chart bar (180s M3 / 300s M5).
+    g["SHOOT_PAPER_LIMIT_TTL_SECONDS"] = max(
+        30.0, _ffloat("SHOOT_PAPER_LIMIT_TTL_SECONDS", float(60 * _a2_tf_min))
+    )
     # what counts as ONE BIG ORDER (not a wall). Measured on GC: p99.9 of a single
     # order is 9 lots, max 46. The whale threshold (total size at a price) is a
     # different measurement and must not be reused here.

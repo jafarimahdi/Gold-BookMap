@@ -68,6 +68,18 @@ def _wait_or_cancel(reason: str) -> Dict[str, Any]:
     return {**_LAST_STATUS, "pending": None, "filled_plan": None}
 
 
+def _default_limit_ttl_seconds(config: Any = None) -> float:
+    """Law #11: Resolve passive-limit TTL (1 active chart bar = 180s M3 / 300s M5)."""
+    if config is not None:
+        explicit = _num(getattr(config, "SHOOT_PAPER_LIMIT_TTL_SECONDS", None))
+        if explicit is not None and explicit > 0:
+            return max(1.0, explicit)
+        tf_m = _num(getattr(config, "BASE_TF_MINUTES", None))
+        if tf_m is not None and tf_m >= 1.0:
+            return max(30.0, 60.0 * tf_m)
+    return 300.0
+
+
 def simulate_entry(plan: Dict[str, Any], price: float, *, config: Any = None,
                    now: Any = None) -> Dict[str, Any]:
     """Stage/fill/cancel a paper entry and return the plan Escort may manage."""
@@ -75,6 +87,7 @@ def simulate_entry(plan: Dict[str, Any], price: float, *, config: Any = None,
     current = _num(price)
     timestamp = _now_seconds(now)
     if not isinstance(plan, dict) or plan.get("shot") != "GO" or not plan.get("side"):
+        _LAST_FILLED_KEY = None
         if _PENDING is not None:
             _PENDING = None
             _LAST_STATUS = {"status": "CANCELLED", "reason": "Shooting no longer says GO"}
@@ -83,19 +96,8 @@ def simulate_entry(plan: Dict[str, Any], price: float, *, config: Any = None,
         return {**_LAST_STATUS, "pending": None, "filled_plan": None}
     if current is None or current <= 0:
         return _wait_or_cancel("invalid last price; any pending paper limit was cancelled")
-    expiry = _num(plan.get("valid_until"))
-    if expiry is not None and timestamp >= expiry:
-        return _wait_or_cancel("Shooting plan expired; replan before any paper fill")
     if plan.get("execution_status") != "PLAN_ONLY":
         return _wait_or_cancel("paper simulator accepts only an analysis-only Shooting plan")
-    reference = _num(plan.get("reference_price"))
-    plan_atr = _num(plan.get("atr"))
-    plan_spread = _num(plan.get("spread"))
-    if reference is not None and plan_atr is not None and plan_spread is not None:
-        max_drift = max(plan_spread * 2.0,
-                        plan_atr * max(0.0, _num(getattr(config, "SHOOT_MAX_PLAN_DRIFT_ATR", 0.5)) or 0.5))
-        if abs(current - reference) > max_drift:
-            return _wait_or_cancel("market moved beyond plan revalidation tolerance")
 
     style = plan.get("entry_style")
     side = str(plan.get("side", "")).upper()
@@ -108,12 +110,33 @@ def simulate_entry(plan: Dict[str, Any], price: float, *, config: Any = None,
     bracket_ok = target > entry > stop if side == "BUY" else target < entry < stop
     if not bracket_ok:
         return _wait_or_cancel("target/stop are on unsafe sides of entry")
+
     desired_key = _key(plan)
+    # Stage E1 (2026-11-07): Check already-filled key BEFORE 30s plan_ttl expiry so :01/:02
+    # A1 bar-service serves report ALREADY_FILLED instead of bogus WAIT (expired) clones.
     if _LAST_FILLED_KEY == desired_key:
         _LAST_STATUS = {"status": "ALREADY_FILLED", "reason": "same plan was already paper-filled"}
         return {**_LAST_STATUS, "pending": None, "filled_plan": None}
     if _LAST_FILLED_KEY is not None and _LAST_FILLED_KEY != desired_key:
         _LAST_FILLED_KEY = None
+
+    same_working_limit = (
+        _PENDING is not None
+        and _PENDING.get("key") == desired_key
+        and style == "PASSIVE_LIMIT"
+    )
+    if not same_working_limit:
+        expiry = _num(plan.get("valid_until"))
+        if expiry is not None and timestamp >= expiry:
+            return _wait_or_cancel("Shooting plan expired; replan before any paper fill")
+        reference = _num(plan.get("reference_price"))
+        plan_atr = _num(plan.get("atr"))
+        plan_spread = _num(plan.get("spread"))
+        if reference is not None and plan_atr is not None and plan_spread is not None:
+            max_drift = max(plan_spread * 2.0,
+                            plan_atr * max(0.0, _num(getattr(config, "SHOOT_MAX_PLAN_DRIFT_ATR", 0.5)) or 0.5))
+            if abs(current - reference) > max_drift:
+                return _wait_or_cancel("market moved beyond plan revalidation tolerance")
 
     if style == "AGGRESSIVE_MARKET":
         options = plan.get("entry_options") or {}
@@ -130,8 +153,7 @@ def simulate_entry(plan: Dict[str, Any], price: float, *, config: Any = None,
 
     # A passive order needs a real future trade-through to count as a fill; merely
     # touching the quote is not treated as served because queue priority is unknown.
-    ttl = _num(getattr(config, "SHOOT_PAPER_LIMIT_TTL_SECONDS", 300.0)) if config else 300.0
-    ttl = max(1.0, ttl or 300.0)
+    ttl = _default_limit_ttl_seconds(config)
     tick = _num(getattr(config, "LIMIT_TICK_SIZE", 0.1)) if config else 0.1
     tick = tick if tick is not None and tick > 0 else 0.1
     if _PENDING and _PENDING.get("key") != desired_key:

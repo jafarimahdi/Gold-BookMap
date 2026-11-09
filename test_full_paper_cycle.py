@@ -92,6 +92,9 @@ class FullCycleTests(unittest.TestCase):
         book = get_escort()
         book.open.clear()
         book.done.clear()
+        if len(_shooting_module._ROAD_HISTORY) < 12:
+            _shooting_module._ROAD_HISTORY.extend(
+                (time.time(), 0.0) for _ in range(12))
 
     def test_full_cycle_power_to_shooting_to_paper_fill_to_escort(self):
         ctx = make_ctx(queue=QUEUE_POOR)  # poor queue -> aggressive is the chosen style

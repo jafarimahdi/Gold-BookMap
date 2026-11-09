@@ -58,6 +58,7 @@ import math
 import os
 from collections import deque
 from datetime import datetime, timedelta, timezone
+import types
 from typing import Any, Deque, Dict, List, Mapping, Optional, Tuple
 
 __all__ = [
@@ -88,7 +89,11 @@ def _num(value: Any, default: Optional[float] = None) -> Optional[float]:
 
 
 def _cfg(config: Any, key: str, default: Any) -> Any:
-    """Environment first (user-editable .env), then config object, then default."""
+    """Explicit non-module config object first, else .env/os.environ, then module attr."""
+    if config is not None and not isinstance(config, types.ModuleType):
+        value = getattr(config, key, None)
+        if value is not None:
+            return value
     raw = os.environ.get(key)
     if raw is not None and str(raw).strip() != "":
         try:
@@ -273,6 +278,10 @@ _NOTE_MIN_GAP_S = 60.0      # refusal notes rate-limit
 
 
 def _enabled(config: Any) -> bool:
+    if config is not None and not isinstance(config, types.ModuleType):
+        val = getattr(config, "AGGRESSIVE_ENTRY_ENABLED", None)
+        if val is not None:
+            return str(val).strip() in ("1", "1.0", "true", "True", "TRUE")
     raw = os.environ.get("AGGRESSIVE_ENTRY_ENABLED")
     if raw is None:
         raw = getattr(config, "AGGRESSIVE_ENTRY_ENABLED", 0)
@@ -301,8 +310,16 @@ class BurstEyes:
     def __init__(self) -> None:
         self.samples: Deque[Tuple[datetime, float]] = deque()
         self.panel: Deque[Tuple[datetime, str]] = deque()
+        self.panel_meta: Deque[Tuple[datetime, str, Dict[str, Any]]] = deque(maxlen=64)
         self.last_fire: Optional[datetime] = None
         self._last_note: Optional[datetime] = None
+
+    def reset(self) -> None:
+        self.samples.clear()
+        self.panel.clear()
+        self.panel_meta.clear()
+        self.last_fire = None
+        self._last_note = None
 
     # -- eye 1 ---------------------------------------------------------------
     def sample(self, now: datetime, one_sidedness: Optional[float]) -> None:
@@ -318,7 +335,7 @@ class BurstEyes:
         # ANY cadence -- serve cycles sample every ~5s, bar-close gates every
         # 300s (fixed 2026-10-13: the old fixed 240s window forgot the previous
         # BAR sample, so a bar-close lean could never exist)
-        horizon = max(_SAMPLE_WINDOW_S, 6.0 * (hold_s or 60.0))
+        horizon = max(_SAMPLE_WINDOW_S, 6.0 * (hold_s or 60.0), 600.0)
         pts = [(t, v) for t, v in self.samples
                if (now - t).total_seconds() <= horizon]
         if not pts:
@@ -342,10 +359,13 @@ class BurstEyes:
                 "strength": round(abs(ema), 3), "held_s": round(held_s, 1)}
 
     # -- eye 2 ---------------------------------------------------------------
-    def remember_panel(self, now: datetime, direction: Any) -> None:
+    def remember_panel(self, now: datetime, direction: Any,
+                       meta: Optional[Dict[str, Any]] = None) -> None:
         d = str(direction or "").strip().upper()
         if d in ("BUY", "SELL"):
             self.panel.append((now, d))
+            if isinstance(meta, dict):
+                self.panel_meta.append((now, d, dict(meta)))
         self._prune(now)
 
     def panel_agrees(self, now: datetime, direction: str,
@@ -362,11 +382,13 @@ class BurstEyes:
 
     # -- bookkeeping -----------------------------------------------------------
     def _prune(self, now: datetime) -> None:
-        horizon = timedelta(seconds=max(_SAMPLE_WINDOW_S, 900.0))
+        horizon = timedelta(seconds=max(_SAMPLE_WINDOW_S, 1800.0))
         while self.samples and (now - self.samples[0][0]) > horizon:
             self.samples.popleft()
         while self.panel and (now - self.panel[0][0]) > horizon:
             self.panel.popleft()
+        while self.panel_meta and (now - self.panel_meta[0][0]) > horizon:
+            self.panel_meta.popleft()
 
     def note_ok(self, now: datetime) -> bool:
         if self._last_note is not None and (now - self._last_note).total_seconds() < _NOTE_MIN_GAP_S:
@@ -375,7 +397,74 @@ class BurstEyes:
         return True
 
 
-EYES = BurstEyes()      # module singleton: one day, one process, one memory
+EYES = BurstEyes()          # module singleton: one day, one process, one memory
+SHADOW_EYES = BurstEyes()   # isolated Law #5/#8 shadow singleton (never mutates live EYES)
+
+
+def _base_tf_minutes(config: Any = None) -> int:
+    """Law #11: Resolve active base timeframe in minutes (e.g. 3 on M3, 5 on M5)."""
+    try:
+        raw_m = getattr(config, "BASE_TF_MINUTES", None) if config is not None else None
+        if raw_m is not None and int(raw_m) >= 1:
+            return int(raw_m)
+    except (TypeError, ValueError):
+        pass
+    tf_str = str(os.environ.get("TIMEFRAME") or getattr(config, "TIMEFRAME", "") or "M5").strip().upper()
+    if tf_str.startswith("M") and tf_str[1:].isdigit():
+        return max(1, int(tf_str[1:]))
+    if tf_str.startswith("H") and tf_str[1:].isdigit():
+        return max(1, int(tf_str[1:]) * 60)
+    return 5
+
+
+def extract_live_order_flow(market_data: Any, fallback_flow: Any,
+                            now: datetime, window_s: float = 60.0) -> Any:
+    """Stage A2: Compute fresh intra-bar order-flow pressure from recent tick_data prints.
+
+    On `:01`/`:02` `A1` serve cycles, `served.order_flow` holds the cached bar-close
+    flow from `:00`. Reading recent executed prints from `market_data['tick_data']`
+    lets Eye 1 sample genuine intra-bar buying/selling pressure while falling back
+    cleanly to `fallback_flow` when `tick_data` is absent (e.g. unit-test fixtures).
+    """
+    if not isinstance(market_data, Mapping):
+        return fallback_flow
+    ticks = market_data.get("tick_data")
+    if not isinstance(ticks, (list, tuple)) or not ticks:
+        return fallback_flow
+    now_ep = now.timestamp()
+    win = max(15.0, float(window_s or 60.0))
+    buy_v = 0.0
+    sell_v = 0.0
+    for tk in ticks:
+        if not isinstance(tk, Mapping):
+            continue
+        vol = _num(tk.get("volume", tk.get("size", 0.0)), 0.0) or 0.0
+        if vol <= 0.0:
+            continue
+        ts_raw = tk.get("ts") if tk.get("ts") is not None else tk.get("timestamp")
+        ts_dt = _as_dt(ts_raw)
+        if ts_dt is not None:
+            if ts_dt.tzinfo is None:
+                ts_dt = ts_dt.replace(tzinfo=timezone.utc)
+            age_s = now_ep - ts_dt.timestamp()
+            if age_s < -5.0 or age_s > win:
+                continue
+        sd = str(tk.get("side") or tk.get("operation") or "").strip().upper()
+        if sd in ("BUY", "BID_HIT_BUY", "AGGR_BUY", "B", "ASK"):
+            buy_v += vol
+        elif sd in ("SELL", "ASK_HIT_SELL", "AGGR_SELL", "S", "BID"):
+            sell_v += vol
+    tot_v = buy_v + sell_v
+    if tot_v <= 0.0:
+        return fallback_flow
+    bp = 100.0 * buy_v / tot_v
+    sp = 100.0 * sell_v / tot_v
+    return {
+        "buying_pressure": round(bp, 2),
+        "selling_pressure": round(sp, 2),
+        "aggressive_buy_volume": round(buy_v, 3),
+        "aggressive_sell_volume": round(sell_v, 3),
+    }
 
 
 def _one_sidedness(order_flow: Any) -> Optional[float]:
@@ -451,11 +540,14 @@ def a2_eval(power: Any, order_flow: Any, panel_direction: Any, now: datetime,
 
     # the eyes ALWAYS eat first (even when POWER is NEITHER or gates fail) --
     # eye memory must not have gaps, and refusals must be explainable
+    tf_m = _base_tf_minutes(config)
+    def_win_s = max(180.0, 60.0 * tf_m)
+    def_cool_m = float(tf_m)
     lean_min = _num(_cfg(config, "A2_LEAN_MIN", 0.25), 0.25)
     hold_s = _num(_cfg(config, "A2_LEAN_HOLD_SECONDS", 60.0), 60.0)
-    win_s = _num(_cfg(config, "A2_PANEL_WINDOW_SECONDS", 300.0), 300.0)
+    win_s = _num(_cfg(config, "A2_PANEL_WINDOW_SECONDS", def_win_s), def_win_s)
     max_day = int(_num(_cfg(config, "A2_BURST_MAX_PER_DAY", 10), 10) or 10)
-    cool_s = 60.0 * (_num(_cfg(config, "A2_BURST_COOLDOWN_MINUTES", 5), 5) or 5)
+    cool_s = 60.0 * (_num(_cfg(config, "A2_BURST_COOLDOWN_MINUTES", def_cool_m), def_cool_m) or def_cool_m)
     EYES.sample(now, _one_sidedness(order_flow))
     EYES.remember_panel(now, panel_direction)
     out["lean"] = EYES.lean(now, min_abs=(lean_min or 0.25), hold_s=(hold_s or 60.0))
@@ -598,11 +690,14 @@ def a2_v1_gate(v1: Any, power: Any, order_flow: Any, panel_direction: Any,
 
     # the eyes always eat (bar-close cadence: 2 consecutive same-direction
     # bars = a held lean, per the flow-probe measurement)
+    tf_m = _base_tf_minutes(config)
+    def_win_s = max(180.0, 60.0 * tf_m)
+    def_cool_m = float(tf_m)
     EYES.sample(now, _one_sidedness(order_flow))
     EYES.remember_panel(now, panel_direction)
     lean_min = _num(_cfg(config, "A2_LEAN_MIN", 0.25), 0.25)
     hold_s = _num(_cfg(config, "A2_LEAN_HOLD_SECONDS", 60.0), 60.0)
-    win_s = _num(_cfg(config, "A2_PANEL_WINDOW_SECONDS", 300.0), 300.0)
+    win_s = _num(_cfg(config, "A2_PANEL_WINDOW_SECONDS", def_win_s), def_win_s)
     lean = EYES.lean(now, min_abs=(lean_min or 0.25), hold_s=(hold_s or 60.0))
 
     if not confirmed:
@@ -615,9 +710,9 @@ def a2_v1_gate(v1: Any, power: Any, order_flow: Any, panel_direction: Any,
     # v1 confirmed -> the A2 rails decide
     direction = str(_get(power, "direction") or "").upper()
     max_day = int(_num(_cfg(config, "A2_BURST_MAX_PER_DAY", 10), 10) or 10)
-    cool_s = 60.0 * (_num(_cfg(config, "A2_BURST_COOLDOWN_MINUTES", 5), 5) or 5)
+    cool_s = 60.0 * (_num(_cfg(config, "A2_BURST_COOLDOWN_MINUTES", def_cool_m), def_cool_m) or def_cool_m)
     count = a2_fire_count(now, config=config)
-    panel = (EYES.panel_agrees(now, direction, window_s=(win_s or 300.0))
+    panel = (EYES.panel_agrees(now, direction, window_s=(win_s or def_win_s))
              if direction in ("UP", "DOWN") else None)
     allow_neutral_panel = bool(
         str(_cfg(config, "A2_ALLOW_NEUTRAL_PANEL", 0)).strip().lower() in ("1", "true")
@@ -664,13 +759,16 @@ def a2_v1_gate(v1: Any, power: Any, order_flow: Any, panel_direction: Any,
 def a2_serve_eval(served: Any, market_data: Mapping[str, Any], now: datetime,
                   price: float, spread_now: float, config: Any,
                   bid: float = 0.0, ask: float = 0.0,
-                  atr: float = 0.0) -> Tuple[Optional[Dict[str, Any]], List[str]]:
+                  atr: float = 0.0, *,
+                  defer_commit: bool = False,
+                  panel_override: Optional[str] = None,
+                  flow_override: Any = None) -> Tuple[Optional[Dict[str, Any]], List[str]]:
     """Evaluate the burst lane on a serve cycle. Returns (new_shot, notes).
 
     new_shot is not None only when the trigger fired AND plan_shot produced an
-    AGGRESSIVE_MARKET plan (Scout door + route verified inside plan_shot).
-    Fail-closed: any error -> ([], None) with the honest note; the cached
-    bar-close plan is left untouched.
+    AGGRESSIVE_MARKET GO plan (Scout door + route verified inside plan_shot).
+    Fail-closed: any error -> (None, [note]); the cached bar-close plan is left
+    untouched unless the caller explicitly applies new_shot.
     """
     if not _enabled(config):
         return None, []
@@ -679,8 +777,17 @@ def a2_serve_eval(served: Any, market_data: Mapping[str, Any], now: datetime,
         power = getattr(served, "power_v2", None) or getattr(served, "power", None) or {}
         if not isinstance(power, Mapping):
             power = {}
-        v = a2_eval(power, getattr(served, "order_flow", None),
-                    getattr(served, "signal_direction", "NEUTRAL"), now, config)
+        eff_flow = (
+            flow_override
+            if flow_override is not None
+            else extract_live_order_flow(market_data, getattr(served, "order_flow", None), now)
+        )
+        eff_panel = (
+            panel_override
+            if panel_override is not None
+            else getattr(served, "signal_direction", "NEUTRAL")
+        )
+        v = a2_eval(power, eff_flow, eff_panel, now, config)
         if not v["fire"]:
             if v.get("lean") and EYES.note_ok(now):
                 notes.append(f"A2 burst: {_eyes_state(v)} -> refused: {v['reason']}")
@@ -703,9 +810,21 @@ def a2_serve_eval(served: Any, market_data: Mapping[str, Any], now: datetime,
         if signal_confidence is None:
             signal_confidence = getattr(served, "signal_confidence", None)
         ai_model = getattr(served, "ai_model", None) or "NOT_AVAILABLE_ON_A2_SERVE"
+        _crowd_vol = _num(market_data.get("recent_volume"), None) if isinstance(market_data, Mapping) else None
+        if _crowd_vol is None or _crowd_vol <= 0.0:
+            _td_srv = market_data.get("tick_data") if isinstance(market_data, Mapping) else None
+            if isinstance(_td_srv, list) and _td_srv:
+                _crowd_vol = sum(
+                    float((_t.get("volume", _t.get("size", 0.0)) or 0.0))
+                    for _t in _td_srv[-500:]
+                    if isinstance(_t, Mapping)
+                )
+            else:
+                _crowd_vol = float(_num(getattr(served, "volume", 0.0), 0.0) or 0.0)
         ctx: Dict[str, Any] = {
             "bid": bid,
             "ask": ask,
+            "now": now,
             "regime": (getattr(served, "regime", None)
                        or power_context.get("market_regime", "UNKNOWN")),
             "signal_direction": getattr(served, "signal_direction", "UNKNOWN"),
@@ -717,6 +836,12 @@ def a2_serve_eval(served: Any, market_data: Mapping[str, Any], now: datetime,
             "trading_enabled": getattr(config, "TRADING_ENABLED", None),
             "allow_live_trading": getattr(config, "ALLOW_LIVE_TRADING", None),
             "limit_order_enabled": getattr(config, "LIMIT_ORDER_ENABLED", None),
+            "trade_lots": float(_num(_cfg(config, "LOT_SIZE", 1.0), 1.0) or 1.0),
+            "recent_volume": _crowd_vol,
+            "market_symbol": (
+                (market_data.get("symbol") if isinstance(market_data, Mapping) else None)
+                or getattr(served, "symbol", None)
+            ),
             "news_state": getattr(getattr(served, "news", None), "news_state", ""),
             "has_data": market_data.get("has_data", True),
             "last_data_age_seconds": market_data.get("last_data_age_seconds", 0.0),
@@ -732,7 +857,19 @@ def a2_serve_eval(served: Any, market_data: Mapping[str, Any], now: datetime,
         shot = plan_shot(getattr(served, "signal_map", {}) or {}, power, price,
                          atr or 0.0, spread=spread_now, config=config,
                          book=get_book(), entry_context=ctx)
-        if shot.get("entry_style") == "AGGRESSIVE_MARKET":
+        if (str(shot.get("shot", "")).upper() == "GO"
+                and shot.get("entry_style") == "AGGRESSIVE_MARKET"):
+            if defer_commit:
+                max_day = int(_num(_cfg(config, "A2_BURST_MAX_PER_DAY", 10), 10) or 10)
+                shot = dict(shot)
+                shot["_a2_pending_commit"] = True
+                shot["_a2_commit_meta"] = {
+                    "max_day": max_day,
+                    "lean": dict(v.get("lean") or {}),
+                    "panel": dict(v.get("panel") or {}),
+                    "v1_reason": str(v.get("reason") or ""),
+                }
+                return shot, notes
             EYES.last_fire = now
             count = a2_count_fire(now, config=config)
             notes.append(f"A2 burst: FIRE {_eyes_state(v)} | burst trade {count}"
@@ -746,3 +883,168 @@ def a2_serve_eval(served: Any, market_data: Mapping[str, Any], now: datetime,
     except Exception as err:  # fail-closed: never break the serve cycle
         return None, [f"A2 burst lane unavailable (fail-closed): "
                       f"{type(err).__name__}: {err}"]
+
+
+def evaluate_a2_shadow_audit(
+    *,
+    power: Any,
+    order_flow: Any,
+    qualified_panel_dir: str,
+    now: datetime,
+    config: Any,
+    shot_context: Mapping[str, Any],
+    signal_map: Any,
+    price: float,
+    atr: float,
+    spread: float,
+    level3: Any = None,
+    book: Any = None,
+    is_serve: bool = False,
+    env_block_reason: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Stage A2 (Law #5 + Law #8): 100% non-executing shadow audit of the 3-Eye Now Button.
+
+    Tracks both Active `.env` rails and Canonical Strict (`0.25 / 60s / 1-bar`) rails on
+    isolated `SHADOW_EYES`, plus read-only Scout/Crowd `plan_shot` geometry, without ever
+    touching live `EYES`, `data/a2_burst_count.json`, or `shooting_team._ROAD_HISTORY`.
+    """
+    tf_m = _base_tf_minutes(config)
+    strict_win_s = max(180.0, 60.0 * tf_m)
+    active_lean_min = _num(_cfg(config, "A2_LEAN_MIN", 0.25), 0.25) or 0.25
+    active_hold_s = _num(_cfg(config, "A2_LEAN_HOLD_SECONDS", 60.0), 60.0) or 60.0
+    active_win_s = _num(_cfg(config, "A2_PANEL_WINDOW_SECONDS", strict_win_s), strict_win_s) or strict_win_s
+
+    SHADOW_EYES.sample(now, _one_sidedness(order_flow))
+    q_dir = str(qualified_panel_dir or "NEUTRAL").strip().upper()
+    if not is_serve and q_dir in ("BUY", "SELL"):
+        SHADOW_EYES.remember_panel(now, q_dir)
+
+    p = power if isinstance(power, Mapping) else {}
+    pw_dir = str(_get(p, "direction", "decision") or "NEITHER").upper()
+    pw_side = "BUY" if pw_dir == "UP" else ("SELL" if pw_dir == "DOWN" else "NEITHER")
+
+    # Force-enabled shadow config clone so v1 evaluates impulse physics even when AGGRESSIVE_ENTRY_ENABLED=0
+    class _ShadowCfg:
+        def __init__(self, base_cfg: Any) -> None:
+            self._base = base_cfg
+            self.AGGRESSIVE_ENTRY_ENABLED = True
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self._base, name)
+
+    sh_cfg = _ShadowCfg(config)
+    saved_env_aggr = os.environ.get("AGGRESSIVE_ENTRY_ENABLED")
+    try:
+        os.environ["AGGRESSIVE_ENTRY_ENABLED"] = "1"
+        v1_res = evaluate_aggressive_trigger(
+            power=p,
+            shot_context=shot_context,
+            config=sh_cfg,
+            price=price,
+            order_flow=order_flow,
+            level3=level3,
+        )
+    finally:
+        if saved_env_aggr is None:
+            os.environ.pop("AGGRESSIVE_ENTRY_ENABLED", None)
+        else:
+            os.environ["AGGRESSIVE_ENTRY_ENABLED"] = saved_env_aggr
+
+    v1_ok = bool(v1_res.get("confirmed"))
+    v1_reason = str(v1_res.get("reason") or "")
+    env_ok = not bool(env_block_reason)
+
+    act_lean = SHADOW_EYES.lean(now, min_abs=active_lean_min, hold_s=active_hold_s)
+    str_lean = SHADOW_EYES.lean(now, min_abs=0.25, hold_s=60.0)
+    act_lean_ok = bool(act_lean and pw_dir in ("UP", "DOWN") and act_lean["direction"] == pw_dir)
+    str_lean_ok = bool(str_lean and pw_dir in ("UP", "DOWN") and str_lean["direction"] == pw_dir)
+
+    act_panel = SHADOW_EYES.panel_agrees(now, pw_dir, window_s=active_win_s) if pw_dir in ("UP", "DOWN") else None
+    str_panel = SHADOW_EYES.panel_agrees(now, pw_dir, window_s=strict_win_s) if pw_dir in ("UP", "DOWN") else None
+    act_panel_ok = act_panel is not None
+    str_panel_ok = str_panel is not None
+
+    if is_serve:
+        subtype = "SERVE_INTRABAR"
+    elif q_dir == pw_side and pw_side in ("BUY", "SELL"):
+        subtype = "SAME_BAR_CLIMAX"
+    else:
+        subtype = "DELAYED_FOLLOW"
+
+    active_2eye_ok = bool(pw_dir in ("UP", "DOWN") and env_ok and v1_ok and act_lean_ok and act_panel_ok)
+    strict_2eye_ok = bool(pw_dir in ("UP", "DOWN") and env_ok and v1_ok and str_lean_ok and str_panel_ok)
+
+    scout_go = False
+    sh_entry = None
+    sh_sl = None
+    sh_tp = None
+    sh_rr = None
+    sh_why = ""
+    if (active_2eye_ok or strict_2eye_ok) and price > 0:
+        try:
+            import shooting_team as _sh_mod
+            saved_rh = list(getattr(_sh_mod, "_ROAD_HISTORY", ()))
+            try:
+                sim_ctx = dict(shot_context)
+                sim_ctx.update({
+                    "now": now,
+                    "queue_estimate": None,
+                    "queue_enabled": False,
+                    "aggressive_trigger_confirmed": True,
+                    "aggressive_trigger_reason": "A2 shadow audit",
+                    "a2_burst": True,
+                })
+                sim_shot = _sh_mod.plan_shot(
+                    signal_map if isinstance(signal_map, Mapping) else {},
+                    p,
+                    price,
+                    atr or 0.0,
+                    spread=spread,
+                    config=sh_cfg,
+                    book=book,
+                    entry_context=sim_ctx,
+                )
+            finally:
+                if hasattr(_sh_mod, "_ROAD_HISTORY"):
+                    _sh_mod._ROAD_HISTORY.clear()
+                    _sh_mod._ROAD_HISTORY.extend(saved_rh)
+            scout_go = bool(
+                isinstance(sim_shot, Mapping)
+                and str(sim_shot.get("shot", "")).upper() == "GO"
+                and str(sim_shot.get("entry_style", "")).upper() == "AGGRESSIVE_MARKET"
+            )
+            if isinstance(sim_shot, Mapping):
+                sh_entry = sim_shot.get("entry")
+                sh_sl = sim_shot.get("stop")
+                sh_tp = sim_shot.get("target")
+                sh_rr = sim_shot.get("rr")
+                sh_why = "; ".join(str(x) for x in (sim_shot.get("why") or [])[:2])[:160]
+        except Exception as exc:
+            sh_why = f"shadow_plan_err:{type(exc).__name__}"
+
+    return {
+        "power_dir": pw_dir,
+        "side": pw_side,
+        "is_serve": bool(is_serve),
+        "env_ok": bool(env_ok),
+        "env_block_reason": env_block_reason or "",
+        "v1_confirmed": bool(v1_ok),
+        "v1_reason": v1_reason[:140],
+        "active_lean_ok": bool(act_lean_ok),
+        "strict_lean_ok": bool(str_lean_ok),
+        "active_panel_ok": bool(act_panel_ok),
+        "strict_panel_ok": bool(str_panel_ok),
+        "panel_qualified_in_window": bool(act_panel_ok),
+        "panel_age_s": float(act_panel["age_s"]) if isinstance(act_panel, Mapping) else None,
+        "lean_strength": float(act_lean["strength"]) if isinstance(act_lean, Mapping) else None,
+        "lean_held_s": float(act_lean["held_s"]) if isinstance(act_lean, Mapping) else None,
+        "subtype": subtype,
+        "scout_go": bool(scout_go),
+        "active_scout_go": bool(active_2eye_ok and scout_go),
+        "strict_scout_go": bool(strict_2eye_ok and scout_go),
+        "entry": sh_entry,
+        "sl": sh_sl,
+        "tp": sh_tp,
+        "rr": sh_rr,
+        "why": sh_why,
+    }

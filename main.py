@@ -1525,7 +1525,9 @@ def run_step3(snapshot):
                     + (f" | {_rat_txt}" if _rat_txt.strip() else ""))
             return harvested
 
-    if strength < min_strength:
+    if strength < min_strength and not (
+        live_go and bool(getattr(config, "A2_PROMOTE_LIVE_EXECUTION", False))
+    ):
         decision = Decision(
             action="HOLD", confidence=0.0,
             rationale=f"signal {strength:.1f} below AI threshold "
@@ -1906,7 +1908,17 @@ def _shooting_execution_gate(decision, snapshot):
         return False, (
             f"decision confidence {_live_confidence:.1f} is below owner-configured "
             f"threshold {_live_threshold:.1f}")
-    if bool(getattr(config, "FAMILY_GATE_LIVE_ENABLED", False)):
+    _plan_early = getattr(snapshot, "shot", None) or {}
+    _a2_sh_early = ((getattr(snapshot, "shadow_candidates", None) or {}).get("a2_shadow") or {})
+    _a2_promoted_ok = (
+        bool(getattr(config, "A2_PROMOTE_LIVE_EXECUTION", False))
+        and isinstance(_plan_early, dict)
+        and _plan_early.get("a2_burst") is True
+        and isinstance(_a2_sh_early, dict)
+        and _a2_sh_early.get("panel_qualified_in_window") is True
+        and _a2_sh_early.get("env_ok") is True
+    )
+    if bool(getattr(config, "FAMILY_GATE_LIVE_ENABLED", False)) and not _a2_promoted_ok:
         _fg_gate = (getattr(snapshot, "shadow_candidates", None) or {}).get("family_gate")
         if isinstance(_fg_gate, dict) and _fg_gate.get("ok") is False:
             _fg_ag = len(_fg_gate.get("agree_families") or [])
@@ -1914,7 +1926,7 @@ def _shooting_execution_gate(decision, snapshot):
             return False, (
                 f"Family Independence Gate failed ({_fg_ag}/{_fg_req} agreeing families)"
             )
-    if bool(getattr(config, "STAGE3B_GATE_LIVE_ENABLED", False)):
+    if bool(getattr(config, "STAGE3B_GATE_LIVE_ENABLED", False)) and not _a2_promoted_ok:
         _s3b_gate = (getattr(snapshot, "shadow_candidates", None) or {}).get("stage3b_gate")
         if isinstance(_s3b_gate, dict) and _s3b_gate.get("ok") is False:
             return False, (
@@ -1926,7 +1938,7 @@ def _shooting_execution_gate(decision, snapshot):
             return False, (
                 f"Stage 3c Session Gate failed ({_s3c_gate.get('reason', 'dead_zone')})"
             )
-    if bool(getattr(config, "STAGE3D_SNIPER_GATE_LIVE_ENABLED", False)):
+    if bool(getattr(config, "STAGE3D_SNIPER_GATE_LIVE_ENABLED", False)) and not _a2_promoted_ok:
         _s3d_gate = (getattr(snapshot, "shadow_candidates", None) or {}).get("stage3d_gate")
         if isinstance(_s3d_gate, dict) and _s3d_gate.get("ok") is False:
             return False, (
@@ -2244,7 +2256,8 @@ def run_signal_bridge(snapshot, decision, *, allow_new_entries: bool = True) -> 
         _v3_cool_s = "ready"
         try:
             if _v3_eyes.last_fire:
-                _v3_cm = float(getattr(config, "A2_BURST_COOLDOWN_MINUTES", 5) or 5)
+                _v3_def_cm = float(getattr(config, "BASE_TF_MINUTES", 3) or 3)
+                _v3_cm = float(getattr(config, "A2_BURST_COOLDOWN_MINUTES", _v3_def_cm) or _v3_def_cm)
                 _v3_age = (_v3_now - _v3_eyes.last_fire).total_seconds() / 60.0
                 _v3_cool_s = (f"cooldown {max(0.0, _v3_cm - _v3_age):.0f} min"
                               if _v3_age < _v3_cm else "ready")
@@ -3268,6 +3281,7 @@ def _env_snapshot() -> dict:
         "POWER_LEAD_SHADOW_ENABLED": g("POWER_LEAD_SHADOW_ENABLED"),
         "LIMIT_ORDER_ENABLED": g("LIMIT_ORDER_ENABLED"),
         "AGGRESSIVE_ENTRY_ENABLED": g("AGGRESSIVE_ENTRY_ENABLED"),
+        "A2_PROMOTE_LIVE_EXECUTION": g("A2_PROMOTE_LIVE_EXECUTION"),
         "AGGRESSIVE_SPREAD_MAX_PCT": g("AGGRESSIVE_SPREAD_MAX_PCT"),
         "A2_LEAN_MIN": g("A2_LEAN_MIN"),
         "A2_LEAN_HOLD_SECONDS": g("A2_LEAN_HOLD_SECONDS"),

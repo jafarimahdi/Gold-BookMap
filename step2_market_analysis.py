@@ -528,6 +528,169 @@ def _a1_try_serve(market_data, now, price):
             )
     except Exception:
         pass
+    # Stage A2 (2026-11-06): Intra-bar A1 serve wiring ("the NOW in NOW button").
+    # 1) Always feed isolated SHADOW_EYES with live intra-bar tick order flow for Law #8 [8g].
+    # 2) When AGGRESSIVE_ENTRY_ENABLED=1: clear any one-shot bar-close a2_burst GO clone on
+    #    the shallow `served` copy, feed live intra-bar flow to EYES, and run `a2_serve_eval`
+    #    without ever mutating `entry['snapshot']` or T3e verdict fields.
+    try:
+        from aggressive_trigger import (
+            _enabled as _a2_srv_on,
+            a2_commit_fire as _a2_srv_commit,
+            a2_serve_eval as _a2_srv_eval,
+            evaluate_a2_shadow_audit as _a2_srv_shadow,
+            evaluate_aggressive_trigger as _a2_srv_v1,
+            extract_live_order_flow as _a2_srv_flow_fn,
+        )
+        from signal_team import get_book as _a2_srv_book
+        _srv_td = market_data.get("tick_data") or []
+        _srv_has_d = market_data.get("has_data")
+        if _srv_has_d is None:
+            _srv_has_d = bool(_srv_td or (served.signal_map or {}).get("ladder"))
+        _srv_age = market_data.get("last_data_age_seconds")
+        if _srv_age is None:
+            _srv_age = market_data.get("last_trade_age_seconds")
+        if _srv_age is None:
+            _srv_age = market_data.get("quote_age_seconds")
+        if _srv_age is None:
+            _srv_age = 0.0
+        _srv_dq_dict = market_data.get("data_quality")
+        _srv_q_ok = (
+            str(_srv_dq_dict.get("quote", "valid")).lower() == "valid"
+            if isinstance(_srv_dq_dict, dict) and "quote" in _srv_dq_dict
+            else True
+        )
+        _srv_dq_ok = market_data.get("data_quality_ok")
+        if _srv_dq_ok is None:
+            _srv_dq_ok = bool(_srv_has_d and _srv_q_ok)
+        _srv_live_flow = _a2_srv_flow_fn(market_data, getattr(served, "order_flow", None), now)
+        _srv_pw = getattr(served, "power_v2", None) or getattr(served, "power", None) or {}
+        _srv_base_sh = dict(getattr(served, "shadow_candidates", None) or {})
+        _srv_s3c = _srv_base_sh.get("stage3c_gate") or {}
+        _srv_s3r = _srv_base_sh.get("stage3r_gate") or {}
+        _srv_pw_reg = str(
+            ((_srv_pw.get("regime_diagnostics") or {}).get("market_regime")
+             or (_srv_pw.get("context") or {}).get("market_regime") or "")
+        ).upper() if isinstance(_srv_pw, dict) else ""
+        _srv_trend_ok = (
+            (not bool(getattr(config, "STAGE3D_REQUIRE_TREND_REGIME", True)))
+            or str(getattr(served, "regime", "") or "").upper() == "TREND"
+            or _srv_pw_reg == "TREND"
+        )
+        _srv_env_blk = (
+            "stage3c_dead_zone"
+            if (bool(getattr(config, "STAGE3C_SESSION_GATE_LIVE_ENABLED", False)) and _srv_s3c.get("ok") is False)
+            else (
+                "stage3r_unplugged_mbo"
+                if (bool(getattr(config, "STAGE3R_MBO_FEED_GUARD_ENABLED", False)) and _srv_s3r.get("ok") is False)
+                else ("non_trend_regime" if not _srv_trend_ok else None)
+            )
+        )
+        _srv_crowd_vol = 0.0
+        try:
+            _srv_crowd_vol = (
+                sum(float(_t.get("volume", _t.get("size", 0.0)) or 0.0)
+                    for _t in _srv_td[-500:] if isinstance(_t, dict))
+                if isinstance(_srv_td, list) and _srv_td
+                else float(getattr(served, "volume", 0.0) or 0.0)
+            )
+        except Exception:
+            _srv_crowd_vol = float(getattr(served, "volume", 0.0) or 0.0)
+        _srv_mkt_sym = (
+            (market_data.get("symbol") if isinstance(market_data, dict) else None)
+            or getattr(served, "symbol", None)
+        )
+        _srv_shot_ctx = {
+            "bid": bid,
+            "ask": ask,
+            "has_data": bool(_srv_has_d),
+            "data_quality_ok": bool(_srv_dq_ok),
+            "last_data_age_seconds": _srv_age,
+            "news_state": getattr(getattr(served, "news", None), "news_state", "QUIET"),
+            "trade_lots": float(getattr(config, "LOT_SIZE", 1.0) or 1.0),
+            "recent_volume": _srv_crowd_vol,
+            "market_symbol": _srv_mkt_sym,
+            "now": now,
+        }
+        _srv_a2_diag = _a2_srv_shadow(
+            power=_srv_pw,
+            order_flow=_srv_live_flow,
+            qualified_panel_dir="NEUTRAL",
+            now=now,
+            config=config,
+            shot_context=_srv_shot_ctx,
+            signal_map=getattr(served, "signal_map", None) or {},
+            price=price,
+            atr=_atr,
+            spread=_spread_now,
+            level3=getattr(served, "level3", None),
+            book=_a2_srv_book(),
+            is_serve=True,
+            env_block_reason=_srv_env_blk,
+        )
+        _srv_base_sh["a2_shadow"] = _srv_a2_diag
+        served.shadow_candidates = _srv_base_sh
+
+        if _a2_srv_on(config):
+            if isinstance(getattr(served, "shot", None), dict) and served.shot.get("a2_burst") is True:
+                served.shot = {
+                    "shot": "WAIT",
+                    "side": served.shot.get("side"),
+                    "entry_style": None,
+                    "entry": None,
+                    "stop": None,
+                    "target": None,
+                    "rr": None,
+                    "a2_burst": False,
+                    "aggressive_trigger_confirmed": False,
+                    "why": ["bar-close A2 burst one-shot consumed; intra-bar serve re-evaluating live quote"],
+                }
+            _srv_md_ctx = {
+                "has_data": bool(_srv_has_d),
+                "data_quality_ok": bool(_srv_dq_ok),
+                "last_data_age_seconds": _srv_age,
+                "tick_data": _srv_td,
+                "recent_volume": _srv_crowd_vol,
+                "symbol": _srv_mkt_sym,
+            }
+            _srv_new_shot, _srv_a2_notes = _a2_srv_eval(
+                served, _srv_md_ctx, now, price, _spread_now, config,
+                bid=bid, ask=ask, atr=_atr,
+                defer_commit=True, panel_override="NEUTRAL", flow_override=_srv_live_flow,
+            )
+            if isinstance(_srv_new_shot, dict):
+                _srv_v1 = _a2_srv_v1(
+                    power=_srv_pw,
+                    shot_context=_srv_shot_ctx,
+                    config=config,
+                    price=price,
+                    order_flow=_srv_live_flow,
+                    level3=getattr(served, "level3", None),
+                )
+                _srv_conf_thr = float(getattr(config, "AI_CONFIDENCE_THRESHOLD", 35.0) or 35.0)
+                _srv_exec_ok = (
+                    bool(_srv_v1.get("confirmed"))
+                    and _srv_env_blk is None
+                    and (
+                        float(getattr(served, "confidence", 0.0) or 0.0) >= _srv_conf_thr
+                        or bool(getattr(config, "A2_PROMOTE_LIVE_EXECUTION", False))
+                    )
+                )
+                _srv_new_shot.pop("_a2_pending_commit", None)
+                _srv_meta = _srv_new_shot.pop("_a2_commit_meta", None) or {}
+                if _srv_exec_ok:
+                    _srv_reason = _a2_srv_commit(_srv_meta, now, config=config, notes=scout_notes)
+                    _srv_new_shot["aggressive_trigger_reason"] = _srv_reason
+                    served.shot = _srv_new_shot
+                else:
+                    scout_notes.append(
+                        "A2 burst: intra-bar serve candidate held in shadow "
+                        "(counter/cooldown preserved; v1/gate holdback)"
+                    )
+            elif _srv_a2_notes:
+                scout_notes.extend(_srv_a2_notes)
+    except Exception:
+        pass
     # ---- live pair: paper-entry simulator + Escort, re-run EVERY serve -----
     pair_notes = []
     _escort_plan = {}
@@ -547,7 +710,7 @@ def _a1_try_serve(market_data, now, price):
         _escort = _a1_esc(_escort_plan, served.signal_map, price, _atr, _spread_now,
                           served.order_flow, served.footprint, served.level3,
                           served.news, served.divergence, _a1_book2(), config,
-                          bid=bid, ask=ask)
+                          bid=bid, ask=ask, now=now)
         served.escort = _escort
         pair_notes.append(_a1_esc_say(_escort))
     except Exception as _a1_esc_err:
@@ -7027,12 +7190,19 @@ def analyze_market(market_data: Dict[str, Any],
                      "reason": "aggressive trigger error (fail-closed): "
                                + type(_ag_err).__name__}
         # A2 (2026-10-13): the gate import. Missing module -> passthrough below.
+        _a2_shadow_payload = None
         try:
-            from aggressive_trigger import a2_v1_gate as _a2_gate, a2_commit_fire as _a2_commit, EYES as _a2_eyes
+            from aggressive_trigger import (
+                EYES as _a2_eyes,
+                a2_commit_fire as _a2_commit,
+                a2_v1_gate as _a2_gate,
+                evaluate_a2_shadow_audit as _a2_shadow_fn,
+            )
         except Exception:
             _a2_gate = None
             _a2_commit = None
             _a2_eyes = None
+            _a2_shadow_fn = None
         _crowd_vol = 0.0
         try:
             _crowd_ticks = tick_data[-500:] if isinstance(tick_data, list) else []
@@ -7082,8 +7252,87 @@ def analyze_market(market_data: Dict[str, Any],
             # Deferred commit (2026-10-29): daily counter & cooldown only commit
             # once plan_shot actually approves AGGRESSIVE_MARKET GO.
         }
+        # Stage A2 (2026-11-06): Qualified Eye-2 Panel Hygiene & Law #5 Shadow Telemetry.
+        # Eye 2 ONLY memorizes panel votes that passed Family Gate (>=2), Stage 3b,
+        # Stage 3c session dead-zone, Stage 3R MBO feed guard, Stage P3 regime/opposition,
+        # and pre-climax conviction >= threshold (never 1-family 29% noise!).
+        _conf_thr_a2 = float(getattr(config, "AI_CONFIDENCE_THRESHOLD", 35.0) or 35.0)
+        _s3d_rsn_a2 = str((_s3d_shadow_payload or {}).get("reason") or "") if isinstance(_s3d_shadow_payload, dict) else ""
+        _pre_climax_conf_a2 = (
+            float(_s3d_shadow_payload.get("raw_confidence", confidence) or confidence)
+            if (_s3d_rsn_a2 == "late_power_climax" and isinstance(_s3d_shadow_payload, dict))
+            else float(confidence or 0.0)
+        )
+        _a2_fg_ok = not (
+            bool(getattr(config, "FAMILY_GATE_LIVE_ENABLED", False))
+            and isinstance(_fg_shadow_payload, dict)
+            and _fg_shadow_payload.get("ok") is False
+        )
+        _a2_s3b_ok = not (
+            bool(getattr(config, "STAGE3B_GATE_LIVE_ENABLED", False))
+            and isinstance(_s3b_shadow_payload, dict)
+            and _s3b_shadow_payload.get("ok") is False
+        )
+        _a2_s3c_ok = not (
+            bool(getattr(config, "STAGE3C_SESSION_GATE_LIVE_ENABLED", False))
+            and isinstance(_s3c_shadow_payload, dict)
+            and _s3c_shadow_payload.get("ok") is False
+        )
+        _a2_s3r_ok = not (
+            bool(getattr(config, "STAGE3R_MBO_FEED_GUARD_ENABLED", False))
+            and isinstance(_s3r_shadow_payload, dict)
+            and _s3r_shadow_payload.get("ok") is False
+        )
+        _a2_s3d_qual_ok = not (
+            bool(getattr(config, "STAGE3D_SNIPER_GATE_LIVE_ENABLED", False))
+            and _s3d_rsn_a2 in ("power_opposes_direction", "non_trend_regime")
+        )
+        _a2_panel_qualified = bool(
+            direction in ("BUY", "SELL")
+            and _pre_climax_conf_a2 >= _conf_thr_a2
+            and _a2_fg_ok
+            and _a2_s3b_ok
+            and _a2_s3c_ok
+            and _a2_s3r_ok
+            and _a2_s3d_qual_ok
+        )
+        _a2_panel_dir = direction if _a2_panel_qualified else "NEUTRAL"
+        _pw_reg_a2 = str(
+            ((_power_v2.get("regime_diagnostics") or {}).get("market_regime")
+             or (_power_v2.get("context") or {}).get("market_regime") or "")
+        ).upper() if isinstance(_power_v2, dict) else ""
+        _a2_trend_ok = (
+            (not bool(getattr(config, "STAGE3D_REQUIRE_TREND_REGIME", True)))
+            or str(regime or "").upper() == "TREND"
+            or _pw_reg_a2 == "TREND"
+        )
+        _a2_env_block = (
+            "stage3c_dead_zone" if not _a2_s3c_ok
+            else ("stage3r_unplugged_mbo" if not _a2_s3r_ok
+                  else ("non_trend_regime" if not _a2_trend_ok else None))
+        )
+        _a2_shadow_payload = (
+            _a2_shadow_fn(
+                power=_power_v2,
+                order_flow=order_flow,
+                qualified_panel_dir=_a2_panel_dir,
+                now=now,
+                config=config,
+                shot_context=_shot_context,
+                signal_map=_signal_map,
+                price=price,
+                atr=getattr(volatility, "atr", 0.0) or 0.0,
+                spread=_spread_now,
+                level3=level3,
+                book=_get_book(),
+                is_serve=False,
+                env_block_reason=_a2_env_block,
+            )
+            if callable(_a2_shadow_fn)
+            else None
+        )
         _a2_gate_out = (
-            _a2_gate(_aggr, _power_v2, order_flow, locals().get("direction"),
+            _a2_gate(_aggr, _power_v2, order_flow, _a2_panel_dir,
                      now, config, notes, defer_commit=True)
             if _a2_gate is not None
             else {
@@ -7093,6 +7342,30 @@ def analyze_market(market_data: Dict[str, Any],
         )
         _a2_pending_commit = bool(_a2_gate_out.pop("_a2_pending_commit", False))
         _a2_commit_meta = _a2_gate_out.pop("_a2_commit_meta", None) or {}
+        # Stage A2 / Law #5: Never burn daily fire counter or emit an unexecutable GO plan
+        # when downstream Step-2/Stage-3d gates block execution (unless A2_PROMOTE_LIVE_EXECUTION=1).
+        _a2_exec_admissible = (
+            _a2_env_block is None
+            and (
+                float(confidence or 0.0) >= _conf_thr_a2
+                or bool(getattr(config, "A2_PROMOTE_LIVE_EXECUTION", False))
+            )
+        )
+        if _a2_gate_out.get("a2_burst") is True and not _a2_exec_admissible:
+            _a2_pending_commit = False
+            _a2_commit_meta = {}
+            _a2_gate_out = {
+                "aggressive_trigger_confirmed": False,
+                "aggressive_trigger_reason": (
+                    f"A2 shadow holdback ({_a2_env_block or 'awaiting A2_PROMOTE_LIVE_EXECUTION=1'})"
+                ),
+            }
+            if _a2_eyes is not None and _a2_eyes.note_ok(now):
+                notes.append(
+                    "A2 burst: 3-eye candidate recorded in shadow "
+                    f"({_a2_env_block or 'Step-2/Stage-3d gate active; A2_PROMOTE_LIVE_EXECUTION=0'}) "
+                    "— counter/cooldown preserved"
+                )
         _shot_context.update(_a2_gate_out)
         _shot = _plan(_signal_map, _power_v2, price,
                       getattr(volatility, "atr", 0.0) or 0.0,
@@ -7137,7 +7410,7 @@ def analyze_market(market_data: Dict[str, Any],
         _escort = _esc(_escort_plan, _signal_map, price,
                        getattr(volatility, "atr", 0.0) or 0.0, _spread_now,
                        order_flow, footprint, level3, news, divergence,
-                       _get_book2(), config, bid=bid, ask=ask)
+                       _get_book2(), config, bid=bid, ask=ask, now=now)
         notes.append(_esc_say(_escort))
     except Exception as _ec_err:
         notes.append(f"escort unavailable: {type(_ec_err).__name__}: {_ec_err}")
@@ -7162,6 +7435,8 @@ def analyze_market(market_data: Dict[str, Any],
         _merged_shadows["stage3d_gate"] = _s3d_shadow_payload
     if _s3r_shadow_payload:
         _merged_shadows["stage3r_gate"] = _s3r_shadow_payload
+    if locals().get("_a2_shadow_payload"):
+        _merged_shadows["a2_shadow"] = locals()["_a2_shadow_payload"]
     _merged_shadows["l3_passive_mbo_shadow"] = {
         "near_touch_ofi": float(getattr(level3, "near_touch_ofi", 0.0) or 0.0),
         "near_large_order_events": int(getattr(level3, "near_large_order_events", 0) or 0),

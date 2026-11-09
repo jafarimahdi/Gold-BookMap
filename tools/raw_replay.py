@@ -1590,6 +1590,20 @@ def _reset_step2_singletons() -> None:
         import aggressive_trigger as ag_mod
         if hasattr(ag_mod, "EYES") and hasattr(ag_mod.EYES, "reset"):
             ag_mod.EYES.reset()
+        if hasattr(ag_mod, "SHADOW_EYES") and hasattr(ag_mod.SHADOW_EYES, "reset"):
+            ag_mod.SHADOW_EYES.reset()
+    except Exception:
+        pass
+    try:
+        import paper_entry_simulator as pes_mod
+        if hasattr(pes_mod, "reset_entry_simulator"):
+            pes_mod.reset_entry_simulator()
+    except Exception:
+        pass
+    try:
+        import escort_team as esc_mod
+        if hasattr(esc_mod, "reset_escort"):
+            esc_mod.reset_escort()
     except Exception:
         pass
 
@@ -1821,6 +1835,16 @@ def replay_single_day(
             in_win_eps = [ep for ep in trade_eps if win_start_utc.timestamp() <= ep <= win_end_utc.timestamp()]
             first_ep = math.ceil(in_win_eps[0] / every_s) * every_s
             last_ep = in_win_eps[-1]
+
+            paper_sim_stats: Dict[str, Any] = {
+                "bell": {"FILLED": 0, "ALREADY_FILLED": 0, "PENDING": 0, "CANCELLED": 0, "WAIT": 0, "NO_PLAN": 0, "EXPIRED_WAIT": 0},
+                "serve": {"FILLED": 0, "ALREADY_FILLED": 0, "PENDING": 0, "CANCELLED": 0, "WAIT": 0, "NO_PLAN": 0, "EXPIRED_WAIT": 0},
+                "legacy_0s_suicides": 0,
+                "legacy_0s_suicide_pts": 0.0,
+            }
+            passive_shadow_rows: List[Dict[str, Any]] = []
+            escort_done_day: List[Dict[str, Any]] = []
+            legacy_open_meta: Dict[Tuple[str, float], Dict[str, Any]] = {}
 
             tc_ep = float(first_ep)
             step_idx = 0
@@ -2311,6 +2335,145 @@ def replay_single_day(
                         if isinstance(jv, dict) and isinstance(jv.get("value"), (int, float))
                     },
                 }
+                a2_sh = (getattr(snap, "shadow_candidates", None) or {}).get("a2_shadow") or {}
+                a2_side = str(a2_sh.get("side") or "NEITHER").upper()
+                a2_act_go = bool(a2_sh.get("active_scout_go"))
+                a2_str_go = bool(a2_sh.get("strict_scout_go"))
+                a2_r_fix18 = None
+                a2_r_atr10 = None
+                a2_r_atr15 = None
+                a2_r_pm4b = None
+                if (a2_act_go or a2_str_go) and a2_side in ("BUY", "SELL") and px > 0:
+                    a2_is_b = (a2_side == "BUY")
+                    a2_hold_m = max(1, int(round(float(getattr(config, "A2_BURST_TIME_STOP_MINUTES", 12) or 12))))
+                    d18_a2 = 1.80
+                    _, a2_r_fix18 = _walk_bracket(
+                        bar_keys, walk_bars, tc_ep, a2_side, px,
+                        (px - d18_a2) if a2_is_b else (px + d18_a2),
+                        (px + d18_a2) if a2_is_b else (px - d18_a2),
+                        a2_hold_m, spread_cost,
+                    )
+                    datr_a2 = max(1.80, round(1.0 * atr_live, 2))
+                    _, a2_r_atr10 = _walk_bracket(
+                        bar_keys, walk_bars, tc_ep, a2_side, px,
+                        (px - datr_a2) if a2_is_b else (px + datr_a2),
+                        (px + datr_a2) if a2_is_b else (px - datr_a2),
+                        a2_hold_m, spread_cost,
+                    )
+                    _, a2_r_atr15 = _walk_bracket(
+                        bar_keys, walk_bars, tc_ep, a2_side, px,
+                        (px - datr_a2) if a2_is_b else (px + datr_a2),
+                        (px + round(1.5 * datr_a2, 2)) if a2_is_b else (px - round(1.5 * datr_a2, 2)),
+                        a2_hold_m, spread_cost,
+                    )
+                    dw_sl = max(1.80, round(1.5 * atr_live, 2))
+                    dw_tp = round(3.5 * atr_live, 2)
+                    _, a2_r_pm4b = _walk_bracket(
+                        bar_keys, walk_bars, tc_ep, a2_side, px,
+                        (px - dw_sl) if a2_is_b else (px + dw_sl),
+                        (px + dw_tp) if a2_is_b else (px - dw_tp),
+                        max_hold_min, spread_cost,
+                        trail_atr=atr_live, trail_dist_mult=1.5, trail_trigger_r=1.0, be_floor_atr=0.10,
+                    )
+                    if a2_fix_pts is None:
+                        a2_fix_pts = a2_r_fix18
+                    if a2_atr_pts is None:
+                        a2_atr_pts = a2_r_atr10
+                a2_diag = {
+                    "power_dir": str(a2_sh.get("power_dir") or pw_dir),
+                    "side": a2_side,
+                    "is_serve": bool(a2_sh.get("is_serve", is_a1_serve)),
+                    "env_ok": bool(a2_sh.get("env_ok", True)),
+                    "env_block_reason": str(a2_sh.get("env_block_reason") or ""),
+                    "v1_confirmed": bool(a2_sh.get("v1_confirmed", False)),
+                    "active_lean_ok": bool(a2_sh.get("active_lean_ok", False)),
+                    "strict_lean_ok": bool(a2_sh.get("strict_lean_ok", False)),
+                    "active_panel_ok": bool(a2_sh.get("active_panel_ok", False)),
+                    "strict_panel_ok": bool(a2_sh.get("strict_panel_ok", False)),
+                    "scout_go": bool(a2_sh.get("scout_go", False)),
+                    "active_scout_go": a2_act_go,
+                    "strict_scout_go": a2_str_go,
+                    "subtype": str(a2_sh.get("subtype") or ""),
+                    "fix18_pts": a2_r_fix18,
+                    "atr10_pts": a2_r_atr10,
+                    "atr15_pts": a2_r_atr15,
+                    "pm4b_pts": a2_r_pm4b,
+                }
+
+                # Stage E1 (Section #9): Paper-Entry Simulator & Escort Team telemetry + Passive Shadow Fill Audit
+                esim = getattr(snap, "entry_simulation", None) or {}
+                sim_status = str(esim.get("status") or "NO_PLAN").upper()
+                sim_reason = str(esim.get("reason") or "")
+                sim_lane = paper_sim_stats["serve" if is_a1_serve else "bell"]
+                if sim_status in sim_lane:
+                    sim_lane[sim_status] += 1
+                else:
+                    sim_lane["NO_PLAN"] += 1
+                if sim_status == "WAIT" and "expired" in sim_reason.lower():
+                    sim_lane["EXPIRED_WAIT"] += 1
+
+                div_cur = float(getattr(snap, "divergence", 0.0) or 0.0)
+                if sim_status == "FILLED":
+                    f_plan = esim.get("filled_plan") or {}
+                    f_side = str(f_plan.get("side") or sig_dir or "").upper()
+                    f_entry = round(float(f_plan.get("entry") or px), 2)
+                    leg_suicide = bool(
+                        abs(div_cur) > 0.3
+                        and ((div_cur < 0 and f_side == "BUY") or (div_cur > 0 and f_side == "SELL"))
+                    )
+                    leg_pts = round((px - f_entry) if f_side == "BUY" else (f_entry - px), 2)
+                    if leg_suicide:
+                        paper_sim_stats["legacy_0s_suicides"] += 1
+                        paper_sim_stats["legacy_0s_suicide_pts"] += leg_pts
+                    legacy_open_meta[(f_side, f_entry)] = {
+                        "suicide_0s": leg_suicide,
+                        "suicide_pts": leg_pts,
+                    }
+
+                if not is_a1_serve and shot_act == "GO" and sig_dir in ("BUY", "SELL"):
+                    sh_cands = shot.get("shadow_candidates") if isinstance(shot, dict) else None
+                    pl_cand = (
+                        (sh_cands.get("passive_limit") if isinstance(sh_cands, dict) else None)
+                        or ((shot.get("entry_options") or {}).get("PASSIVE_LIMIT") if isinstance(shot, dict) else None)
+                        or {}
+                    )
+                    pl_px = float(pl_cand.get("entry") or pl_cand.get("price") or 0.0)
+                    pl_sl = float(pl_cand.get("stop") or 0.0)
+                    pl_tp = float(pl_cand.get("target") or 0.0)
+                    tick_sz_cur = float(l2d.get("tick_size") or 0.10) or 0.10
+                    limit_ttl_s = float(
+                        getattr(config, "SHOOT_PAPER_LIMIT_TTL_SECONDS", 60.0 * tf_min) or (60.0 * tf_min)
+                    )
+                    pl_filled = False
+                    pl_pm4b_pts: Optional[float] = None
+                    if pl_px > 0 and pl_sl > 0 and pl_tp > 0:
+                        i_lo = bisect.bisect_right(trade_eps, tc_ep)
+                        i_hi = bisect.bisect_right(trade_eps, tc_ep + limit_ttl_s)
+                        fill_ep_found: Optional[float] = None
+                        is_buy_pl = sig_dir == "BUY"
+                        for idx_t in range(i_lo, i_hi):
+                            t_ep_f, t_px_f = trades[idx_t]
+                            if (is_buy_pl and t_px_f <= pl_px - tick_sz_cur + 1e-9) or (
+                                (not is_buy_pl) and t_px_f >= pl_px + tick_sz_cur - 1e-9
+                            ):
+                                fill_ep_found = t_ep_f
+                                break
+                        if fill_ep_found is not None:
+                            pl_filled = True
+                            _, pl_pm4b_pts = _walk_bracket(
+                                bar_keys, walk_bars, fill_ep_found, sig_dir, pl_px,
+                                pl_sl, pl_tp, max_hold_min, 0.5 * spread_cost,
+                                trail_atr=atr_live, trail_dist_mult=1.5, trail_trigger_r=1.0, be_floor_atr=0.10,
+                            )
+                        passive_shadow_rows.append({
+                            "day": day_str,
+                            "side": sig_dir,
+                            "eligible": bool(pl_cand.get("eligible")),
+                            "filled": pl_filled,
+                            "passive_pm4b_pts": pl_pm4b_pts,
+                            "aggr_pm4b_pts": shot_pm4b_pts,
+                        })
+
                 cycles_out.append({
                     "entry_ep": tc_ep,
                     "dt_utc": tc_dt,
@@ -2365,8 +2528,58 @@ def replay_single_day(
                     "a2_fix_pts": a2_fix_pts, "a2_atr_pts": a2_atr_pts,
                     "scout": scout_diag,
                     "power_diag": power_diag,
+                    "a2_diag": a2_diag,
+                    "paper_sim_status": sim_status,
+                    "is_a1_serve": bool(is_a1_serve),
                 })
                 tc_ep += every_s
+
+            # Post-window walkout for open Escort positions & deferred shadow_naive counterfactuals
+            try:
+                import escort_team as esc_mod
+                eb_day = esc_mod.get_escort()
+                if (eb_day.open or getattr(eb_day, "shadow_naive", None)) and trades:
+                    w_ep = float(last_ep) + float(every_s)
+                    max_walk_ep = float(trades[-1][0])
+                    while (eb_day.open or getattr(eb_day, "shadow_naive", None)) and w_ep <= max_walk_ep:
+                        idx_w = bisect.bisect_right(trade_eps, w_ep) - 1
+                        if idx_w >= 0:
+                            w_px = float(trades[idx_w][1])
+                            clock_ref["ep"] = w_ep
+                            esc_mod.escort_cycle(
+                                {}, {}, w_px, atr_const, spread_cost,
+                                config=config,
+                                bid=w_px - 0.5 * spread_cost,
+                                ask=w_px + 0.5 * spread_cost,
+                                now=w_ep,
+                            )
+                        w_ep += float(every_s)
+                    if eb_day.open and trades:
+                        fin_ep, fin_px = trades[-1]
+                        for rem_t in list(eb_day.open):
+                            rem_mk = (fin_px - 0.5 * spread_cost) if rem_t.is_buy else (fin_px + 0.5 * spread_cost)
+                            esc_mod._close(eb_day, rem_t, rem_mk, "EOD", now_ts=fin_ep)
+                    if getattr(eb_day, "shadow_naive", None) and trades:
+                        fin_ep, fin_px = trades[-1]
+                        esc_mod._step_shadow_naive(
+                            eb_day, fin_px,
+                            fin_px - 0.5 * spread_cost,
+                            fin_px + 0.5 * spread_cost,
+                            fin_ep + 86400.0,
+                        )
+                for d_rec in eb_day.done:
+                    rec_copy = dict(d_rec)
+                    rec_copy["day"] = day_str
+                    l_meta = legacy_open_meta.get((str(rec_copy.get("side") or "").upper(), float(rec_copy.get("entry") or 0.0)))
+                    if l_meta and l_meta.get("suicide_0s"):
+                        rec_copy["legacy_0s_suicide"] = True
+                        rec_copy["legacy_pts"] = float(l_meta["suicide_pts"])
+                    else:
+                        rec_copy["legacy_0s_suicide"] = False
+                        rec_copy["legacy_pts"] = float(rec_copy.get("pts", 0.0))
+                    escort_done_day.append(rec_copy)
+            except Exception:
+                pass
         finally:
             time.time = orig_time
             if orig_now_utc is not None:
@@ -2430,6 +2643,9 @@ def replay_single_day(
         "cycles": cycles_out,
         "judge_stats": dict(judge_stats),
         "bench_judge_stats": dict(bench_judge_stats),
+        "paper_sim_stats": paper_sim_stats,
+        "escort_done": escort_done_day,
+        "passive_shadow_rows": passive_shadow_rows,
         "errors": errors,
         "elapsed_s": round(time.perf_counter() - t_wall0, 2),
     }
@@ -2719,6 +2935,12 @@ def synthesize_multi_day(results: List[Dict[str, Any]]) -> Tuple[str, str, Dict[
             total_cycles += 1
             d = c["direction"]
             if d not in ("BUY", "SELL"):
+                if c.get("a2_fix_pts") is not None and c.get("a2_atr_pts") is not None:
+                    a2_bm8["n"] += 1
+                    if c.get("shot_action") == "GO":
+                        a2_bm8["go_n"] += 1
+                    a2_bm8["fix18_pts"] += float(c["a2_fix_pts"])
+                    a2_bm8["atr10_pts"] += float(c["a2_atr_pts"])
                 continue
             total_signals += 1
             conf = c["confidence"]
@@ -3358,6 +3580,187 @@ def synthesize_multi_day(results: List[Dict[str, Any]]) -> Tuple[str, str, Dict[
         )
     else:
         lines.append("  0 POWER cycles recorded.")
+
+    # [8g] Section #8: A2 ("The Now Button") Aggressive Trigger Scorecard (Law #5 + Law #8 + Law #11)
+    lines.append(
+        "\n[8g] SECTION #8: A2 ('THE NOW BUTTON') AGGRESSIVE TRIGGER SCORECARD (LAW #5 SHADOW AUDIT)"
+    )
+    a2_all = [c for r in ok_days for c in r["cycles"] if not c.get("error") and isinstance(c.get("a2_diag"), dict)]
+    if a2_all:
+        a2_pw_active = [c for c in a2_all if c["a2_diag"].get("power_dir") in ("UP", "DOWN")]
+        a2_env_ok_c = [c for c in a2_pw_active if c["a2_diag"].get("env_ok")]
+        a2_v1_ok_c = [c for c in a2_env_ok_c if c["a2_diag"].get("v1_confirmed")]
+        a2_act_e1 = [c for c in a2_v1_ok_c if c["a2_diag"].get("active_lean_ok")]
+        a2_act_e2 = [c for c in a2_act_e1 if c["a2_diag"].get("active_panel_ok")]
+        a2_act_go_c = [c for c in a2_act_e2 if c["a2_diag"].get("active_scout_go")]
+        a2_str_e1 = [c for c in a2_v1_ok_c if c["a2_diag"].get("strict_lean_ok")]
+        a2_str_e2 = [c for c in a2_str_e1 if c["a2_diag"].get("strict_panel_ok")]
+        a2_str_go_c = [c for c in a2_str_e2 if c["a2_diag"].get("strict_scout_go")]
+        lines.append(
+            f"  Active A2 Config: ENABLED={getattr(config, 'AGGRESSIVE_ENTRY_ENABLED', False)} | "
+            f"PROMOTE_LIVE={getattr(config, 'A2_PROMOTE_LIVE_EXECUTION', False)} | "
+            f"LEAN_MIN={getattr(config, 'A2_LEAN_MIN', 0.25)} | "
+            f"HOLD_S={getattr(config, 'A2_LEAN_HOLD_SECONDS', 60.0)}s | "
+            f"PANEL_WIN={getattr(config, 'A2_PANEL_WINDOW_SECONDS', 180.0)}s | "
+            f"CD={getattr(config, 'A2_BURST_COOLDOWN_MINUTES', float(h1))}m | "
+            f"TSTOP={getattr(config, 'A2_BURST_TIME_STOP_MINUTES', 12.0)}m"
+        )
+        lines.append(
+            f"  1) 3-Eye Funnel (All {len(a2_all)} cycles): POWER_UP/DN={len(a2_pw_active)} -> "
+            f"Env_OK={len(a2_env_ok_c)} -> v1_Impulse_OK={len(a2_v1_ok_c)} -> "
+            f"Active[Eye1={len(a2_act_e1)} -> Eye2_Qual={len(a2_act_e2)} -> Eye3_Scout_GO={len(a2_act_go_c)}] | "
+            f"Strict(0.25/60s/{h1 * 60}s)[Eye1={len(a2_str_e1)} -> Eye2_Qual={len(a2_str_e2)} -> Eye3_Scout_GO={len(a2_str_go_c)}]"
+        )
+
+        a2_cd_s = max(60.0, 60.0 * float(getattr(config, "A2_BURST_COOLDOWN_MINUTES", float(h1)) or float(h1)))
+
+        def _dedup_a2_episodes(pred_fn) -> Tuple[List[Dict[str, Any]], int, int]:
+            dedup: List[Dict[str, Any]] = []
+            pos_d = 0
+            act_d = 0
+            for r_d in ok_days:
+                last_ep = -1e18
+                day_rows: List[Dict[str, Any]] = []
+                for c_d in r_d["cycles"]:
+                    if c_d.get("error") or not isinstance(c_d.get("a2_diag"), dict):
+                        continue
+                    if not pred_fn(c_d):
+                        continue
+                    cur_ep = float(c_d.get("entry_ep") or 0.0)
+                    if (cur_ep - last_ep) < a2_cd_s:
+                        continue
+                    last_ep = cur_ep
+                    dedup.append(c_d)
+                    day_rows.append(c_d)
+                scored_day = [x["a2_diag"]["atr10_pts"] for x in day_rows if x["a2_diag"].get("atr10_pts") is not None]
+                if scored_day:
+                    act_d += 1
+                    if sum(float(v) for v in scored_day) > 0:
+                        pos_d += 1
+            return dedup, pos_d, act_d
+
+        lines.append(
+            f"  {'A2 COHORT (COOLDOWN-DEDUPED EPISODES)':<38} {'EP':>4} {'POS_D':>6} {'WR(1A)%':>8} "
+            f"{'FIX_1.8':>9} {'ATR_1:1':>9} {'ATR_1:1.5':>10} {'PM4B_1.5A':>10}"
+        )
+        lines.append("  " + "-" * 102)
+        cohort_defs = [
+            ("Active .env 3-Eye + Scout GO", lambda c: bool(c["a2_diag"].get("active_scout_go"))),
+            ("Canonical Strict (0.25/60s/1b) GO", lambda c: bool(c["a2_diag"].get("strict_scout_go"))),
+            ("  -> Subtype: DELAYED_FOLLOW", lambda c: bool(c["a2_diag"].get("active_scout_go")) and c["a2_diag"].get("subtype") == "DELAYED_FOLLOW"),
+            ("  -> Subtype: SAME_BAR_CLIMAX", lambda c: bool(c["a2_diag"].get("active_scout_go")) and c["a2_diag"].get("subtype") == "SAME_BAR_CLIMAX"),
+            ("  -> Subtype: SERVE_INTRABAR", lambda c: bool(c["a2_diag"].get("active_scout_go")) and c["a2_diag"].get("subtype") == "SERVE_INTRABAR"),
+        ]
+        for c_lbl, c_pred in cohort_defs:
+            eps, p_d, a_d = _dedup_a2_episodes(c_pred)
+            if not eps:
+                lines.append(f"  {c_lbl:<38} {0:>4} {'0/0':>6} {'-':>8} {'+0.0':>9} {'+0.0':>9} {'+0.0':>10} {'+0.0':>10}")
+                continue
+            r18 = [float(x["a2_diag"]["fix18_pts"]) for x in eps if x["a2_diag"].get("fix18_pts") is not None]
+            r10 = [float(x["a2_diag"]["atr10_pts"]) for x in eps if x["a2_diag"].get("atr10_pts") is not None]
+            r15 = [float(x["a2_diag"]["atr15_pts"]) for x in eps if x["a2_diag"].get("atr15_pts") is not None]
+            rpm = [float(x["a2_diag"]["pm4b_pts"]) for x in eps if x["a2_diag"].get("pm4b_pts") is not None]
+            w10 = sum(1 for v in r10 if v > 0)
+            l10 = sum(1 for v in r10 if v < 0)
+            wr10 = (100.0 * w10 / (w10 + l10)) if (w10 + l10) else 0.0
+            lines.append(
+                f"  {c_lbl:<38} {len(eps):>4} {f'{p_d}/{a_d}':>6} {f'{wr10:.1f}%':>8} "
+                f"{sum(r18):>+9.1f} {sum(r10):>+9.1f} {sum(r15):>+10.1f} {sum(rpm):>+10.1f}"
+            )
+    else:
+        lines.append("  0 A2 cycles recorded.")
+
+    # [8h] Section #9 (Stage E1): Escort Team & Paper-Entry Simulator Scorecard
+    lines.append("\n[8h] SECTION #9: ESCORT TEAM & PAPER-ENTRY SIMULATOR SCORECARD (Stage E1)")
+    ps_bell = {"FILLED": 0, "ALREADY_FILLED": 0, "PENDING": 0, "CANCELLED": 0, "WAIT": 0, "NO_PLAN": 0, "EXPIRED_WAIT": 0}
+    ps_serve = {"FILLED": 0, "ALREADY_FILLED": 0, "PENDING": 0, "CANCELLED": 0, "WAIT": 0, "NO_PLAN": 0, "EXPIRED_WAIT": 0}
+    leg_0s_suicides = 0
+    leg_0s_pts = 0.0
+    esc_all: List[Dict[str, Any]] = []
+    pl_all: List[Dict[str, Any]] = []
+    for r in ok_days:
+        pst = r.get("paper_sim_stats") or {}
+        for k_s in ps_bell:
+            ps_bell[k_s] += int((pst.get("bell") or {}).get(k_s, 0))
+            ps_serve[k_s] += int((pst.get("serve") or {}).get(k_s, 0))
+        leg_0s_suicides += int(pst.get("legacy_0s_suicides", 0))
+        leg_0s_pts += float(pst.get("legacy_0s_suicide_pts", 0.0))
+        esc_all.extend(r.get("escort_done") or [])
+        pl_all.extend(r.get("passive_shadow_rows") or [])
+
+    lines.append(
+        f"  Paper-Entry Lifecycle | Bell(:00): FILLED={ps_bell['FILLED']} ALREADY={ps_bell['ALREADY_FILLED']} "
+        f"PENDING={ps_bell['PENDING']} CANCEL={ps_bell['CANCELLED']} WAIT={ps_bell['WAIT']} (Expired={ps_bell['EXPIRED_WAIT']})"
+    )
+    lines.append(
+        f"                        | Serve(:01/:02): FILLED={ps_serve['FILLED']} ALREADY={ps_serve['ALREADY_FILLED']} "
+        f"PENDING={ps_serve['PENDING']} CANCEL={ps_serve['CANCELLED']} WAIT={ps_serve['WAIT']} (Expired_Serve_Clones={ps_serve['EXPIRED_WAIT']})"
+    )
+    if esc_all:
+        n_esc = len(esc_all)
+        esc_pts_tot = sum(float(x.get("pts", 0.0)) for x in esc_all)
+        naive_pts_tot = sum(float(x.get("pts_if_left_alone", 0.0)) for x in esc_all)
+        leg_pts_tot = sum(float(x.get("legacy_pts", x.get("pts", 0.0))) for x in esc_all)
+        esc_r_tot = sum(float(x.get("r", 0.0)) for x in esc_all)
+        naive_r_tot = sum(float(x.get("r_if_left_alone", 0.0)) for x in esc_all)
+        helped_r_tot = sum(float(x.get("escort_helped", 0.0)) for x in esc_all)
+        helped_pts_tot = esc_pts_tot - naive_pts_tot
+        esc_w = sum(1 for x in esc_all if float(x.get("pts", 0.0)) > 0)
+        esc_l = sum(1 for x in esc_all if float(x.get("pts", 0.0)) < 0)
+        naive_w = sum(1 for x in esc_all if float(x.get("pts_if_left_alone", 0.0)) > 0)
+        naive_l = sum(1 for x in esc_all if float(x.get("pts_if_left_alone", 0.0)) < 0)
+        leg_w = sum(1 for x in esc_all if float(x.get("legacy_pts", 0.0)) > 0)
+        leg_l = sum(1 for x in esc_all if float(x.get("legacy_pts", 0.0)) < 0)
+        esc_wr = (100.0 * esc_w / (esc_w + esc_l)) if (esc_w + esc_l) else 0.0
+        naive_wr = (100.0 * naive_w / (naive_w + naive_l)) if (naive_w + naive_l) else 0.0
+        leg_wr = (100.0 * leg_w / (leg_w + leg_l)) if (leg_w + leg_l) else 0.0
+        lines.append(
+            f"  {'ESCORT EXIT COMPARISON (ALL PAPER FILLS)':<42} {'N':>4} {'W/L':>9} {'WR%':>7} "
+            f"{'NET_PTS':>9} {'PTS/FILL':>9} {'SUM_R':>8}"
+        )
+        lines.append("  " + "-" * 96)
+        lines.append(
+            f"  {'1) No Escort (Pure Planned SL/TP + TimeStop)':<42} {n_esc:>4} {f'{naive_w}/{naive_l}':>9} "
+            f"{f'{naive_wr:.1f}%':>7} {naive_pts_tot:>+9.1f} {naive_pts_tot / n_esc:>+9.2f} {naive_r_tot:>+8.2f}R"
+        )
+        lines.append(
+            f"  {'2) Stage-E1 Escort (Wave Lock + Major Walls)':<42} {n_esc:>4} {f'{esc_w}/{esc_l}':>9} "
+            f"{f'{esc_wr:.1f}%':>7} {esc_pts_tot:>+9.1f} {esc_pts_tot / n_esc:>+9.2f} {esc_r_tot:>+8.2f}R"
+        )
+        lines.append(
+            f"  {'3) Legacy Pre-E1 Escort (Old 0s Div-Close)':<42} {n_esc:>4} {f'{leg_w}/{leg_l}':>9} "
+            f"{f'{leg_wr:.1f}%':>7} {leg_pts_tot:>+9.1f} {leg_pts_tot / n_esc:>+9.2f} {'-':>8}"
+        )
+        reason_cnts: Dict[str, int] = {}
+        job_cnts: Dict[str, int] = {}
+        for x in esc_all:
+            rn = str(x.get("reason") or "OTHER")
+            reason_cnts[rn] = reason_cnts.get(rn, 0) + 1
+            for jk, jv in (x.get("action_jobs") or {}).items():
+                job_cnts[jk] = job_cnts.get(jk, 0) + int(jv)
+        r_str = ", ".join(f"{k}={v}" for k, v in sorted(reason_cnts.items()))
+        j_str = ", ".join(f"{k}={v}" for k, v in sorted(job_cnts.items())) or "none"
+        lines.append(
+            f"  Escort Value-Add vs No-Escort: {helped_pts_tot:+.1f} pts ({helped_r_tot:+.2f}R) | "
+            f"0s_Entry_Suicides: 0/{n_esc} (Legacy Pre-E1 killed {leg_0s_suicides}/{n_esc}, {leg_0s_pts:+.1f} pts)"
+        )
+        lines.append(f"  Exit Reasons: {r_str} | Voice Interventions: {j_str}")
+    else:
+        lines.append("  0 closed Escort paper fills recorded in window.")
+
+    if pl_all:
+        n_pl = len(pl_all)
+        pl_fills = [x for x in pl_all if x.get("filled") and x.get("passive_pm4b_pts") is not None]
+        pl_unfilled = [x for x in pl_all if not x.get("filled") and x.get("aggr_pm4b_pts") is not None]
+        pl_pts = sum(float(x["passive_pm4b_pts"]) for x in pl_fills)
+        missed_pts = sum(float(x["aggr_pm4b_pts"]) for x in pl_unfilled)
+        ag_pts = sum(float(x["aggr_pm4b_pts"]) for x in pl_all if x.get("aggr_pm4b_pts") is not None)
+        fill_pct = 100.0 * len(pl_fills) / n_pl
+        lines.append(
+            f"  Passive-Limit Shadow Audit (1-Tick Trade-Through, TTL={int(getattr(config, 'SHOOT_PAPER_LIMIT_TTL_SECONDS', 180))}s): "
+            f"Filled={len(pl_fills)}/{n_pl} ({fill_pct:.1f}%) -> Passive_PM4B={pl_pts:+.1f} pts | "
+            f"Missed_Runaways={missed_pts:+.1f} pts | Aggr_Market_PM4B={ag_pts:+.1f} pts"
+        )
 
     # [9] Stage 1: Timeframe-linked 1..4-bar path & Market Trick Detector
     lines.append(

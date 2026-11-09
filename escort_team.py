@@ -43,21 +43,54 @@ behaves identically.
 """
 from __future__ import annotations
 
+from datetime import datetime
+import math
 import time
 from typing import Any, Dict, List, Optional
 
-__all__ = ["escort_cycle", "describe", "get_escort", "EscortBook"]
+__all__ = ["escort_cycle", "describe", "get_escort", "reset_escort", "EscortBook"]
 
 MAX_PAPER = 3            # never guard more than a handful of pretend trades at once
-TIME_STOP_MIN = 45.0     # a paper trade that has gone nowhere is closed and recorded
+TIME_STOP_MIN = 45.0     # default M3 (15-bar) paper time-stop; dynamically scaled via config
 
 
 def _f(x, d=0.0):
     try:
         v = float(x)
-        return v if v == v else d
+        return v if math.isfinite(v) else d
     except Exception:
         return d
+
+
+def _now_epoch(value: Any = None) -> float:
+    """Resolve simulated/replay market clock (`datetime` or epoch) with wall-clock fallback."""
+    if isinstance(value, datetime):
+        try:
+            return float(value.timestamp())
+        except (OverflowError, OSError, ValueError):
+            return time.time()
+    if value is not None:
+        try:
+            num = float(value)
+            if math.isfinite(num) and num > 0:
+                return num
+        except (TypeError, ValueError, OverflowError):
+            pass
+    return time.time()
+
+
+def _resolve_trade_time_stop_min(t: "PaperTrade", config: Any = None) -> float:
+    """Law #11: Resolve lane-aware time-stop in minutes (4 bars A2 / 15 bars wave)."""
+    if getattr(t, "is_a2_burst", False):
+        return max(1.0, _f(getattr(config, "A2_BURST_TIME_STOP_MINUTES", 12.0), 12.0))
+    if config is not None:
+        explicit = getattr(config, "ESCORT_TIME_STOP_MINUTES", None)
+        if explicit is not None:
+            return max(5.0, _f(explicit, TIME_STOP_MIN))
+        tf_min = getattr(config, "BASE_TF_MINUTES", None)
+        if tf_min is not None and _f(tf_min, 0.0) >= 1.0:
+            return max(15.0, 15.0 * _f(tf_min, 3.0))
+    return TIME_STOP_MIN
 
 
 class PaperTrade:
@@ -66,9 +99,11 @@ class PaperTrade:
     __slots__ = ("side", "entry", "target", "stop", "opened", "opened_price",
                  "orig_target", "orig_stop", "door_price", "actions", "peak", "trough",
                  "closed", "close_reason", "close_price", "cycles",
-                 "entry_style", "paper_fill_model", "is_a2_burst", "target_source")
+                 "entry_style", "paper_fill_model", "is_a2_burst", "target_source",
+                 "entry_divergence")
 
-    def __init__(self, plan: Dict[str, Any], price: float):
+    def __init__(self, plan: Dict[str, Any], price: float,
+                 now: Any = None, entry_divergence: float = 0.0):
         self.side = plan.get("side")
         self.entry = _f(plan.get("entry"), price)
         self.target = _f(plan.get("target"))
@@ -76,8 +111,9 @@ class PaperTrade:
         self.orig_target = self.target
         self.orig_stop = self.stop
         self.door_price = _f((plan.get("door") or {}).get("price"))
-        self.opened = time.time()
+        self.opened = _now_epoch(now)
         self.opened_price = self.entry
+        self.entry_divergence = _f(entry_divergence)
         self.entry_style = str(plan.get("entry_style") or "UNKNOWN")
         self.paper_fill_model = str(plan.get("paper_fill_model") or "UNKNOWN")
         self.is_a2_burst = bool(
@@ -115,9 +151,11 @@ class EscortBook:
     def __init__(self):
         self.open: List[PaperTrade] = []
         self.done: List[Dict[str, Any]] = []
+        self.shadow_naive: List[Dict[str, Any]] = []
 
     # -- open only on a confirmed paper fill ---------------------------------
-    def maybe_open(self, plan: Dict[str, Any], price: float) -> Optional[PaperTrade]:
+    def maybe_open(self, plan: Dict[str, Any], price: float,
+                   now: Any = None, entry_divergence: float = 0.0) -> Optional[PaperTrade]:
         if (not plan or plan.get("shot") != "GO" or not plan.get("side")
                 or plan.get("entry_filled") is not True
                 or plan.get("execution_status") != "PAPER_ONLY"):
@@ -140,7 +178,7 @@ class EscortBook:
         for t in self.open:
             if t.side == plan.get("side") and abs(t.door_price - door_price) < 0.01:
                 return None
-        pt = PaperTrade(plan, price)
+        pt = PaperTrade(plan, price, now=now, entry_divergence=entry_divergence)
         self.open.append(pt)
         return pt
 
@@ -153,6 +191,12 @@ def get_escort() -> EscortBook:
     if _BOOK is None:
         _BOOK = EscortBook()
     return _BOOK
+
+
+def reset_escort() -> None:
+    """Clear global Escort state between isolated tests or replayed days."""
+    global _BOOK
+    _BOOK = EscortBook()
 
 
 # --------------------------------------------------------------------------- #
@@ -208,8 +252,16 @@ def _job1_exit_clear(t: PaperTrade, smap: Dict[str, Any], price: float,
 
 
 def _job2_crowd_turning(t: PaperTrade, order_flow: Any, level3: Any,
-                        price: float) -> Optional[Dict]:
+                        price: float, config: Any = None) -> Optional[Dict]:
     """Is the crowd turning against me? The earliest warning we own."""
+    wave_mode = (
+        bool(getattr(config, "STAGE4B_WAVE_TRAIL_ENABLED", False))
+        and not getattr(t, "is_a2_burst", False)
+    )
+    if wave_mode:
+        weak_be_r = _f(getattr(config, "PM_WAVE_WEAK_BE_R", 0.75), 0.75)
+        if t.r_now(price) < weak_be_r:
+            return None
     micro = _f(getattr(order_flow, "microprice", 0.0))
     mid = _f(getattr(order_flow, "mid_price", 0.0))
     imb = _f(getattr(level3, "order_book_imbalance", 0.0))
@@ -226,9 +278,39 @@ def _job2_crowd_turning(t: PaperTrade, order_flow: Any, level3: Any,
 
 
 def _job3_push_dying(t: PaperTrade, order_flow: Any, footprint: Any,
-                     divergence: float, price: float) -> Optional[Dict]:
+                     divergence: float, price: float,
+                     config: Any = None,
+                     now_ts: Optional[float] = None) -> Optional[Dict]:
     """Is my push dying? Pressure fading while price still drifts."""
     div = _f(divergence)
+    fp = _f(getattr(footprint, "delta_imbalance", 0.0))
+    wave_mode = (
+        bool(getattr(config, "STAGE4B_WAVE_TRAIL_ENABLED", False))
+        and not getattr(t, "is_a2_burst", False)
+    )
+    if wave_mode:
+        min_age_s = max(0.0, _f(getattr(config, "ESCORT_MIN_AGE_SECONDS", 180.0), 180.0))
+        cur_ts = now_ts if now_ts is not None else time.time()
+        if max(0.0, cur_ts - float(t.opened)) < min_age_s:
+            return None
+        weak_be_r = _f(getattr(config, "PM_WAVE_WEAK_BE_R", 0.75), 0.75)
+        div_close_on = bool(getattr(config, "ESCORT_DIVERGENCE_CLOSE_ENABLED", False))
+        entry_div = _f(getattr(t, "entry_divergence", 0.0))
+        pre_existing = (entry_div * div > 0) and (abs(div) < abs(entry_div) + 0.25)
+        div_against = ((div < 0 and t.is_buy) or (div > 0 and not t.is_buy))
+        if abs(div) >= 0.50 and div_against and not pre_existing:
+            if t.r_now(price) >= weak_be_r:
+                return {"job": 3, "judge": "cvd_divergence", "action": "TIGHTEN",
+                        "reason": f"fresh divergence {div:+.2f} against us in profit - "
+                                  f"protect open gain"}
+            if div_close_on:
+                return {"job": 3, "judge": "cvd_divergence", "action": "CLOSE",
+                        "reason": f"fresh divergence {div:+.2f} against us - close enabled"}
+        if t.r_now(price) >= weak_be_r and ((fp < -0.35 and t.is_buy) or (fp > 0.35 and not t.is_buy)):
+            return {"job": 3, "judge": "footprint_delta", "action": "TIGHTEN",
+                    "reason": f"aggression has flipped against us ({fp:+.2f}) in profit"}
+        return None
+
     if abs(div) > 0.3 and ((div < 0 and t.is_buy) or (div > 0 and not t.is_buy)):
         if t.r_now(price) < 0.8:
             return {"job": 3, "judge": "cvd_divergence", "action": "CLOSE",
@@ -237,7 +319,6 @@ def _job3_push_dying(t: PaperTrade, order_flow: Any, footprint: Any,
         return {"job": 3, "judge": "cvd_divergence", "action": "TIGHTEN",
                 "reason": f"divergence {div:+.2f} against us but we are in profit - "
                           f"protect it instead of closing"}
-    fp = _f(getattr(footprint, "delta_imbalance", 0.0))
     if (fp < -0.35 and t.is_buy) or (fp > 0.35 and not t.is_buy):
         return {"job": 3, "judge": "footprint_delta", "action": "TIGHTEN",
                 "reason": f"aggression has flipped against us ({fp:+.2f})"}
@@ -332,6 +413,57 @@ def _job5_bomb(t: PaperTrade, news: Any, config: Any) -> Optional[Dict]:
     return None
 
 
+def _step_shadow_naive(esc: EscortBook, price: float, bid: float, ask: float,
+                       now_ts: float) -> None:
+    """Resolve deferred 'without Escort' counterfactuals on subsequent market ticks.
+
+    When Escort closes or tightens a position before original SL/TP/time-stop was hit,
+    stopping counterfactual tracking at the Escort exit tick artificially forces
+    `r_if_left_alone == r` (`escort_helped == 0.0`). Watching original SL/TP/time-stop
+    through completion scores Escort honestly against doing nothing.
+    """
+    if not getattr(esc, "shadow_naive", None):
+        return
+    remaining: List[Dict[str, Any]] = []
+    for sh in esc.shadow_naive:
+        is_buy = bool(sh["is_buy"])
+        mark = (bid if is_buy and bid > 0 else ask if not is_buy and ask > 0 else price)
+        if mark <= 0:
+            remaining.append(sh)
+            continue
+        entry = float(sh["entry"])
+        orig_tp = float(sh["orig_target"])
+        orig_sl = float(sh["orig_stop"])
+        risk = float(sh["risk"]) or 1e-9
+        hit_tp = (mark >= orig_tp) if is_buy else (mark <= orig_tp)
+        hit_sl = (mark <= orig_sl) if is_buy else (mark >= orig_sl)
+        hit_time = now_ts >= float(sh["expires_ts"])
+        if hit_tp or hit_sl or hit_time:
+            if hit_tp:
+                exit_px = orig_tp
+                out_lbl = "TARGET"
+            elif hit_sl:
+                exit_px = orig_sl
+                out_lbl = "STOP"
+            else:
+                exit_px = mark
+                out_lbl = "TIME"
+            naive_pts = (exit_px - entry) if is_buy else (entry - exit_px)
+            naive_r = naive_pts / risk
+            fin = sh["record"]
+            actual_r = float(fin.get("r_raw", fin.get("r", 0.0)))
+            actual_pts = float(fin.get("pts", 0.0))
+            fin["r_if_left_alone"] = round(naive_r, 2)
+            fin["pts_if_left_alone"] = round(naive_pts, 2)
+            fin["escort_helped"] = round(actual_r - naive_r, 2)
+            fin["escort_helped_pts"] = round(actual_pts - naive_pts, 2)
+            fin["naive_outcome"] = out_lbl
+            fin["counterfactual_resolved"] = True
+        else:
+            remaining.append(sh)
+    esc.shadow_naive = remaining
+
+
 # --------------------------------------------------------------------------- #
 #  the cycle
 # --------------------------------------------------------------------------- #
@@ -339,12 +471,15 @@ def escort_cycle(shot_plan: Dict[str, Any], signal_map: Dict[str, Any],
                  price: float, atr: float, spread: float = 0.0,
                  order_flow: Any = None, footprint: Any = None, level3: Any = None,
                  news: Any = None, divergence: float = 0.0, book=None,
-                 config: Any = None, bid: float = 0.0, ask: float = 0.0) -> Dict[str, Any]:
+                 config: Any = None, bid: float = 0.0, ask: float = 0.0,
+                 now: Any = None) -> Dict[str, Any]:
     """Guard only paper positions that the entry simulator has marked FILLED."""
     esc = get_escort()
     price, atr = _f(price), max(_f(atr), 1e-9)
     bid, ask = _f(bid), _f(ask)
-    opened = esc.maybe_open(shot_plan, price)
+    now_ts = _now_epoch(now)
+    _step_shadow_naive(esc, price, bid, ask, now_ts)
+    opened = esc.maybe_open(shot_plan, price, now=now_ts, entry_divergence=_f(divergence))
 
     reports: List[Dict[str, Any]] = []
     for t in list(esc.open):
@@ -358,38 +493,50 @@ def escort_cycle(shot_plan: Dict[str, Any], signal_map: Dict[str, Any],
         else:
             t.peak, t.trough = min(t.peak, mark), max(t.trough, mark)
 
+        trade_time_stop_min = _resolve_trade_time_stop_min(t, config)
+
         # did it finish on its own?
         hit_tp = (mark >= t.target) if t.is_buy else (mark <= t.target)
         hit_sl = (mark <= t.stop) if t.is_buy else (mark >= t.stop)
         if hit_tp or hit_sl:
-            _close(esc, t, mark, "TARGET" if hit_tp else "STOP")
+            _close(esc, t, mark, "TARGET" if hit_tp else "STOP",
+                   now_ts=now_ts, time_stop_min=trade_time_stop_min)
             continue
-        trade_time_stop_min = (
-            max(1.0, _f(getattr(config, "A2_BURST_TIME_STOP_MINUTES", 12.0), 12.0))
-            if getattr(t, "is_a2_burst", False)
-            else TIME_STOP_MIN
-        )
-        if (time.time() - t.opened) / 60.0 > trade_time_stop_min:
-            _close(esc, t, mark, "TIME")
+        if (now_ts - t.opened) / 60.0 > trade_time_stop_min:
+            _close(esc, t, mark, "TIME",
+                   now_ts=now_ts, time_stop_min=trade_time_stop_min)
+            continue
+
+        # Stage E1 (2026-11-07): Zero-second entry grace -- never run mid-trade
+        # panic closes or stop-halving on the exact tick a position just opened.
+        if t is opened:
+            reports.append({"side": t.side, "entry": round(t.entry, 2),
+                            "target": round(t.target, 2), "stop": round(t.stop, 2),
+                            "r": round(t.r_now(mark), 2), "cycles": t.cycles,
+                            "entry_style": t.entry_style,
+                            "paper_fill_model": t.paper_fill_model,
+                            "actions": []})
             continue
 
         # ---- the five jobs, one voice each ----------------------------------
         acts = [a for a in (
             _profit_lock(t, price, atr, spread, config),
             _job1_exit_clear(t, signal_map, price, config=config),
-            _job2_crowd_turning(t, order_flow, level3, price),
-            _job3_push_dying(t, order_flow, footprint, divergence, mark),
+            _job2_crowd_turning(t, order_flow, level3, price, config=config),
+            _job3_push_dying(t, order_flow, footprint, divergence, mark,
+                             config=config, now_ts=now_ts),
             _job4_move_stop(t, book, mark, atr, spread, config=config),
             _job5_bomb(t, news, config),
         ) if a]
 
         applied = []
         for a in acts:
-            if _apply(t, a, price):
+            if _apply(t, a, mark, atr=atr, spread=spread, config=config):
                 applied.append(a)
-                t.actions.append({"at": round(price, 2), "cycle": t.cycles, **a})
+                t.actions.append({"at": round(mark, 2), "cycle": t.cycles, **a})
         if any(a["action"] == "CLOSE" for a in applied):
-            _close(esc, t, price, "ESCORT")
+            _close(esc, t, mark, "ESCORT",
+                   now_ts=now_ts, time_stop_min=trade_time_stop_min)
             continue
         reports.append({"side": t.side, "entry": round(t.entry, 2),
                         "target": round(t.target, 2), "stop": round(t.stop, 2),
@@ -403,12 +550,15 @@ def escort_cycle(shot_plan: Dict[str, Any], signal_map: Dict[str, Any],
             "last_finished": esc.done[-1] if esc.done else None}
 
 
-def _apply(t: PaperTrade, a: Dict[str, Any], price: float) -> bool:
+def _apply(t: PaperTrade, a: Dict[str, Any], price: float,
+           atr: float = 0.0, spread: float = 0.0, config: Any = None) -> bool:
     """THE ONE LAW is enforced here: only ever safer."""
     if a["action"] == "CLOSE":
         return True
     if "new_stop" in a:
         ns = _f(a["new_stop"])
+        if abs(ns - t.stop) < 1e-6:
+            return False
         safer = (ns > t.stop) if t.is_buy else (ns < t.stop)
         if not safer:
             return False                      # refuse to widen a stop, ever
@@ -416,6 +566,8 @@ def _apply(t: PaperTrade, a: Dict[str, Any], price: float) -> bool:
         return True
     if "new_target" in a:
         nt = _f(a["new_target"])
+        if abs(nt - t.target) < 1e-6:
+            return False
         nearer = (nt < t.target) if t.is_buy else (nt > t.target)
         if nearer:
             t.target = nt
@@ -426,8 +578,16 @@ def _apply(t: PaperTrade, a: Dict[str, Any], price: float) -> bool:
             return True
         return False
     if a["action"] == "TIGHTEN" and "new_stop" not in a:
-        # pull the stop halfway to price, never past it
+        # pull the stop halfway to price, never past it (and never inside 1.2x ATR on waves)
         ns = (t.stop + price) / 2.0
+        wave_mode = (
+            bool(getattr(config, "STAGE4B_WAVE_TRAIL_ENABLED", False))
+            and not getattr(t, "is_a2_burst", False)
+            and _f(atr) > 0
+        )
+        if wave_mode:
+            min_dist = max(_f(spread) * 3.0, 1.2 * _f(atr))
+            ns = min(ns, price - min_dist) if t.is_buy else max(ns, price + min_dist)
         safer = (ns > t.stop) if t.is_buy else (ns < t.stop)
         if safer:
             t.stop = ns
@@ -435,22 +595,53 @@ def _apply(t: PaperTrade, a: Dict[str, Any], price: float) -> bool:
     return False
 
 
-def _close(esc: EscortBook, t: PaperTrade, price: float, reason: str) -> None:
+def _close(esc: EscortBook, t: PaperTrade, price: float, reason: str,
+           now_ts: Optional[float] = None, time_stop_min: float = TIME_STOP_MIN) -> None:
     t.closed, t.close_reason, t.close_price = True, reason, price
     move = (price - t.entry) if t.is_buy else (t.entry - price)
     risk = abs(t.entry - t.orig_stop) or 1e-9
+    actual_r = move / risk
     # what would have happened with NO escort at all: original target and stop
     naive_tp = (t.peak >= t.orig_target) if t.is_buy else (t.peak <= t.orig_target)
     naive_sl = (t.trough <= t.orig_stop) if t.is_buy else (t.trough >= t.orig_stop)
-    naive_r = 1.0 * (abs(t.orig_target - t.entry) / risk) if naive_tp else (
-        -1.0 if naive_sl else move / risk)
-    esc.done.append({
+    naive_pts = (
+        abs(t.orig_target - t.entry) if naive_tp
+        else (-abs(t.entry - t.orig_stop) if naive_sl else move)
+    )
+    naive_r = naive_pts / risk
+    resolved = bool(naive_tp or naive_sl or reason == "TIME")
+    job_counts: Dict[str, int] = {}
+    for act in t.actions:
+        j_lbl = str(act.get("judge") or f"job_{act.get('job', '?')}")
+        job_counts[j_lbl] = job_counts.get(j_lbl, 0) + 1
+    rec: Dict[str, Any] = {
         "side": t.side, "entry": round(t.entry, 2), "exit": round(price, 2),
+        "orig_target": round(t.orig_target, 2), "orig_stop": round(t.orig_stop, 2),
         "entry_style": t.entry_style, "paper_fill_model": t.paper_fill_model,
-        "reason": reason, "r": round(move / risk, 2), "r_if_left_alone": round(naive_r, 2),
-        "escort_helped": round(move / risk - naive_r, 2),
-        "actions": len(t.actions), "cycles": t.cycles,
-    })
+        "is_a2_burst": bool(getattr(t, "is_a2_burst", False)),
+        "reason": reason,
+        "r": round(actual_r, 2), "r_raw": actual_r, "pts": round(move, 2),
+        "r_if_left_alone": round(naive_r, 2), "pts_if_left_alone": round(naive_pts, 2),
+        "escort_helped": round(actual_r - naive_r, 2),
+        "escort_helped_pts": round(move - naive_pts, 2),
+        "naive_outcome": "TARGET" if naive_tp else ("STOP" if naive_sl else reason),
+        "counterfactual_resolved": resolved,
+        "actions": len(t.actions), "action_jobs": job_counts, "cycles": t.cycles,
+        "opened_ts": t.opened, "closed_ts": now_ts if now_ts is not None else time.time(),
+    }
+    esc.done.append(rec)
+    if not resolved and hasattr(esc, "shadow_naive"):
+        if len(esc.shadow_naive) >= 24:
+            esc.shadow_naive.pop(0)
+        esc.shadow_naive.append({
+            "is_buy": t.is_buy,
+            "entry": t.entry,
+            "orig_target": t.orig_target,
+            "orig_stop": t.orig_stop,
+            "risk": risk,
+            "expires_ts": float(t.opened) + max(60.0, float(time_stop_min) * 60.0),
+            "record": rec,
+        })
     try:
         esc.open.remove(t)
     except ValueError:
