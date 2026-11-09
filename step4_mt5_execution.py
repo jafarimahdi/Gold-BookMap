@@ -502,19 +502,117 @@ class MT5Executor:
             if int(getattr(p, "magic", -1) or -1) == int(self.magic)
         ]
 
+    def _position_id_from_deal(self, deal_id: Optional[int]) -> Optional[int]:
+        """Resolve which POSITION a fill belongs to (authoritative identity).
+
+        Stage X1 (Section #14): MT5 reports the executed DEAL and, separately, the
+        POSITION it created. `order.ticket`, `deal.ticket` and `position.ticket` are
+        three different integers, so a position can never be identified reliably by
+        the order ticket. The deal is the source of truth for "which trade did we
+        just open?".
+        """
+        try:
+            deal_id = int(deal_id)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return None
+        if deal_id <= 0:
+            return None
+        getter = getattr(mt5, "history_deals_get", None)
+        if not callable(getter):
+            return None
+        for kwargs in ({"ticket": deal_id}, {"position": deal_id}):
+            try:
+                deals = getter(**kwargs) or []
+            except Exception:
+                continue
+            for deal in deals:
+                try:
+                    pid = int(getattr(deal, "position_id", 0) or 0)
+                except (TypeError, ValueError):
+                    continue
+                if pid > 0:
+                    return pid
+        return None
+
     def _wait_for_bot_position(self, order_id: Optional[int] = None,
-                               timeout: Optional[float] = None):
-        """Wait briefly for MT5 to expose the newly opened bot position."""
+                               timeout: Optional[float] = None, *,
+                               deal_id: Optional[int] = None,
+                               expect_volume: Optional[float] = None,
+                               not_before_epoch: Optional[float] = None):
+        """Return ONLY the position that THIS fill created -- never a bystander.
+
+        Stage X1 (Section #14). The previous version read
+
+            if order_id is None or ticket == order_id or positions:
+                return position
+
+        three ways wrong: `or positions:` is always truthy so the first bot
+        position was returned regardless of identity; it compared an ORDER ticket
+        against a POSITION ticket (different integers in MT5); and with no identity
+        at all it still returned a position. The caller then stored that ticket via
+        `trade_history.record_entry()`/`record_tca()`, so a stale or unrelated
+        position could be remembered as this entry's trade and every downstream
+        scorecard (`[8c]`/`[8d]`/`[8j]`) inherited a false attribution.
+
+        Resolution order (fail-closed -- no confident candidate means `None`):
+          1. deal -> `position_id` (authoritative),
+          2. position ticket == order ticket,
+          3. exactly ONE position opened at/after `not_before_epoch` whose volume
+             matches `expect_volume` (more than one candidate -> refuse to guess).
+        """
         timeout = (config.EXECUTION_VERIFY_SECONDS if timeout is None else timeout)
         deadline = time.monotonic() + max(0.0, float(timeout))
         last_error = None
         while True:
             try:
                 positions = self._bot_positions()
+                wanted_pid = self._position_id_from_deal(deal_id)
+                want_oid = 0
+                if wanted_pid is not None:
+                    for position in positions:
+                        if int(getattr(position, "ticket", 0) or 0) == wanted_pid:
+                            return position
+                else:
+                    try:
+                        want_oid = int(order_id) if order_id else 0
+                    except (TypeError, ValueError):
+                        want_oid = 0
+                    if want_oid:
+                        for position in positions:
+                            if int(getattr(position, "ticket", 0) or 0) == want_oid:
+                                return position
+                # A KNOWN identity that does not match means "not yet visible" --
+                # never widen the search, or a bystander would be adopted.
+                if wanted_pid is not None or want_oid:
+                    if time.monotonic() >= deadline:
+                        return None
+                    time.sleep(0.2)
+                    continue
+                candidates = []
                 for position in positions:
-                    ticket = getattr(position, "ticket", None)
-                    if order_id is None or ticket == order_id or positions:
-                        return position
+                    try:
+                        p_time = float(getattr(position, "time", 0) or 0)
+                    except (TypeError, ValueError):
+                        p_time = 0.0
+                    if (not_before_epoch is not None and p_time
+                            and p_time < float(not_before_epoch)):
+                        continue
+                    if expect_volume is not None:
+                        try:
+                            p_vol = float(getattr(position, "volume", 0) or 0)
+                        except (TypeError, ValueError):
+                            continue
+                        if abs(p_vol - float(expect_volume)) > 1e-9:
+                            continue
+                    candidates.append(position)
+                if len(candidates) == 1:
+                    return candidates[0]
+                if len(candidates) > 1:
+                    logger.warning(
+                        "STEP 4 X1: %d candidate positions match this entry "
+                        "(order=%s deal=%s) -> refusing to guess.",
+                        len(candidates), order_id, deal_id)
+                    return None
             except Exception as exc:
                 last_error = str(exc)
             if time.monotonic() >= deadline:
@@ -1375,7 +1473,15 @@ class MT5Executor:
             try:
                 timeout = int(getattr(config, "LIMIT_TIMEOUT_SECONDS", 10))
                 time.sleep(min(timeout, 2))
-                pos = self._wait_for_bot_position(timeout=timeout)
+                # Stage X1: identify the fill by deal/order identity, never "first
+                # bot position".
+                pos = self._wait_for_bot_position(
+                    order_id=getattr(result, "order", None),
+                    deal_id=getattr(result, "deal", None),
+                    timeout=timeout,
+                    expect_volume=lot_size,
+                    not_before_epoch=now.timestamp() - 2.0,
+                )
                 if pos:
                     verified_position = pos
                 else:
@@ -1402,7 +1508,13 @@ class MT5Executor:
 
         order_id = getattr(result, "order", None)
         deal_id = getattr(result, "deal", None)
-        verified_position = self._wait_for_bot_position(order_id=order_id)
+        # Stage X1: verify THIS entry (deal -> position_id), not "some bot position".
+        verified_position = self._wait_for_bot_position(
+            order_id=order_id,
+            deal_id=deal_id,
+            expect_volume=lot_size,
+            not_before_epoch=now.timestamp() - 2.0,
+        )
         if verified_position is None:
             reason = (f"order reported success but bot position was not found "
                       f"within {config.EXECUTION_VERIFY_SECONDS}s")
