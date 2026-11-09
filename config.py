@@ -775,7 +775,14 @@ def _refresh() -> None:
     g["AI_PARSE_KEYWORD_FALLBACK"] = _fget("AI_PARSE_KEYWORD_FALLBACK", "0") == "1"
     g["AI_PARSE_MIN_KEYWORD_CONF"] = _ffloat("AI_PARSE_MIN_KEYWORD_CONF", 60.0)
     g["AI_CACHE_KEY_V2"] = _fget("AI_CACHE_KEY_V2", "1") == "1"
-    g["AI_MAX_PROMPT_BARS"] = max(5, min(50, _fint("AI_MAX_PROMPT_BARS", 15)))
+    # Stage D2 (Section #13) -- scalper candle window.
+    # A 3m scalper is graded on a +3/+6/+9/+12 min clock, so the LLM briefing must not
+    # look back 45-60 min (20 bars) of a market that has already moved on.
+    # AI_PROMPT_BARS wins when present in `.env`; the legacy AI_MAX_PROMPT_BARS stays
+    # honoured (no `.env` breaks). Floor lowered 5 -> 3 so a 3-4 bar window is reachable.
+    g["AI_PROMPT_BARS"] = max(3, min(50, _fint_first(["AI_PROMPT_BARS", "AI_MAX_PROMPT_BARS"], 4)))
+    g["AI_MAX_PROMPT_BARS"] = g["AI_PROMPT_BARS"]  # legacy alias, kept in sync
+
     g["AI_MAX_HEADLINES"] = max(1, min(15, _fint("AI_MAX_HEADLINES", 5)))
     g["AI_TEMPERATURE"] = max(0.0, min(1.0, _ffloat("AI_TEMPERATURE", 0.2)))
     g["AI_JSON_MODE_ENABLED"] = _fget("AI_JSON_MODE_ENABLED", "1") == "1"

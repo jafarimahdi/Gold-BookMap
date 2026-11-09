@@ -636,10 +636,10 @@ class AIDecisionEngine:
         from step2_market_analysis import snapshot_to_dict
         from session import session_context
         try:
-            max_bars = int(getattr(config, "AI_MAX_PROMPT_BARS", 15))
+            max_bars = int(getattr(config, "AI_MAX_PROMPT_BARS", 4))  # Stage D2: 4 bars = 12 min on M3
             max_headlines = int(getattr(config, "AI_MAX_HEADLINES", 5))
         except Exception:
-            max_bars = 15
+            max_bars = 4
             max_headlines = 5
 
         payload = snapshot_to_dict(snapshot)

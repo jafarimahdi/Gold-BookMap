@@ -7584,7 +7584,8 @@ def analyze_market(market_data: Dict[str, Any],
 
     _recent_bars: Dict[str, Any] = {}
     try:
-        _max_b = max(5, min(50, int(getattr(config, "AI_MAX_PROMPT_BARS", 15) or 15)))
+        # Stage D2 (Section #13): scalper window -- floor 3, default 4 bars (= 12 min on M3).
+        _max_b = max(3, min(50, int(getattr(config, "AI_MAX_PROMPT_BARS", 4) or 4)))
         if candles is not None and hasattr(candles, "tail") and len(candles) > 0:
             _tail_df = candles.tail(_max_b)
             _bar_rows: List[Dict[str, Any]] = []
