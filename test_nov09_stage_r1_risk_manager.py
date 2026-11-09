@@ -245,6 +245,16 @@ def test_stage_r1_raw_replay_scorecard_8j_proves_capital_protection(tmp_path, mo
     capital protection across both $10k and $100k DEMO accounts without touching repo data.
     """
     monkeypatch.setattr(config, "DATA_DIR", tmp_path, raising=False)
+    monkeypatch.setattr(config, "LOT_SIZE", 0.1, raising=False)
+    monkeypatch.setattr(config, "CONTRACT_SIZE", 100.0, raising=False)
+    monkeypatch.setattr(config, "DAILY_LOSS_LIMIT_PCT", 3.0, raising=False)
+    monkeypatch.setattr(config, "MAX_DRAWDOWN_PCT", 10.0, raising=False)
+    monkeypatch.setattr(config, "STAGE4R_POST_EXIT_COOLDOWN_ENABLED", True, raising=False)
+    monkeypatch.setattr(config, "STAGE4R_POST_EXIT_COOLDOWN_MINUTES", 3.0, raising=False)
+    monkeypatch.setattr(config, "STAGE4R_DAILY_LOSS_BREAKER_ENABLED", True, raising=False)
+    monkeypatch.setattr(config, "STAGE4R_DAILY_MAX_LOSS_PTS", 12.0, raising=False)
+    monkeypatch.setattr(config, "RISK_ENFORCE_STAGE4R_PTS", True, raising=False)
+    monkeypatch.setattr(config, "RISK_SESSION_ROLL_MODE", "cme_18et", raising=False)
     t0 = datetime(2026, 11, 5, 13, 0, 0, tzinfo=timezone.utc).timestamp()
 
     def _mk_go(idx: int, pts: float) -> dict:
