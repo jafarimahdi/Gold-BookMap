@@ -3940,6 +3940,211 @@ def synthesize_multi_day(results: List[Dict[str, Any]]) -> Tuple[str, str, Dict[
             f"Avg_Span={avg_span:.1f}s | Near_Corridor_Share={near_pct:.1f}% ({tot_near}/{tot_oe})"
         )
 
+    # [8j] Section #11 (Stage R1): Account Risk Manager & Hard Safety Caps Scorecard
+    lines.append("\n[8j] SECTION #11: ACCOUNT RISK MANAGER & HARD SAFETY CAPS SCORECARD (Stage R1)")
+    try:
+        import risk_manager as _rm_mod
+
+        lot_cfg = max(0.01, float(getattr(config, "LOT_SIZE", 0.1) or 0.1))
+        csz_cfg = max(1.0, float(getattr(config, "CONTRACT_SIZE", 100.0) or 100.0))
+        dl_pct_cfg = max(0.0, float(getattr(config, "DAILY_LOSS_LIMIT_PCT", 3.0) or 0.0))
+        dd_pct_cfg = max(0.0, float(getattr(config, "MAX_DRAWDOWN_PCT", 10.0) or 0.0))
+        roll_cfg = str(getattr(config, "RISK_SESSION_ROLL_MODE", "cme_18et") or "cme_18et")
+        enf_s4r = bool(getattr(config, "RISK_ENFORCE_STAGE4R_PTS", True))
+        inc_flt = bool(getattr(config, "RISK_INCLUDE_FLOATING_LOSS", True))
+        dl_pts_eff = dl_live if enf_s4r else 0.0
+
+        lines.append(
+            f"  Active Risk Config: ROLL={roll_cfg} (18:00 ET CME Globex) | "
+            f"DAILY_LOSS_PCT={dl_pct_cfg:.1f}% | STAGE4R_PTS={dl_pts_eff:.1f}pt (enforce={enf_s4r}) | "
+            f"MAX_DD_PCT={dd_pct_cfg:.1f}% (MANUAL_RESET) | FLOAT_LOSS={inc_flt} | LOT={lot_cfg:.2f}"
+        )
+
+        # Count GO cycles in the 22:00..24:00 UTC (18:00..19:00/20:00 ET) split-brain window
+        split_win_go = 0
+        cme_sessions_seen: set = set()
+        for r_d in ok_days:
+            for c in r_d.get("cycles") or []:
+                if c.get("error"):
+                    continue
+                dt_c = c.get("dt_utc")
+                if isinstance(dt_c, datetime):
+                    _, _, sk = _rm_mod.session_bounds_utc(dt_c, mode="cme_18et")
+                    cme_sessions_seen.add(sk)
+                    if (
+                        c.get("direction") in ("BUY", "SELL")
+                        and float(c.get("confidence") or 0.0) >= conf_thr
+                        and str(c.get("shot_action") or "").upper() == "GO"
+                        and dt_c.hour >= 22
+                    ):
+                        split_win_go += 1
+
+        def _sim_risk_profile(
+            start_eq: float,
+            dl_pct: float,
+            dd_pct: float,
+            dl_pts: float,
+            roll_mode: str,
+        ) -> Dict[str, Any]:
+            with tempfile.TemporaryDirectory() as td:
+                p_dir = Path(td)
+                mem_path = p_dir / "trade_memory.json"
+                closed_recs: List[Dict[str, Any]] = []
+                orig_mt5 = _rm_mod.mt5
+                orig_roll = getattr(config, "RISK_SESSION_ROLL_MODE", "cme_18et")
+                _rm_mod.mt5 = None
+                setattr(config, "RISK_SESSION_ROLL_MODE", roll_mode)
+                try:
+                    rm = _rm_mod.RiskManager(
+                        daily_loss_pct=dl_pct,
+                        max_drawdown_pct=dd_pct,
+                        max_daily_loss_pts=dl_pts,
+                        state_file=p_dir / "risk_state.json",
+                    )
+                    cur_eq = float(start_eq)
+                    hwm_eq = float(start_eq)
+                    max_dd_pct = 0.0
+                    tot_pts = 0.0
+                    trades_n = 0
+                    wins_n = 0
+                    losses_n = 0
+                    blocked_halt = 0
+                    halted_sess: set = set()
+                    tkt_seq = 0
+
+                    for r_d in ok_days:
+                        busy_open_until = -1.0
+                        busy_cd_until = -1.0
+                        pending_close: Optional[Tuple[int, float, float, float]] = None
+
+                        def _flush_close() -> None:
+                            nonlocal pending_close, cur_eq, hwm_eq, max_dd_pct
+                            if pending_close is None:
+                                return
+                            tk_i, ex_t, p_v, u_v = pending_close
+                            closed_recs.append({
+                                "ticket": str(tk_i),
+                                "closed_ts": ex_t,
+                                "gain_pts": round(p_v, 4),
+                                "pnl_usd_est": round(u_v, 4),
+                            })
+                            mem_path.write_text(json.dumps({"closed": closed_recs}), encoding="utf-8")
+                            cur_eq += u_v
+                            hwm_eq = max(hwm_eq, cur_eq)
+                            if hwm_eq > 0.0:
+                                max_dd_pct = max(max_dd_pct, (hwm_eq - cur_eq) / hwm_eq * 100.0)
+                            pending_close = None
+
+                        for c in r_d.get("cycles") or []:
+                            if c.get("error"):
+                                continue
+                            if (
+                                c.get("direction") not in ("BUY", "SELL")
+                                or float(c.get("confidence") or 0.0) < conf_thr
+                                or str(c.get("shot_action") or "").upper() != "GO"
+                            ):
+                                continue
+                            pts_val = c.get("shot_pm4b_pts")
+                            ex_ep = c.get("shot_pm4b_exit_ep")
+                            if pts_val is None or ex_ep is None:
+                                continue
+                            dt_obj = c.get("dt_utc")
+                            ent_ep = float(
+                                c.get("entry_ep")
+                                if c.get("entry_ep") is not None
+                                else (dt_obj.timestamp() if dt_obj else 0.0)
+                            )
+                            if pending_close is not None and ent_ep >= pending_close[1]:
+                                _flush_close()
+                            if ent_ep < busy_open_until or ent_ep < busy_cd_until:
+                                continue
+                            dt_ent = datetime.fromtimestamp(ent_ep, tz=timezone.utc)
+                            ok_rm, _ = rm.check(equity=cur_eq, now=dt_ent)
+                            if not ok_rm:
+                                blocked_halt += 1
+                                halted_sess.add(_rm_mod.session_bounds_utc(dt_ent, mode=roll_mode)[2])
+                                continue
+
+                            p_val = float(pts_val)
+                            u_val = p_val * lot_cfg * csz_cfg
+                            tkt_seq += 1
+                            trades_n += 1
+                            tot_pts += p_val
+                            if p_val > 0:
+                                wins_n += 1
+                            elif p_val < 0:
+                                losses_n += 1
+                            busy_open_until = float(ex_ep)
+                            busy_cd_until = float(ex_ep) + max(0.0, float(cd_live)) * 60.0
+                            pending_close = (tkt_seq, float(ex_ep), p_val, u_val)
+
+                        if pending_close is not None:
+                            last_ex_ep = pending_close[1]
+                            _flush_close()
+                            ok_end, _ = rm.check(
+                                equity=cur_eq,
+                                now=datetime.fromtimestamp(last_ex_ep + 1.0, tz=timezone.utc),
+                            )
+                            if not ok_end:
+                                halted_sess.add(
+                                    _rm_mod.session_bounds_utc(
+                                        datetime.fromtimestamp(last_ex_ep + 1.0, tz=timezone.utc),
+                                        mode=roll_mode,
+                                    )[2]
+                                )
+
+                    st_final = rm.load_state()
+                    return {
+                        "trades": trades_n,
+                        "wl": f"{wins_n}/{losses_n}",
+                        "pts": tot_pts,
+                        "net_usd": cur_eq - start_eq,
+                        "end_eq": cur_eq,
+                        "hwm_eq": float(st_final.get("peak_equity", hwm_eq) or hwm_eq),
+                        "max_dd_pct": max_dd_pct,
+                        "blocked": blocked_halt,
+                        "halted_n": len(halted_sess),
+                        "kill_latched": bool(st_final.get("kill_switch")),
+                    }
+                finally:
+                    _rm_mod.mt5 = orig_mt5
+                    setattr(config, "RISK_SESSION_ROLL_MODE", orig_roll)
+
+        if go_cycles:
+            prof_rows = [
+                ("1) Unprotected ($10k, No Risk Caps)", _sim_risk_profile(10_000.0, 0.0, 0.0, 0.0, "utc")),
+                ("2) Legacy %-Only ($100k DEMO, 3% UTC, 0pt)", _sim_risk_profile(100_000.0, dl_pct_cfg, dd_pct_cfg, 0.0, "utc")),
+                ("3) Stage-R1 Unified ($10k, 18ET + 12pt)", _sim_risk_profile(10_000.0, dl_pct_cfg, dd_pct_cfg, dl_pts_eff, roll_cfg)),
+                ("4) Stage-R1 Unified ($100k DEMO, 18ET + 12pt)", _sim_risk_profile(100_000.0, dl_pct_cfg, dd_pct_cfg, dl_pts_eff, roll_cfg)),
+            ]
+            lines.append(
+                f"  {'RISK PROFILE':<44} {'TRD':>4} {'W/L':>7} {'NET_PTS':>9} {'NET_USD':>10} "
+                f"{'MAX_DD%':>8} {'HALT_S':>7} {'BLK_GO':>7} {'PEAK_EQ':>10}"
+            )
+            lines.append("  " + "-" * 114)
+            for lbl_r, sr in prof_rows:
+                lines.append(
+                    f"  {lbl_r:<44} {sr['trades']:>4} {sr['wl']:>7} {sr['pts']:>+9.1f} "
+                    f"{sr['net_usd']:>+10.2f} {sr['max_dd_pct']:>7.2f}% "
+                    f"{sr['halted_n']:>4}/{max(1, len(cme_sessions_seen)):<2} {sr['blocked']:>7} "
+                    f"${sr['hwm_eq']:>9.2f}"
+                )
+            unp = prof_rows[0][1]
+            sr1 = prof_rows[2][1]
+            saved_pts = sr1["pts"] - unp["pts"]
+            saved_usd = sr1["net_usd"] - unp["net_usd"]
+            lines.append(
+                f"  Stage-R1 Capital Protection vs Unprotected: {saved_pts:+.1f} pts (${saved_usd:+.2f}) | "
+                f"CME_Sessions={len(cme_sessions_seen)} | Split_22-24Z_GO={split_win_go} | "
+                f"KillSwitch_Latched={sr1['kill_latched']}"
+            )
+        else:
+            lines.append(
+                f"  0 SHOOTING GO cycles on sample | CME_Sessions={len(cme_sessions_seen)} | Split_22-24Z_GO={split_win_go}"
+            )
+    except Exception as exc_rm:
+        lines.append(f"  [8j] Risk scorecard error: {exc_rm}")
+
     # [9] Stage 1: Timeframe-linked 1..4-bar path & Market Trick Detector
     lines.append(
         f"\n[9] {tf_lbl} BAR-BY-BAR PATH & MARKET TRICK DETECTOR "

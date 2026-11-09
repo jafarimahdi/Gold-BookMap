@@ -642,6 +642,14 @@ def _refresh() -> None:
     g["HEATMAP_WEAK_SCORE"] = _fint("HEATMAP_WEAK_SCORE", 5000)
     g["DAILY_LOSS_LIMIT_PCT"] = _ffloat("DAILY_LOSS_LIMIT_PCT", 3.0)
     g["MAX_DRAWDOWN_PCT"] = _ffloat("MAX_DRAWDOWN_PCT", 10.0)
+    # Section #11 (Stage R1): CME Globex 18:00 ET session roll + Stage-4R points
+    # circuit-breaker alignment + asymmetric open bot floating-loss prudence.
+    _roll_mode = _fget("RISK_SESSION_ROLL_MODE", "cme_18et").strip().lower()
+    g["RISK_SESSION_ROLL_MODE"] = (
+        _roll_mode if _roll_mode in ("cme_18et", "local", "utc") else "cme_18et"
+    )
+    g["RISK_ENFORCE_STAGE4R_PTS"] = _fget("RISK_ENFORCE_STAGE4R_PTS", "1") == "1"
+    g["RISK_INCLUDE_FLOATING_LOSS"] = _fget("RISK_INCLUDE_FLOATING_LOSS", "1") == "1"
 
     g["RECORD_DATA"] = _fget("RECORD_DATA", "0") == "1"
     g["REPLAY_FILE"] = _fget("REPLAY_FILE", "")
