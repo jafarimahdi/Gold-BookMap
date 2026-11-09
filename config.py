@@ -768,6 +768,13 @@ def _refresh() -> None:
     g["AI_FALLBACK_STRENGTH"] = _ffloat("AI_FALLBACK_STRENGTH", 35.0)
     g["AI_FALLBACK_CONFIDENCE"] = _ffloat("AI_FALLBACK_CONFIDENCE", 70.0)
     g["AI_CACHE_MINUTES"] = _fint("AI_CACHE_MINUTES", 10)
+    # Stage D1 (Section #13): Doorman parse + cache hardening
+    # AI_PARSE_KEYWORD_FALLBACK=0 -> a response without valid JSON is HOLD (fail-closed).
+    # AI_PARSE_MIN_KEYWORD_CONF   -> even with the legacy keyword path, BUY/SELL needs this %.
+    # AI_CACHE_KEY_V2=1           -> cache key also covers news perimeter + signal confidence.
+    g["AI_PARSE_KEYWORD_FALLBACK"] = _fget("AI_PARSE_KEYWORD_FALLBACK", "0") == "1"
+    g["AI_PARSE_MIN_KEYWORD_CONF"] = _ffloat("AI_PARSE_MIN_KEYWORD_CONF", 60.0)
+    g["AI_CACHE_KEY_V2"] = _fget("AI_CACHE_KEY_V2", "1") == "1"
     g["AI_MAX_PROMPT_BARS"] = max(5, min(50, _fint("AI_MAX_PROMPT_BARS", 15)))
     g["AI_MAX_HEADLINES"] = max(1, min(15, _fint("AI_MAX_HEADLINES", 5)))
     g["AI_TEMPERATURE"] = max(0.0, min(1.0, _ffloat("AI_TEMPERATURE", 0.2)))

@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import copy
 import logging
 import math
 import os
@@ -838,11 +839,35 @@ class AIDecisionEngine:
         )
 
     def _prompt_hash(self, snapshot) -> str:
-        """Hash of key market state for caching"""
+        """Hash of key market state for caching.
+
+        Stage D1: the key now also carries the WORLD news perimeter (impact level,
+        minutes bucket, sentiment) and the signal confidence, so a cached decision
+        can never be re-used across a materially different news/edge state (e.g. a
+        `QUIET` cycle and a `WARNING` cycle 3 minutes later, or a HIGH event 5 min
+        away vs 200 min away). `AI_CACHE_KEY_V2=0` restores the legacy 5-field key.
+        """
         try:
-            key = f"{snapshot.price:.1f}_{snapshot.signal_direction}_{snapshot.signal_strength:.0f}_{snapshot.regime}_{snapshot.news.news_state}"
+            base = (f"{snapshot.price:.1f}_{snapshot.signal_direction}_"
+                    f"{snapshot.signal_strength:.0f}_{snapshot.regime}")
+            news = getattr(snapshot, "news", None)
+            state = getattr(news, "news_state", "")
+            if not bool(getattr(config, "AI_CACHE_KEY_V2", True)):
+                return hashlib.md5(f"{base}_{state}".encode()).hexdigest()[:8]
+            conf = float(getattr(snapshot, "signal_confidence", 0.0) or 0.0)
+            impact = str(getattr(news, "impact_level", "") or "").upper()
+            mte = float(getattr(news, "minutes_to_next_event", 0.0) or 0.0)
+            hi = getattr(news, "high_impact_minutes", None)
+            sent = float(getattr(news, "sentiment_score", 0.0) or 0.0)
+            # 5-minute buckets: a decision may be re-used inside a bar-scale window,
+            # never across a perimeter transition.
+            mte_b = int(round(mte / 5.0))
+            hi_b = "-" if hi is None else str(int(round(float(hi) / 5.0)))
+            sent_b = int(round(sent * 20.0))
+            key = (f"{base}_{state}_{impact}_{mte_b}_{hi_b}_{sent_b}_"
+                   f"{conf:.0f}")
             return hashlib.md5(key.encode()).hexdigest()[:8]
-        except:
+        except Exception:
             return ""
 
     def _check_cache(self, snapshot) -> Optional[Decision]:
@@ -861,7 +886,13 @@ class AIDecisionEngine:
                         h = self._prompt_hash(snapshot)
                         if h == cached["hash"] and cached["decision"]:
                             logger.info("STEP 3: Using cached AI decision (age %.1f min, hash %s)", age_min, h)
-                            return cached["decision"]
+                            # Stage D1: hand out a COPY. Returning the cached object let any
+                            # downstream mutation (action/confidence rewrite) silently edit the
+                            # cache entry and be replayed into later cycles.
+                            try:
+                                return copy.copy(cached["decision"])
+                            except Exception:
+                                return cached["decision"]
         except:
             pass
         return None
@@ -1469,34 +1500,81 @@ class AIDecisionEngine:
 
     # ------------------------------------------------------------------ #
     @staticmethod
+    def _extract_json_object(text: str):
+        """Return the first parseable JSON object in `text` (strict, then balanced scan)."""
+        raw = (text or "").strip()
+        if not raw:
+            return None
+        try:
+            obj = json.loads(raw)
+            return obj if isinstance(obj, dict) else None
+        except (json.JSONDecodeError, ValueError):
+            pass
+        # Balanced-brace scan: a greedy `\{.*\}` match swallowed prose + two objects.
+        start = raw.find("{")
+        while start != -1:
+            depth = 0
+            for idx in range(start, len(raw)):
+                ch = raw[idx]
+                if ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        try:
+                            obj = json.loads(raw[start:idx + 1])
+                            if isinstance(obj, dict):
+                                return obj
+                        except (json.JSONDecodeError, ValueError):
+                            pass
+                        start = raw.find("{", idx + 1)
+                        break
+            else:
+                return None
+        return None
+
+    @staticmethod
     def _parse_response(text: str) -> tuple:
-        """Parse the AI's JSON response defensively."""
+        """Parse the AI response defensively (Stage D1: fail-closed by default).
+
+        The legacy parser guessed an action from any occurrence of the word `BUY`
+        (e.g. a refusal that says "I would NOT buy here") and scraped confidence from
+        any percentage in the prose, so unparseable output could become an unvalidated
+        trade. Now a response without a valid JSON object fails closed to HOLD unless
+        `AI_PARSE_KEYWORD_FALLBACK=1`, and even then a keyword-derived action needs an
+        explicit `confidence: N` mention of at least `AI_PARSE_MIN_KEYWORD_CONF`.
+        """
         action, confidence, rationale = "HOLD", 0.0, ""
 
-        m = re.search(r"\{.*\}", text, re.DOTALL)
-        if m:
+        obj = AIDecisionEngine._extract_json_object(text or "")
+        if obj is not None:
+            action = str(obj.get("action", "HOLD")).upper()
             try:
-                obj = json.loads(m.group(0))
-                action = str(obj.get("action", "HOLD")).upper()
-                try:
-                    confidence = float(obj.get("confidence", 0.0))
-                except (TypeError, ValueError):
-                    confidence = 0.0
-                rationale = str(obj.get("rationale", ""))
-                return AIDecisionEngine._sanitize(action, confidence, rationale)
-            except json.JSONDecodeError:
-                pass
+                confidence = float(obj.get("confidence", 0.0))
+            except (TypeError, ValueError):
+                confidence = 0.0
+            rationale = str(obj.get("rationale", ""))
+            return AIDecisionEngine._sanitize(action, confidence, rationale)
 
-        upper = text.upper()
-        if "BUY" in upper:
-            action = "BUY"
-        elif "SELL" in upper:
-            action = "SELL"
-        else:
-            action = "HOLD"
-        pct = re.search(r"(\d{1,3})\s*%", text)
-        if pct:
-            confidence = float(pct.group(1))
+        if not bool(getattr(config, "AI_PARSE_KEYWORD_FALLBACK", False)):
+            return AIDecisionEngine._sanitize(
+                "HOLD", 0.0,
+                f"unparseable AI response -> fail-closed HOLD ({(text or '')[:120]})",
+            )
+
+        upper = (text or "").upper()
+        action = "BUY" if "BUY" in upper else ("SELL" if "SELL" in upper else "HOLD")
+        # Only an EXPLICIT confidence label may set a number -- never a random percentage.
+        mc = re.search(r"confidence\D{0,12}(\d{1,3})", text or "", re.IGNORECASE)
+        if mc:
+            confidence = float(mc.group(1))
+        min_conf = float(getattr(config, "AI_PARSE_MIN_KEYWORD_CONF", 60.0) or 0.0)
+        if action != "HOLD" and confidence < min_conf:
+            return AIDecisionEngine._sanitize(
+                "HOLD", 0.0,
+                (f"keyword-derived {action} at {confidence:.0f}% < {min_conf:.0f}% -> "
+                 f"fail-closed HOLD"),
+            )
         return AIDecisionEngine._sanitize(action, confidence, rationale)
 
     @staticmethod
