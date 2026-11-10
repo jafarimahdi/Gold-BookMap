@@ -1621,15 +1621,11 @@ The committed `4f71043` follow-up supersedes the three audit-tool findings above
 
 ---
 
-## Check-in stamp — `2026-11-09 17:45 CET` `replay-31` (`3,042` Cycles) VERIFIES `Stage N2` — `Bell_Share = 33.5%` (target `33.3%`) proves `--every 60` fits `M3`
+## Check-in stamp — `2026-11-09 17:45 CET` `replay-31` VERIFIES `Stage N2` (`Bell_Share=33.5%` vs target `33.3%` -> `--every 60` fits `M3`)
 
-- **Cadence self-check answers the owner's question with a number, not a hope:** `[8e]` line 1 now ends with `Bell_Share=33.5%` (`Bell(:00)=1,018` vs `Serve(:01/:02)=2,024`, total `3,042`). A `60s` replay cadence on a `3`-minute chart must split exactly `1 Bell : 2 Serve` = `33.3%`; measuring `33.5%` over `3,042` cycles confirms the sampling grid sits on `:00/:01/:02` of every bar. If the grid ever drifted, this number moves loudly (e.g. a `100%` Bell share means one sample per bar).
-- **`Stage N2` install verified clean:** `[8k]` still renders (`DEADBAND=0.15 | FULL_TRUST_AT=0.60 | MACRO_RISK_CONFIRM=True`, `macro_series_present=0 | news_headlines=0 | news_events=0` -> `WORLD` votes `0` offline), and the unchanged tape behaves identically: `11-03` (`629` cyc, `15` SIG, `FIX -59.2`, `PM -75.1`), `11-04` (`739`, `9`, `+60.7`, `+7.0`), `11-05` (`784`, `30`, `+4.1`, `-66.0`), `11-06` (`427`, `21`, `-87.1`, `-34.7`) — **byte-identical to `replay-29`/`-30`**.
-- **The only movement is `11-09` growing again while the market is open** (`PRINTS 32,374 -> 39,520`, `MBO 1.76M -> 2.09M`, `CYC 393 -> 463`, signals unchanged at `9`): the **same `33` `SHOOTING GO` entries re-priced** because three forward paths finally completed inside the tape — `[8c] Planned 9/24 -201.6 -> 12/21 -185.4`, `PM 1.5xATR -198.9 -> -178.7 (45.5% WR)`, `[8d] Stage-4R 3/5 -40.2 -> 4/4 -32.7 (PF 0.40, POS_D 1/4)`, and `11-09` alone `-1.0 -> +6.5` (`2/0`). `[8h]` `EOD=1` exit disappeared (the trade's forward path now exists), `TIME 3 -> 4`; Passive-Limit Shadow unchanged at `Filled=10/11 -> +10.0 pts` vs `Aggr_Market -83.4` (`+93.4 pts` edge).
-- **Method note recorded for all future replays:** a replay that runs **while the market is open** will always re-price the current day's tail; only days whose raw files are closed are usable as byte-exact regression witnesses. Compare `[8c]`/`[8d]`/`[8h]` on `11-03..11-06` (or on a fully closed sample) before ever attributing a delta to code.
-- **Roadmap:** `12/14` SEALED (`#1`–`#12`, with `Stage N1` + `Stage N2` hardening) -> NEXT: Sections `#13` (Step 3 AI Doorman) + `#14` (Step 4 MT5 Executor) and the Evening Audit to reach `14/14`.
-
----
+- `[8e]` cadence self-check: `Bell(:00)=1,018` vs `Serve(:01/:02)=2,024`; `[8k]` still renders (`DEADBAND=0.15 / FULL_TRUST_AT=0.60 / MACRO_RISK_CONFIRM=True`, WORLD votes `0` offline); `11-03..11-06` unchanged (`629/739/784/427` cyc, `15/9/30/21` SIG).
+- **Only movement:** `11-09` growing while the market is open (`32,374 -> 39,520` prints, `393 -> 463` cyc, same `9` signals) -- identical entries, re-priced tail. **Method note (permanent):** a replay run while the market is open always re-prices the live day; only closed days are witness-grade.
+- **Roadmap at that moment:** `12/14` SEALED -> `#13` + `#14` + Evening Audit.
 
 ## Check-in stamp — `2026-11-09 18:20 CET` Section `#13` (Step 3 Doorman) Manager Check & Isolated `Stage D1` Parse + Cache Hardening Installed
 
@@ -1742,9 +1738,12 @@ The committed `4f71043` follow-up supersedes the three audit-tool findings above
 3. **NEVER STOP BOOKMAP / THE PC WHILE A POSITION IS OPEN (permanent safety rule):** with a dead feed, Step 5 monitoring, the PM trails, the Escort and every exit read a frozen price and cannot protect the position. Check `data/pm_state.json` before any restart -- only `_flow` means flat and safe. Owner follows this; it is now law.
 4. **CLOSED-MARKET ARTIFACT FOOTPRINT IS BOUNDED (receipts):** `decisions_log.csv` trimmed to `DECISIONS_LOG_MAX_ROWS=5000` (`maintenance.trim_csvs`); `snapshots_history.jsonl` rotates at `>50 MB` (`main.py:1125`); `logs/trading_*.log` deleted after `LOG_RETENTION_DAYS` (`maintenance.rotate_logs`); `market_snapshot.json` overwritten per cycle. The one unbounded-by-design file is the per-day mirror `data/decisions_YYYYMMDD.csv` (`24k A2`, `main.py:988`): a night of closed-market cycles adds `NEUTRAL 0.0` rows that `audit_day.py:1803` classifies as **"SKIPPED before the executor"** -- honest noise in a count, never a fake signal.
 5. **VERIFICATION REPLAYS ARE PINNED BY DATE, NOT DISCOVERED (`2026-11-10`):** `tools/raw_replay.py --days N` (default `11`, `:4293`) auto-discovers the newest raw folders, so the moment BookMap writes a new day the window silently shifts (`11-03..11-09` -> `11-04..11-10`) and every scorecard moves because the DAYS changed, not the code. Witness replays must pin the days: `--dates 2026-11-03,2026-11-04,2026-11-05,2026-11-06,2026-11-09` (`:4290`). `--days N` stays for exploratory runs only.
-6. **PATCH DELIVERY LAW (my process failure, recorded so it cannot repeat):** a patch is presentable only after `git apply --check` **and** `git apply` + `cmp` per file inside a clean worktree of a commit the owner actually has. My shadow branch is not evidence. A Book edit made after a patch ships rides only inside the next patch generated from the owner's base -- never as an undelivered standalone commit. Every Book file keeps LF endings, no trailing blank line at EOF, and its expected `wc -l` is stated before the owner applies.
+6. **PATCH DELIVERY LAW (my process failure, recorded so it cannot repeat):** a patch is presentable only after `git apply --check` **and** `git apply` + `cmp` per file inside a clean worktree of a commit the owner actually has. My shadow branch is not evidence. A Book edit made after a patch ships rides only inside the next patch generated from the owner's base -- never as an undelivered standalone commit. Every Book file keeps LF endings, no trailing blank line at EOF, and its expected `wc -l` is stated before the owner applies. **Anchor rule added `2026-11-10` (this failure happened again):** the base commit for a patch is **the commit whose `HOLY_BOOK.md` blob equals the blob on the owner's `origin` HEAD** -- verify with `git rev-parse <owner_head>:HOLY_BOOK.md` and match it against a shadow commit, never assume "the last code-shipping commit". A Book patch applied after another Book patch moves the blob, so `git diff <old-code-commit> HEAD` will fail at `HOLY_BOOK.md:<line>` even when every code hunk is fine (`git apply` is atomic -> nothing lands).
 
 7. **ONE VERSION EVERYWHERE — WORKSPACE = OWNER'S PC = GITHUB (owner's instruction `2026-11-10`):** the app version is a **single fact**, never three. After every stage there must be exactly ONE commit that is simultaneously (a) the head of my shadow workspace, (b) `HEAD` of the owner's `/a/gitHub/Gold-BookMap` working tree, and (c) `origin/shadow-only-review` on `https://github.com/jafarimahdi/Gold-BookMap`. A stage is not "installed" until all three agree; a Book edit is not "done" until it is in the next patch (delivery law `§6`). **Verification is by content hash, not by eyeball:** the blob SHA (`git rev-parse <commit>:<path>`, i.e. `git hash-object <path>`) of every changed file must be identical in all three places -- blob SHAs are content hashes, so equal SHA = byte-identical file, LF endings included. **I verify the GitHub side myself** from the public API (`https://api.github.com/repos/jafarimahdi/Gold-BookMap/commits/shadow-only-review`) at every check-in and quote the remote `sha`, `tree`, `stats` and per-file blob SHAs in the report; the owner verifies his own side with `git log --oneline -1` + `git status -sb` + `git diff origin/shadow-only-review --stat` (must be empty). Divergence is a **stop-the-line** condition: never patch, never replay, never start the loop on a version that is not identical in all three places.
+
+8. **ONE NOTEBOOK — THE HOLY BOOK IS THE ONLY PLACE FOR NOTES (owner's instruction `2026-11-10`):** every change, receipt, audit finding, runbook, to-do list, x-ray, manager-checkup and status note lives **only in `HOLY_BOOK.md`**. No side `.md` files, no separate report files, no `TODO.md` / `STATUS.md` / `MORNING.md` — they get deleted and their content folded into the Book (the three such files created on `2026-11-10` were removed; their content is in the `Morning runbook`, `Tri-sync receipt` and `X-Ray & Manager Checkup` sections of this Book). The nightly deliverables remain what they always were: **one patch** plus, when asked, the replay `.txt` reports that `tools/raw_replay.py` itself writes. Rationale: one notebook cannot contradict itself, and a fact that lives in two files is a fact that will someday live in two versions.
+
 
 ---
 
@@ -1817,3 +1816,173 @@ cd /a/gitHub/Gold-BookMap
 git fetch -q && git log --oneline -1 && git status -sb && git diff origin/shadow-only-review --stat
 # expect the same commit as the remote, no ahead/behind, and an EMPTY diff
 ```
+
+---
+
+## Tri-sync CONFIRMED — `2026-11-10` law §7 first live run (Book patch `73e2245`)
+
+The owner applied `nov10_holybook_sync_law.patch` (`14,946` B, SHA-256 `973a21ce90dadfb6a1902324279fc13f7fa590454f4bc934717fa0f317da8ffc`) on top of `8584d3b`: `1` file, `+66/-6`, pushed **`8584d3b..73e2245`**, Book **`1819`** lines as stated.
+
+| Place | Identity | Proof |
+|---|---|---|
+| GitHub `origin/shadow-only-review` | **`73e22454947457b120c0da343a94ae8c0bd7715f`**, tree `fc9c6d599772ad94be5446628ecf967600e6c6f6` | public API read at check-in |
+| Owner's PC `HEAD` | same commit, `HEAD -> shadow-only-review, origin/shadow-only-review` | owner's `git log`/`git push` receipt |
+| My workspace `HEAD` | `ec8a037` (Book text), content of `HOLY_BOOK.md` = **`a19ce93375059c4b6cc9db99cfcc33be6dd236e7`** | `git rev-parse` + `git hash-object` |
+
+**Blob SHA `a19ce93375059c4b6cc9db99cfcc33be6dd236e7` is identical in all three places** -- GitHub's blob, my committed blob and my on-disk file. Diffstat `+66/-6` matches the remote's `+66/-6` exactly. Law §7 is in force and its first run is green: **one version, three places, zero drift.**
+
+**In-force version: `73e2245`** (code identical to `8584d3b` / `Stage X3`; this commit is Book text only, so **no restart is needed**). Remaining work is unchanged: the **Evening Audit** -> seal `#14` -> **`14/14`**.
+
+---
+
+## Law §7 addendum — `2026-11-10` (what counts as "the app version"): `Workspace/*.bmw` is environment, not code
+
+First morning check after the law was installed exposed the exact edge the law needs to define. Owner's `git status -sb` at `73e2245` showed **no ahead/behind and no code file changed**, but `git diff origin/... --stat` was **not empty**:
+
+```
+ M Workspace/26,09,16-23.20.bmw        (55 insertions, 149 deletions)
+warning: in the working copy of 'Workspace/26,09,16-23.20.bmw', LF will be replaced by CRLF
+```
+
+Diagnosis (**verified, not assumed**): `Workspace/*.bmw` is a **BookMap chart workspace file** -- BookMap itself rewrites it whenever the chart layout/panes/saved state changes, in BookMap's own CRLF encoding. It is tracked in the repo for convenience but it is **environment state**, not app code. My side keeps the committed blob `dbeec50846dccafcbde064224f13006fd1251bb1` (`3,921` lines) untouched; the owner's copy differs only because BookMap has since re-saved the layout.
+
+**Addendum (in force):** the "one version everywhere" check compares **the app** -- every tracked file **except** `Workspace/**` (BookMap chart state), `data/**` and `logs/**` (runtime output). Correct verification command:
+
+```bash
+git diff origin/shadow-only-review --stat -- . ':(exclude)Workspace' ':(exclude)data' ':(exclude)logs'
+# EMPTY = app version identical in all three places
+```
+
+`Workspace/*.bmw` churn is expected and must **never be committed** as part of a stage patch (it would push one machine's chart layout onto another). The window's `LF will be replaced by CRLF` warning on that file is BookMap's own line endings, not a defect.
+
+---
+
+## Live smoke receipt — `2026-11-10 11:05-11:06` first live run of `Stage X2` + `X3` code (`73e2245`)
+
+Owner started the loop on `73e2245` (code = `8584d3b`, `Stage X3`) after BookMap was up. First two cycles, straight from `logs/trading_20261110.log`:
+
+- **Feed healthy, end to end:** `BookMapBridge quality: GCZ6.COMEX@RITHMIC instrument=matched quote=valid spread=0.0049% L2=validated depth=567/713 last_age=2.5s stale_levels=0/0 MBO=2000 direct_ticks=621 (lines=77307)`, then `FEED QUALITY at acquisition: quote=valid ... L2=validated L3=available`. One minute later `direct_ticks=817 (lines=89830)` -- the tape is advancing, not frozen (`last_age=1.6s`).
+- **Entry mode live:** `ENTRY MODE -> new entries subject to all hard safety gates`, no `BUDAPEST OFF-HOURS` note (session `08:00-23:00` is open at `11:05`).
+- **Every gate after the feed refused the entry, correctly:** `STEP 4 EXECUTION -> SKIPPED — confidence 20.0% below threshold 35%` and `SKIPPED — confidence 0.0% below threshold 35%`. No `order_send()` reached. This is the designed `X2`/`X3` path doing nothing, exactly as it should when Step 3 has no conviction.
+- **Flat:** `data/pm_state.json` contains `_flow` only (15 samples, no position).
+
+**Extended window `11:04:33`-`11:09:28` (`6` cycles, ~`60`s cadence):** every cycle green on the feed side -- `instrument=matched`, `quote=valid` (`spread 0.0049-0.0073%`), `L2=validated` (`depth 567-579 / 705-715`), `last_age 0.0-2.5s`, `stale_levels=0/0`, `MBO=2000`, and a monotonically advancing tape (`direct_ticks 526 -> 1,046`, `lines 67,128 -> 113,242`). `STEP 4` refused all `6` cycles on confidence alone (`0.0%` x`4`, `20.0%` x`2`, vs threshold `35%`, decision `HOLD`), so `order_send()` was never reached. This matches the replay baseline (`3,058 / 3,152` cycles below `35%` = `97%`), i.e. quiet-tape behaviour, not a defect.
+
+**Operational finding (new, recorded so it does not confuse a future audit):** once the log passes a chunk with non-UTF-8 bytes, `grep` reports `Binary file (standard input) matches` and **stops printing matches** -- which looks like "only 2 cycles of log exist". It is a display artefact, not a missing log. Correct command for the day's log: **`grep -a`** (`grep -aEi "..."` or `LC_ALL=C grep -a ...`).
+
+### Live receipt — Step 3 Doorman actually reached, and the AI failover chain works (`11:05`-`11:10`)
+
+The `0.0%` cycles are **not** "the AI declined" -- they are "the AI was never asked". Verified from the log and from the code:
+
+- `main.py` writes `HOLD (AI throttled, N min until next call)` with `model="none-throttled"` (`main.py:1559-1566`) whenever `AI_MIN_INTERVAL_MINUTES` / `AI_MAX_CALLS_PER_DAY` silences the Doorman; those rows carry `ai_confidence 0.0`.
+- `audit_day.py` **already separates them** (`audit_day.py:1874`): `none-throttled` / `none-daily-cap` = "AI_MIN_INTERVAL_MINUTES or AI_MAX_CALLS_PER_DAY silenced it -- your setting, changeable", versus `none-timeout-budget` / `none-rate-limited` / `none-call-failed` = "worth watching", versus a real `HOLD @ N%` = the Doorman truly declining. So the Evening Audit cannot misread today's silence as a strategy verdict.
+- **Real paid decisions in the window:** `doorman: 1 paid call(s) today` -> `2 paid call(s) today` (resting `2` min between calls), and one genuine answer: `STEP 3 AI DECISION -> HOLD @ 20.0% | fail (<2 families agree, only BOOK active) and mixed near-touch OFI -> HOLD veto` -- i.e. the **Family Gate** (`<2` families) plus the **OFI judge** vetoed, exactly the Section `#3` + `#2` design.
+- **The model failover chain proved itself live:** `gemini-3.8-flash` hit `2` consecutive `503/UNAVAILABLE` -> demoted to the fallback tail for `15m` **without penalising the key** -> `gemini-3.6-flash` hit its `7.5s` attempt slice -> failed over with `13.5s` budget left -> `gemini-3.5-flash-lite` answered `HOLD @ 20.0%` in `~13s` wall clock. No cycle was lost and no decision was faked.
+- **Operational note:** a day with `1-2` paid calls per hour and `~97%` of cycles below the `35%` confidence bar is a **quiet-tape** day, not a broken one. Do not "fix" it by lowering `AI_CONFIDENCE_THRESHOLD` or by raising the call rate during an audit day.
+
+---
+
+## X-Ray & Manager Checkup — `2026-11-10` (owner request: use the 5 raw days for the last task and measure how far the app improved)
+
+**Answer to "can raw data carry the last task?"** ~`85%` of the Evening Audit is **data-provable offline** on the pinned `11-03..11-09` tape: every `[8a]`..`[8k]` scorecard recomputed on the latest code (`replay-36`). The **one half it cannot cover** is live-ledger reconciliation (does `decisions_YYYYMMDD.csv` / `trade_outcomes.csv` / the diary tell the truth about what the market did) -- a replay recomputes the world, it cannot audit a ledger it never wrote. That gap needs tonight's live files.
+
+**Stability across six same-tape runs (`replay-30` -> `replay-36`):** `11-03..11-06` per-day NET is **identical** every time (`-12.5 / 0.0 / -14.4 / -12.3`), `[8e] Bell_Share 33.5%`, `[8h] STOP/TARGET/TIME = 5/2/5`, `[8j] HALT_S 3/5` unchanged. The only movement is the **`11-09` tape growing** (`[8c] N 33 -> 36`, NET `-40.2 -> -21.8`) -- the same trades measured to completion, not a gain. **Isolation of `N1/N2/D1/D1a/D2/X1/X2/X3` held.**
+
+**X-Ray of the app as it stands (`replay-36`, `N=36`):** only the dumb fixed bracket is near break-even -- `Benchmark 2.0xSL/3.5xTP = -2.1 pts (-0.06/go)` -- while every live exit ruler loses: `Stage-4a -188.3`, `Stage-4b PM -168.9`, `Legacy C3 -108.0`. Working judges: `value_area +413.4` (`59.3%` right), `vwap_trend +574.0` (`52.7%`), `l3_aggr_limit +25.1`; strongest gate `Late POWER Climax +54.5` (`n=15`). Best signal cohort `POWER=NEITHER(Sniper) 59.1% WR +1.02/sig` (`n=93`). Forward tape `[9]`: `TAKEN/GO -0.32 @+12m` vs `SKIPPED(Conf>=35, Shooting=WAIT) +1.86` -> **the shooter is skipping the better half**.
+
+**Seven open weaknesses recorded for the audit (none caused by `X1/X2/X3` -- those are MT5-only):**
+1. Exit ruler loses to a fixed bracket by `~80-165 pts` over `36` brackets.
+2. `PM-1` healing now **costs** `-40.5 pts` on this tape (`Old -128.4` vs `Healed -168.9`), the opposite sign of `replay-24`'s `+44.1` -> sample/regime dependent, audit before touching.
+3. Escort is **negative value-add**: `-79.1` vs `No-Escort -69.6` = `-9.5 pts` -> `Stage E2` candidate after `14/14`.
+4. Passive limit would have saved `~76 pts` (`Passive_PM4B +11.6` vs `Aggr_Market -65.1`, `11/12` filled) -> review `LIMIT_ORDER_ENABLED` after `14/14`.
+5. Shooter skips the profitable half (`WAIT +1.86` vs `GO -0.32`) -> Section `#4` re-check.
+6. `POS_D = 1/4` -- one positive day in four; sample size, watch.
+7. Risk caps neutral on this sample (`+0.0 pts`) with `HALT_S 3/5` firing -> expected, record it, do not tune.
+
+**Where the raw data actually lives (verified on the owner's rig `2026-11-10`):** the repository is on **drive `A:`** (`A:\gitHub\Gold-BookMap` = `/a/gitHub/Gold-BookMap` in Git Bash), `.env` points `BOOKMAP_BRIDGE_FILE=A:\gitHub\Gold-BookMap\ticks.csv` and `BOOKMAP_MBO_FILE=A:\gitHub\Gold-BookMap\mbo.csv` -- those are the **live rolling files**, not the per-day history. The dated replay chunks live under the repo (`data/` and `data/archive/`), which is exactly why every earlier witness replay worked from the repo root with `--days`/`--dates` and no extra flags. Therefore `--root-dir /a/gitHub/Gold-BookMap` finds them; the only case needing a different path is if a day's chunks sit outside the repo, and `ls data/archive | grep -E "^(ticks|mbo)_"` is the 5-second check. **Measured `2026-11-10`:** `ls data | grep -E "^(ticks|mbo)_"` = **`0`** while `ls data/archive | grep -E "^(ticks|mbo)_"` = **`218`** dated `.csv.gz` chunks (`ticks_20261103_143238.csv.gz`, ...) -- i.e. **the history lives in `data/archive/`, compressed, and `data/` itself holds only live/scratch files.** Any `ls data/ticks_YYYYMMDD_*` check is therefore meaningless on this rig; use `data/archive`.
+
+**A/B replay mechanics (verified in code before handing the commands over -- `tools/raw_replay.py` + `config.py`):** a `git worktree` of an old commit is **not** a runnable replay by itself, for three reasons, all checked: (1) **`config.py` loads `.env` from `BASE_DIR` = the directory of `config.py`**, and `.env` is untracked, so a fresh worktree silently runs on **default** config (`TIMEFRAME=M5`, no `AI_PROMPT_BARS`, ...) -- the `.env` **must be copied into the worktree** or the A/B compares two different robots; (2) **raw `data/` is untracked**, so pass `--root-dir /a/gitHub/Gold-BookMap` to read the real raw CSVs (with a custom root-dir `use_env_paths=False`, so `BOOKMAP_BRIDGE_FILE` is ignored and the `root_dir`/`root_dir/data`/`.../archive` scan is what finds them) and `--data-dir <temp>` so the run writes **nothing** into the live repo; (3) the worktree has **no `.venv`**, so call the main repo's interpreter by absolute path. Verified by reading the code at those commits (`--date/--dates/--start/--end/--days/--every/--window/--workers/--root-dir/--data-dir/--out/--no-browser` all present at both `3458933` and `0b781b9`). Also: with a custom `--root-dir` the auto-parallel worker pool is disabled (`is_default_repo=False`) -> the run is **sequential**, slower but deterministic and identical in every strategy column.
+
+**True A/B plan (owner runs, ~4 min):** replay the *older code* over the *same* pinned days -- `git worktree add /c/tmp/ab_3458933 3458933` (11/14 era, before `N1/N2/D1/D2/X`) and `/c/tmp/ab_0b781b9 0b781b9` (13/14 era, before `X1/X2/X3`), each `tools/raw_replay.py --dates 2026-11-03,...,2026-11-09 --every 60 --no-browser --out <file>`. Then a three-column delta (`3458933` | `0b781b9` | `73e2245`) on `[8b]`,`[8c]`,`[8d]`,`[8e]`,`[8h]`,`[8j]`,`[8k]` measures the accumulated work on one tape. **Run one at a time, never in the same window as the live loop.**
+
+
+---
+
+## Scalper quality verdict — `2026-11-10` (owner question: "can these 5 days prove the app makes money?")
+
+**Honest answer: NO — and it is important to say it plainly.** The `11-03..11-09` tape proves two different things, and only one of them is what "profitable scalper" means.
+
+**What the 5 days DO prove (all measured on `replay-36`, latest code):**
+- **Safety and discipline:** every gate fires in the right order; `STEP 4` refused `100%` of cycles with confidence `< 35%`; the live ledger is honest (`6/6` cycles `SKIPPED`, flat, no orphan orders); the executor never guesses a position (`X1`), never discards a partial fill (`X2`) and never believes a close it has not verified (`X3`).
+- **Real judges exist:** `value_area +413.4 pts (59.3% right)`, `vwap_trend +574.0 (52.7%)`, `l3_aggr_limit +25.1`; gates that block work too (`Late POWER Climax +54.5`, `n=15`).
+- **Stability:** six same-tape replays produce identical `11-03..11-06` numbers, so the last seven stages moved nothing they should not have.
+
+**What the 5 days DO NOT prove, with the numbers that say so:**
+- **It is not profitable on this tape.** `[8d]` 1-position portfolio: **`9` trades, `5/4`, `55.6%` WR, `-21.8 pts`, PF `0.60`, MAX_DD `39.2`, POS_D `1/4`**. Every live exit ruler loses: `Stage-4a -188.3`, `Stage-4b PM -168.9`, `Legacy C3 -108.0`. Only the **dumb fixed bracket** is near break-even (`2.0x/3.5x = -2.1 pts`).
+- **The sample is too small for a verdict.** `9` trades over `5` days, `1` positive day in `4`, `36` brackets. Law #5 asks for `3-5-10` days; a profit claim on `9` trades would be exactly the kind of fabricated certainty the house laws forbid. `PF 0.60` on `n=9` has a standard error wide enough to swallow a winning system.
+- **It cannot answer "will it make money for us" without forward DEMO evidence** — which is what the live loop is now collecting, day by day, with the repaired executor.
+
+**Therefore the sequencing:** (1) finish `14/14` (Evening Audit), (2) prove *improvement* on the raw tape by A/B (see `X-Ray & Manager Checkup`, commits `3458933` / `0b781b9` / `73e2245`), (3) build a **scalper quality scorecard** on a *bigger* pinned window (`10` days, `~30+` trades) with the fixed-bracket benchmark as the bar to beat, (4) only then discuss profit. **Tuning thresholds to manufacture trades before steps 1-3 would repeat every mistake the Book was written to prevent.**
+
+
+---
+
+## A/B RESULT — `2026-11-10` "how far did we come?" (three code eras, ONE tape, owner-run)
+
+Both files authenticated before use: `ab_3458933.txt` has **no `[8k]`** and **no `Bell_Share`** (pre-`N1`/`N2`), `ab_0b781b9.txt` has **both** (post-`N1`/`N2`, pre-`X1/X2/X3`), both report `11-03..11-09` and `3,374` cycles / `3,169` signals.
+
+**Zero strategy change across all three eras.** Excluding the `Generated:` stamp and the `SEC` wall-clock column, the files differ by **`18` lines (`3458933` vs `0b781b9`) and `10` lines (`0b781b9` vs `73e2245`) -- and every one of those lines is the `SEC` column itself.** Identical in A = B = C:
+
+| Metric | A `3458933` (11/14) | B `0b781b9` (13/14) | C `73e2245` (now) |
+|---|---|---|---|
+`[8]` fixed 1.80/1.80 vs 1.0xATR | `-43.2` vs `-98.8` | same | same |
+`[8c]` 4a planned SL/TP | `36` / `12/24` / `33.3%` / `-188.3` | same | same |
+`[8c]` 4b Live PM 1.5xATR | `16/19` / `45.7%` / `-168.9` | same | same |
+`[8c]` Legacy C3 | `23/13` / `63.9%` / `-108.0` | same | same |
+`[8c]` **Benchmark 2.0/3.5 fixed** | **`14/22` / `38.9%` / `-2.1`** | same | same |
+`[8d]` Live PM portfolio | `9` trd / `5/4` / `55.6%` / `-21.8` / PF `0.60` / DD `39.2` / POS_D `1/4` | same | same |
+`[8d]` Planned Shot portfolio | `9` / `4/5` / `44.4%` / `-19.9` / PF `0.69` | same | same |
+`[8e]` Bell/Serve + Attraction | `1,130`/`2,244`, `53.9%` vs `35.4%` | same | same |
+`[8e]` corridors | `road_clear=True +0.56/sig` vs `False +1.71/sig` | same | same |
+`[8f]` POWER ALL | `223` / `52.0%` | same | same |
+`[9]` taken vs skipped | GO `36` → `-0.32`@+12m vs WAIT `57` → **`+1.86`**@+12m | same | same |
+`[8j]` cap protection | `+0.0 pts` | same | same |
+
+**What this proves (and what it forbids me from claiming):**
+1. `N1`, `N2`, `D1`, `D1a`, `D2`, `X1`, `X2`, `X3` are **provably strategy-neutral** on this tape -- they bought **safety, honesty and reporting**, and nothing else. `[8k]` and `Bell_Share` appear only in the newer files: reporting, not decisions.
+2. The only *apparent* improvement ever observed (`replay-30`'s `N=33 / 8 trades / -40.2`) was **tape growth**, not code: with the complete `795`-cycle `11-09`, the oldest and newest commits both land on `36` / `9` / `-21.8`. Settled.
+3. **The app's profit did not improve.** Three code eras, one verdict: `PF 0.60`, `-21.8 pts`, `POS_D 1/4`, and a **dumb fixed 2.0x/3.5x bracket that still beats every live exit ruler by `~167 pts`** (`-2.1` vs `-168.9`).
+
+**Therefore the next stage is not a new feature — it is the exit.** `Stage 4X` (name provisional): make the live exit ruler **beat the fixed bracket on the same 36 brackets** before anything else is added. Working material already in the tape: `road_clear=False` corridors are the better half (`+1.71` vs `+0.56 pts/sig`), `Legacy C3` (fast 0.5xATR trail) is the best live ruler at `63.9%` WR, and the shooter skips the profitable cohort (`WAIT +1.86` vs `GO -0.32`). Multi-timeframe (`M1-M3`) stays frozen behind this.
+
+
+---
+
+## Evening Audit (`#14`) — CODE HALF done `2026-11-10` -> found 3 defects, `Stage X4a` installed, `#14` NOT sealable until X4b/X4c
+
+The `#14` audit is two halves. The **code half needs no live files** and was executed now, on the `11-03..11-09` tape and the repo, not on opinions. Result: **`audit_day.py` (`6,449` lines) + `tools/xray_report.py` (`1,658` lines)** are structurally sound -- `tools/selftest_audit_day.py` = **`17/17` PASSED** before and after the change -- but three real gaps were found. `xray_report.py` is clean (it already prints the full `exec_statuses` distribution and collects non-`EXECUTED` reasons).
+
+**F1 (HIGH, honesty) -- `audit_day.py::test_5_guards` had no `ERROR` bucket.** Buckets were `EXECUTED|PENDING`, `DEFERRED`, `SKIPPED|""`. An `ERROR` row belonged to **none**, so a day of only-`ERROR` rows printed *"0 orders were sent to MT5 -> the robot only thought, it never acted"* while MT5 could hold a live position. Harmless while `ERROR` meant "the broker refused, nothing opened" -- but **`X2`/`X3` made it reachable on purpose**: `10010 DONE_PARTIAL` is live money, and `X3`'s unverified close is an `ERROR` whose text says `money is LIVE`. The audit layer was blind to the exact statement the `#14` hardening exists to prevent.
+
+**F2 (MEDIUM, behavioural) -- a PARTIAL fill records the volume that was NEVER filled.** `execute()` calls `trade_history.record_entry(..., volume=lot_size)` and returns `ExecutionResult.volume=lot_size`, i.e. the **requested** size. `trade_history.record_close` then estimates `pnl_usd = gain_pts * volume * contract_size` (`trade_history.py:186`) and feeds `day_pnl_pct()` (`:264-274`), which arms `ENTRY_DAY_RATCHET` and the `-3%` / `Stage-4R -12.0 pt` breakers. So after a `DONE_PARTIAL` fill the robot's day-P&L -- and therefore its own ratchet and loss caps -- is computed on a position size it never held. **`X2` made this reachable; before `X2` the partial was discarded and no ledger row existed at all.** No live impact on `2026-11-10` (zero fills), but it must be fixed before the next partial.
+
+**F3 (LOW, joinability) -- the decision ledger does not carry the identity `X1` computes.** `log_decision` (`main.py:908-985`) writes `order_id` but **not** `deal_id` / `position_id`, even though `ExecutionResult` now carries both. A ledger row therefore cannot be joined to an MT5 deal directly; `audit_day.py` must fall back to `trade_outcomes.csv`.
+
+**`Stage X4a` INSTALLED (audit tool only -- `audit_day.py`, no live code, no restart):**
+1. `error_rows` is now its own bucket, counted and never merged into orders or refusals.
+2. Up to five distinct error reasons printed with counts (`error xN: <reason>`), so the operator reads *why*, not just *how many*.
+3. `_live_now` detector (`money is LIVE` / `STILL LIVE` / `UNVERIFIED` / `NOT CONFIRMED`) escalates the whole day to **FAIL** with "treat this day as OPEN until MT5 itself says flat".
+4. The "0 orders were sent" line now appends *"BUT N attempt(s) ERRORED at the executor -- an error is not the same as thinking"*.
+5. Existing behaviour unchanged when no `ERROR` row exists (selftest `17/17` still green).
+
+**Evidence:** `test_nov10_stage_x4a_audit_error_bucket.py` (`13` reverse-engineering tests: live-money `ERROR` -> `FAIL`; all three `X3` wordings recognised; a plain `NO_MONEY` reject is **not** a false alarm; errors narrated with counts; the zero-order line admits them; errors never counted as orders; dedupe with `xN`; clean day untouched; source guards that `ERROR` cannot drift back into the other buckets or after the other grades) -> **`686 passed, 3 subtests passed`** (`M5`; `673 + 13`).
+
+**Verdict:** `#14` stays **CODE-SEALED, not SEALED**. Remaining before the seal: `X4b` (record the **filled** volume -- live code, restart), `X4c` (`position_id` / `deal_id` into the decision ledger row -- live code, restart), then the **ledger half** of the audit on tonight's live files.
+**`Stage X4b` INSTALLED (one causal unit: *the ledger must tell the truth about what happened at the broker* -- `step4_mt5_execution.py` + `main.py`, live code, restart required):**
+1. `MT5Executor._filled_volume(position, requested)` reads the volume MT5 actually opened (`0.04` when `0.10` was asked, i.e. `10010 DONE_PARTIAL`) and falls back to the requested size only when the position object cannot be read (**never** to `0.0`); it catches `Exception`, because a position property can raise on a dead IPC.
+2. `trade_history.record_entry` / `record_tca` and `ExecutionResult.volume` all carry the **filled** size, so `pnl_usd = gain_pts * volume * contract_size` -> `day_pnl_pct()` -> `ENTRY_DAY_RATCHET` / `-3%` / `Stage-4R -12 pt` are computed on the position we really hold.
+3. A mismatch is logged: `STEP 4 X4b: PARTIAL FILL — asked X lots, MT5 opened Y lots (ticket Z). Recording the FILLED volume everywhere.`
+4. Decision ledger gains `position_id`, `deal_id`, `fill_volume` (`_DECISION_LOG_FIELDS`), so a row joins straight to an MT5 deal; `_decision_csv_schema` migrates existing day files in place, preserving every old row.
+5. Every refusal path still reports the requested `lot_size` -- only a **verified** fill may rewrite the volume.
+
+**Evidence:** `test_nov10_stage_x4b_ledger_truth.py` (`17` tests: full/partial/tiny/unreadable/broken-position volume resolution; `record_entry`/`record_tca`/result wiring; the warning exists; `fill_volume` is computed before the ledger write; the three identity columns are in schema and in the row; an old day file migrates with its rows intact; refusal paths unchanged; `margin_mode` still absent) -> **`703 passed, 3 subtests passed`** (`M5`; `686 + 17`), `selftest_audit_day.py` `17/17` still green.

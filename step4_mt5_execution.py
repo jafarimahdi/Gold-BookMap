@@ -783,6 +783,25 @@ class MT5Executor:
     # ------------------------------------------------------------------ #
     # Stage X3 (Section #14): a retcode is a RECEIPT, positions_get is PROOF
     # ------------------------------------------------------------------ #
+    @staticmethod
+    def _filled_volume(position, requested: float) -> float:
+        """Volume MT5 actually opened for `position` (Stage X4b).
+
+        Falls back to the requested size only when the position object cannot be
+        read, because a missing volume must never silently become `0.0` in the
+        ledger (that would under-state risk as badly as over-stating it).
+        """
+        try:
+            filled = float(getattr(position, "volume", 0.0) or 0.0)
+        except Exception:            # a position object may raise on a dead IPC
+            filled = 0.0
+        if filled > 0.0:
+            return filled
+        try:
+            return float(requested)
+        except (TypeError, ValueError):
+            return 0.0
+
     def _position_remaining_volume(self, ticket) -> Optional[float]:
         """Remaining volume of OUR position `ticket`, read back from MT5.
 
@@ -1831,6 +1850,17 @@ class MT5Executor:
                                    symbol=self.symbol, volume=lot_size,
                                    price=price, sl=sl, tp=tp, timestamp=now)
 
+        # Stage X4b (Section #14): record the volume MT5 actually OPENED.
+        # `lot_size` is what we asked for; after a `10010 DONE_PARTIAL` fill the
+        # position is smaller, and every downstream number (trade_history P&L ->
+        # day_pnl_pct -> entry ratchet -> daily loss cap) must use the size we
+        # really hold, never the size we wished for.
+        fill_volume = self._filled_volume(verified_position, lot_size)
+        if fill_volume > 1e-9 and abs(fill_volume - lot_size) > 1e-9:
+            logger.warning(
+                "STEP 4 X4b: PARTIAL FILL — asked %.2f lots, MT5 opened %.2f lots "
+                "(ticket %s). Recording the FILLED volume everywhere.",
+                lot_size, fill_volume, getattr(verified_position, "ticket", None))
         logger.info("STEP 4: EXECUTED %s %s %.2f lots @ %.2f (SL %.2f / TP %.2f) "
                     "order=%s deal=%s position=%s", action, self.symbol,
                     lot_size, price, sl, tp, order_id, deal_id,
@@ -1840,7 +1870,7 @@ class MT5Executor:
         try:
             ticket = getattr(verified_position, "ticket", None)
             trade_history.record_entry(
-                ticket, action, price, sl, tp, lot_size,
+                ticket, action, price, sl, tp, fill_volume,
                 ai_confidence=ai_confidence,
                 signal_strength=float(getattr(snapshot, "signal_strength",
                                               0.0) or 0.0),
@@ -1855,14 +1885,14 @@ class MT5Executor:
                 fill_price = float(getattr(verified_position, "price_open",
                                            0.0) or 0.0)
             trade_history.record_tca("ENTRY", ticket, price, fill_price,
-                                     lot_size, note=action)
+                                     fill_volume, note=action)
         except Exception:
             logger.exception("STEP 4: trade memory/tca write failed "
                              "(non-fatal)")
         return ExecutionResult(status="EXECUTED", order_id=order_id,
                                deal_id=deal_id,
                                position_id=getattr(verified_position, "ticket", None),
-                               symbol=self.symbol, volume=lot_size, price=price,
+                               symbol=self.symbol, volume=fill_volume, price=price,
                                sl=sl, tp=tp, timestamp=now)
 
 

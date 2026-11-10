@@ -1801,6 +1801,20 @@ def test_5_guards(text, decisions, feed):
     exec_rows = [d for d in decisions if _st(d) in ("EXECUTED", "PENDING")]
     deferred_rows = [d for d in decisions if _st(d) == "DEFERRED"]
     skipped_rows = [d for d in decisions if _st(d) in ("SKIPPED", "")]
+    # Stage X4a (Section #14): ERROR is its OWN bucket.
+    # Before this, a row whose exec_status was ERROR belonged to no bucket at all:
+    # it was not an order, not a DEFERRED guard refusal and not a SKIPPED gate, so
+    # a day made only of ERROR rows printed "0 orders were sent to MT5 -> the robot
+    # only thought, it never acted" while MT5 could be holding a live position.
+    # Stage X2/X3 made that reachable on purpose: a DONE_PARTIAL fill and a close
+    # that `positions_get` could not confirm are reported as ERROR **with the money
+    # still LIVE**. An audit that cannot see those rows is an audit that lies.
+    error_rows = [d for d in decisions if _st(d) == "ERROR"]
+    _live_now = [
+        d for d in error_rows
+        if re.search(r"money is (?:still )?LIVE|STILL LIVE|UNVERIFIED|NOT CONFIRMED",
+                     str(d.get("reason") or ""), re.I)
+    ]
     why = []
     if not decisions:
         why.append("no decisions logged for this day -> nothing to explain")
@@ -1815,7 +1829,23 @@ def test_5_guards(text, decisions, feed):
     if n_orders:
         why.append(f"{n_orders} decision(s) were actually sent to MT5 -> these are the trades to check one by one")
     else:
-        why.append("0 orders were sent to MT5 -> the robot only thought, it never acted")
+        _msg = "0 orders were sent to MT5 -> the robot only thought, it never acted"
+        if error_rows:
+            _msg += (f" (BUT {len(error_rows)} attempt(s) ERRORED at the executor - "
+                     f"see the ERROR lines below; an error is not the same as thinking)")
+        why.append(_msg)
+    if error_rows:
+        why.append(f"{len(error_rows)} decision(s) ERRORED at the executor: the send or the "
+                   f"close did NOT complete cleanly (broker reject, unverified close, contained "
+                   f"exception). These are neither trades nor gate refusals - read every one "
+                   f"before trusting any money line above")
+        for _r, _c in Counter((d.get("reason") or "?")[:90]
+                              for d in error_rows).most_common(5):
+            why.append(f"   error x{_c}: {_r}")
+        if _live_now:
+            why.append(f"*** {len(_live_now)} of them say the money may be STILL LIVE "
+                       f"(Stage X3 verified-close) - treat this day as OPEN until MT5 itself "
+                       f"says flat, and never start a new entry on top of it ***")
     if deferred_rows:
         _why_dec = Counter((d.get("reason") or "?")[:60] for d in deferred_rows).most_common(3)
         why.append(f"{len(deferred_rows)} decision(s) DEFERRED: a guard refused the order "
@@ -1890,7 +1920,12 @@ def test_5_guards(text, decisions, feed):
         why.append(f"{len(skipped_rows)} decision(s) SKIPPED before the executor (confidence/AI gate)")
     if feed is not None and feed.get("n", 0) < 1000:
         why.append(f"feed delivered only {feed.get('n', 0):,} prints -> the guards had nothing to judge; this is a plumbing failure, not a strategy decision")
-    if len(reasons) == 1 and "empty or invalid market snapshot" in reasons:
+    if _live_now:
+        why.append("the day is graded FAIL because at least one ERROR row admits a "
+                   "position may still be open: no trade statistic may be read as "
+                   "final until MT5 itself is checked by hand")
+        r.add("FAIL", "GUARD CHECK", "why did it refuse to trade?", why)
+    elif len(reasons) == 1 and "empty or invalid market snapshot" in reasons:
         why.append("EVERY refusal is 'empty or invalid snapshot' = it never got data. That is a FEED problem, not a strategy problem.")
         r.add("FAIL", "GUARD CHECK", "why did it refuse to trade?", why)
     elif n_orders == 0 and len(reasons) >= 2:

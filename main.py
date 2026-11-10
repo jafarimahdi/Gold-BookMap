@@ -847,6 +847,11 @@ _DECISION_LOG_FIELDS = [
     "shooting_status", "shooting_reason", "shooting_sub_checks",
     "paper_entry_status", "exec_status", "outcome", "replay_status", "order_id",
     "news_state", "minutes_to_event", "next_event_title",
+    # Stage X4c (Section #14): the identity Stage X1 already resolves must reach
+    # the ledger, or the Evening Audit can only join a decision row to MT5 through
+    # trade_outcomes.csv. `position_id`/`deal_id` make the join direct and let a
+    # PARTIAL fill be matched to the volume that was really opened.
+    "position_id", "deal_id", "fill_volume",
     "shadow_candidates", "ai_rationale", "reason",
 ]
 
@@ -960,6 +965,9 @@ def log_decision(snapshot, decision, exec_result) -> None:
         "outcome": getattr(exec_result, "status", ""),
         "replay_status": "NOT_RUN_IN_LIVE_CYCLE",
         "order_id": getattr(exec_result, "order_id", ""),
+        "position_id": getattr(exec_result, "position_id", ""),
+        "deal_id": getattr(exec_result, "deal_id", ""),
+        "fill_volume": getattr(exec_result, "volume", ""),
         "news_state": getattr(getattr(snapshot, "news", None), "news_state", ""),
         "minutes_to_event": getattr(getattr(snapshot, "news", None),
                                     "minutes_to_next_event", ""),
