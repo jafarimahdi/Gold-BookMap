@@ -540,6 +540,61 @@ class MT5Executor:
             return "FATAL"
         return "UNKNOWN"
 
+    # ------------------------------------------------------------------ #
+    # Stage X3 (Section #14): operator-visible NO_MONEY / INVALID_STOPS text
+    # ------------------------------------------------------------------ #
+    # A rejection the operator can fix must never reach the log as a bare
+    # `retcode=10019`. Everything below is plain English, greppable by label and
+    # states the only thing that matters first: was money opened or not.
+    _RETCODE_OPERATOR_TEXT = {
+        10019: ("NO_MONEY",
+                "the broker says NOT ENOUGH FREE MARGIN — NO position was opened. "
+                "Free margin (close/hedge something) or lower MAX_LOT_SIZE / "
+                "RISK_PER_TRADE_PCT, then let the next signal fire."),
+        10016: ("INVALID_STOPS",
+                "the broker REJECTED the SL/TP — NO position was opened. The stop "
+                "was too close to price or inside this broker's stops level; widen "
+                "it (STOP_LOSS_ATR_MULT) or check the symbol's stops level."),
+        10006: ("REJECT",
+                "the broker REJECTED the request — NO position was opened; read the "
+                "MT5 journal (Journal tab) for the broker's own message."),
+        10007: ("CANCEL",
+                "the broker CANCELLED the request — NO position was opened."),
+        10013: ("INVALID_REQUEST",
+                "the request was MALFORMED — NO position was opened; report this "
+                "line, it is a software defect not a market condition."),
+        10014: ("INVALID_VOLUME",
+                "the broker rejected the LOT SIZE (min/step/max) — NO position was "
+                "opened; check LOT_SIZE / MAX_LOT_SIZE against the symbol spec."),
+        10015: ("INVALID_PRICE",
+                "the broker rejected the PRICE — NO position was opened; usually a "
+                "dead or crossed quote, re-check the feed."),
+        10018: ("MARKET_CLOSED",
+                "the market is CLOSED at the broker — NO position was opened."),
+    }
+
+    def _operator_message(self, retcode: Optional[int], *, bucket: str = "") -> str:
+        """One actionable, greppable line for the operator (Stage X3).
+
+        Used for every entry rejection and every unverified close, so the log and
+        `data/decisions_YYYYMMDD.csv` say *what happened to the money* and *what
+        to do*, not just a numeric retcode.
+        """
+        try:
+            rc = int(retcode) if retcode is not None else None
+        except (TypeError, ValueError):
+            rc = None
+        if rc is None:
+            return ("OPERATOR ACTION — SEND FAILED: order_send returned no result "
+                    "(terminal/IPC down) — no position was CONFIRMED; if MT5 shows "
+                    "one, treat it as LIVE and close it by hand.")
+        label, advice = self._RETCODE_OPERATOR_TEXT.get(rc, (None, None))
+        if label is None:
+            label = str(bucket or self._retcode_taxonomy(rc))
+            advice = ("no position was opened; if MT5 disagrees, treat the position "
+                      "as LIVE and verify it before the next entry.")
+        return f"OPERATOR ACTION — {label} (retcode {rc}): {advice}"
+
     def _send_market_order(self, request: dict, *, action: str, lot_size: float,
                            info, now: datetime, sl: float, tp: float,
                            price: float) -> tuple:
@@ -725,8 +780,74 @@ class MT5Executor:
                 return None
             time.sleep(0.2)
 
+    # ------------------------------------------------------------------ #
+    # Stage X3 (Section #14): a retcode is a RECEIPT, positions_get is PROOF
+    # ------------------------------------------------------------------ #
+    def _position_remaining_volume(self, ticket) -> Optional[float]:
+        """Remaining volume of OUR position `ticket`, read back from MT5.
+
+        Stage X3 (Section #14). The old close path was
+
+            if result is None or getattr(result, "retcode", None) not in (done, partial):
+                return False, f"close retcode={...}"
+            return True, "closed"
+
+        i.e. `10009 DONE` was accepted as *proof* that the position is gone. It is
+        not: it is the broker's receipt for the REQUEST. A close can be rejected,
+        silently reduced (`10010 DONE_PARTIAL`), or delayed by the terminal, and
+        the executor still told Step 5 / PM / Escort / the operator that the trade
+        was flat. That is the worst possible lie in this file: a live position the
+        robot believes it does not have.
+
+        Returns ``0.0`` when MT5 confirms the ticket no longer exists and ``None``
+        when the question could not be answered (no SDK, query error, `None`
+        result). ``None`` is NEVER read as "closed" by the caller.
+        """
+        try:
+            wanted = int(ticket)
+        except (TypeError, ValueError):
+            return None
+        if wanted <= 0:
+            return None
+        getter = getattr(mt5, "positions_get", None)
+        if not callable(getter):
+            return None
+        last_error = None
+        for kwargs in ({"ticket": wanted}, {"symbol": self.symbol}):
+            try:
+                rows = getter(**kwargs)
+            except Exception as exc:      # older/fake SDK without the kwarg
+                last_error = exc
+                continue
+            if rows is None:
+                last_error = f"positions_get({kwargs}) returned None"
+                continue
+            for position in rows:
+                try:
+                    if int(getattr(position, "ticket", 0) or 0) != wanted:
+                        continue
+                    return float(getattr(position, "volume", 0.0) or 0.0)
+                except (TypeError, ValueError):
+                    return None
+            return 0.0                    # query answered, ticket absent -> gone
+        if last_error is not None:
+            logger.warning("STEP 4 X3: cannot verify position %s: %s",
+                           wanted, last_error)
+        return None
+
     def _close_position(self, position) -> tuple:
-        """Close one bot position and return (ok, reason)."""
+        """Close one bot position and VERIFY it with `positions_get()`.
+
+        Stage X3 (Section #14). The close is only reported as done when MT5
+        stops listing the ticket. Every other outcome fails closed and names the
+        money that is still live, so the operator can act:
+
+          * ticket gone                                  -> ``(True, "closed")``
+          * ticket still open, same volume               -> ``(False, "... CLOSE NOT CONFIRMED ...")``
+          * ticket open with less volume (`10010`)        -> ``(False, "... PARTIAL CLOSE ... X lots still LIVE")``
+          * `positions_get` failed / returned `None`      -> ``(False, "... close UNVERIFIED ...")``
+          * retcode said failure but the ticket IS gone   -> ``(True, "closed")`` (state beats receipt)
+        """
         tick = mt5.symbol_info_tick(self.symbol)
         if tick is None:
             return False, "no tick available while closing position"
@@ -755,13 +876,54 @@ class MT5Executor:
             "type_filling": self._select_filling_mode(info) if info else
                             getattr(mt5, "ORDER_FILLING_IOC", 1),
         }
-        result = mt5.order_send(request)
-        done = getattr(mt5, "TRADE_RETCODE_DONE", 10009)
-        partial = getattr(mt5, "TRADE_RETCODE_DONE_PARTIAL", 10010)
-        if result is None or getattr(result, "retcode", None) not in (done, partial):
-            return False, f"close retcode={getattr(result, 'retcode', None)}"
-        logger.info("STEP 4: closed bot position ticket=%s volume=%.2f",
-                    ticket, volume)
+        try:
+            result = mt5.order_send(request)
+        except Exception as exc:          # IPC / terminal failure mid-close
+            logger.error("STEP 4 X3: close send raised %s: %s",
+                         type(exc).__name__, exc)
+            result = None
+        retcode = getattr(result, "retcode", None)
+        bucket = self._retcode_taxonomy(retcode)
+        # ---- Stage X3: verify the close, never trust the retcode ----------
+        try:
+            verify_s = float(getattr(config, "MT5_CLOSE_VERIFY_SECONDS", 3.0) or 0.0)
+        except (TypeError, ValueError):
+            verify_s = 3.0
+        deadline = time.monotonic() + (max(0.0, verify_s) if bucket in ("OK", "PARTIAL") else 0.0)
+        checks = 0
+        remaining = None
+        while True:
+            checks += 1
+            remaining = self._position_remaining_volume(ticket)
+            if remaining is not None and remaining <= 1e-9:
+                break
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.2)
+
+        if remaining is None:
+            msg = (f"OPERATOR ACTION — close UNVERIFIED (retcode {retcode}): "
+                   f"positions_get could not confirm ticket {ticket} for "
+                   f"{volume:.2f} lots; money may still be LIVE — check MT5 by hand "
+                   f"and do not open a new trade until this is flat.")
+            logger.error("STEP 4 X3: %s", msg)
+            return False, msg
+
+        if remaining > 1e-9:
+            if remaining < volume - 1e-9:
+                msg = (f"OPERATOR ACTION — PARTIAL CLOSE (retcode {retcode}): only "
+                       f"{volume - remaining:.2f} of {volume:.2f} lots closed — "
+                       f"{remaining:.2f} lots are STILL LIVE on ticket {ticket}. "
+                       f"No new entry until it is flat.")
+            else:
+                msg = (f"OPERATOR ACTION — CLOSE NOT CONFIRMED (retcode {retcode}): "
+                       f"ticket {ticket} is STILL OPEN with {remaining:.2f} lots; "
+                       f"money is LIVE — close it by hand in MT5 if it must be flat.")
+            logger.error("STEP 4 X3: %s", msg)
+            return False, msg
+
+        logger.info("STEP 4 X3: close VERIFIED flat ticket=%s volume=%.2f "
+                    "retcode=%s (%d check(s))", ticket, volume, retcode, checks)
         return True, "closed"
 
     def close_bot_positions(self) -> list:
@@ -872,8 +1034,12 @@ class MT5Executor:
         required = float(required)
         free_margin = float(free_margin)
         if required > free_margin:
-            return (f"insufficient free margin: need {required:.2f}, "
-                    f"available {free_margin:.2f}")
+            # Stage X3 (Section #14): the local pre-check says NO_MONEY before any
+            # order leaves the machine -- use the same operator label the broker
+            # rejection (10019) would produce, so one grep finds both.
+            return (f"OPERATOR ACTION — NO_MONEY (pre-check, nothing was sent): "
+                    f"need {required:.2f} margin, only {free_margin:.2f} free — "
+                    f"free margin or lower MAX_LOT_SIZE / RISK_PER_TRADE_PCT")
         return None
 
     def _broker_quote_check(self, tick, now_epoch: Optional[float] = None):
@@ -1584,22 +1750,30 @@ class MT5Executor:
             elif bucket not in ("OK", "PLACED"):
                 if reason:
                     logger.error("STEP 4 X2: %s", reason)
+                op_msg = self._operator_message(getattr(result, "retcode", None),
+                                                bucket=bucket)
+                logger.error("STEP 4 X3: %s", op_msg)
                 logger.error("STEP 4: order_send failed retcode=%s (%s, %d attempt(s))",
                              getattr(result, "retcode", None), bucket, attempts)
                 return ExecutionResult(
                     status="ERROR",
                     reason=(f"order_send retcode={getattr(result, 'retcode', None)} "
-                            f"({bucket}{'; ' + reason if reason else ''})"),
+                            f"({bucket}{'; ' + reason if reason else ''}) — {op_msg}"),
                     symbol=self.symbol, volume=lot_size,
                     price=price, sl=sl, tp=tp, timestamp=now)
 
         # For pending limit orders, DONE means order placed, not filled yet
         if use_limit:
             if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
+                op_msg = self._operator_message(getattr(result, "retcode", None),
+                                                bucket=self._retcode_taxonomy(
+                                                    getattr(result, "retcode", None)))
+                logger.error("STEP 4 X3: limit %s", op_msg)
                 logger.error("STEP 4 B3: limit order_send failed retcode=%s",
                              getattr(result, "retcode", None))
                 return ExecutionResult(status="ERROR",
-                                       reason=f"limit order_send retcode={getattr(result, 'retcode', None)}",
+                                       reason=(f"limit order_send retcode={getattr(result, 'retcode', None)}"
+                                               f" — {op_msg}"),
                                        symbol=self.symbol, volume=lot_size,
                                        price=limit_price, sl=sl, tp=tp, timestamp=now)
             logger.info(f"STEP 4 B3: LIMIT {action} placed @ {limit_price:.2f} lots {lot_size} (market was {price:.2f}) — waiting fill")

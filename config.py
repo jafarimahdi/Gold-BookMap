@@ -331,6 +331,10 @@ def _refresh() -> None:
     g["MT5_DEVIATION"] = max(1, min(200, _fint("MT5_DEVIATION", 20)))
     g["MT5_RETRY_MAX"] = max(0, min(5, _fint("MT5_RETRY_MAX", 2)))
     g["MT5_RETRY_BACKOFF_MS"] = max(0, min(2000, _fint("MT5_RETRY_BACKOFF_MS", 250)))
+    # Stage X3 (Section #14): how long a CLOSE may take to appear in positions_get()
+    # before the executor reports "money is STILL LIVE" instead of "closed".
+    # 0 disables the wait (one immediate check) but never disables the check.
+    g["MT5_CLOSE_VERIFY_SECONDS"] = max(0.0, min(15.0, _ffloat("MT5_CLOSE_VERIFY_SECONDS", 3.0)))
     g["RISK_PER_TRADE_PCT"] = _ffloat("RISK_PER_TRADE_PCT", 1.0)
     g["STOP_LOSS_ATR_MULT"] = _ffloat("STOP_LOSS_ATR_MULT", 2.0)
     g["TAKE_PROFIT_ATR_MULT"] = _ffloat("TAKE_PROFIT_ATR_MULT", 3.5)
