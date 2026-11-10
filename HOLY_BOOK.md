@@ -1397,12 +1397,12 @@ The committed `4f71043` follow-up supersedes the three audit-tool findings above
     8. **`A2` Aggressive Impulse Trigger ("The Now Button" — `aggressive_trigger.py`):** **DONE (`Stage A2` `1a39509` SEALED on `replay-25`: `3,152` cycles, `30 -> 0` phantom `A2` `GO`/counter burns eliminated, `Eye 2` `151 -> 1` `99.3%` `<35%` noise removed, genuine `DELAYED_FOLLOW` `EP=1` `100.0%` WR `+4.8 pts` `ATR_1:1.5`, kept `A2_PROMOTE_LIVE_EXECUTION=0` in shadow per Law #5 until `>=10` episodes)**.
     9. **Escort Team & Paper-Entry Simulator (`escort_team.py`, `paper_entry_simulator.py`):** **DONE (`Stage E1` `f18a512` SEALED on `replay-26`: `Expired_Serve_Clones=20->0`, `0/10` `0s` suicides, `+33.4 pts` vs Legacy Pre-E1, Passive-Limit Shadow `10/10` `+27.3 pts` + `9/10` `+7.5 vs -81.7 pts` on `replay-28`)**.
     10. **Step 1 Live Bookmap Bridge (`bookmap_bridge_provider.py`, `step1_data_acquisition.py`, `tools/raw_replay.py`):** **DONE (`Stage B1` `134e864` + `Stage B1b` `3a00651` SEALED on `replay-27/28`: `2,998/2,998 = 100.0%` valid quotes, `519 -> 0` crossed books, `42.7s` MBO span, `100.0%` near-corridor, `6.2x` iceberg visibility `550` cyc at `58.8%` WR)**.
-  - **🟡 Group B — In Progress / Next Up Step-by-Step on Past Raw Data (`1/14`):**
-    11. **Account `%`-Equity Risk Manager (`risk_manager.py`):** **Manager Check + `Stage R1` Unit Simulation Rig + `[8j]` Scorecard INSTALLED NOW (`nov09_stage_r1_risk_manager.patch`, Pending `replay-29`)** — next up immediately after `replay-29` is **Section `#12` (`Macro & News Calendar Analyzers` + `Bookmark #12` Leak #3)**.
-  - **🔴 Group C — Remaining Sections Scheduled for Full Manager Check + Unit Tests + Raw/Replay Verification (`3/14`):**
-    12. **Macro & News Calendar Analyzers (`macro.py`, `news.py`, `EconomicCalendar`):** **NEXT UP AFTER `replay-29`** (`Bookmark #12` Leak #3 `news_sentiment` `+0.02` & `macro_risk` static `BUY` bias + historical archive / synthetic event-shock replay rig).
-    13. **Step 3 AI Doorman & Council Shadow (`step3_ai_decision.py`, `council_shadow.py`, `judge_report_card.py`):** Manager Check & `rig_memory.py` (`12/12`) DONE (`Stage 5/5b`); scheduled for live shadow log audit after multi-day DEMO runs.
-    14. **Step 4 MT5 Execution & Evening Audit Office (`step4_mt5_execution.py`, `audit_day.py`, `tools/xray_report.py`):** MT5 brackets & `selftest_audit_day.py` (`17/17`) DONE; **needs full top-to-bottom Manager Check** of `audit_day.py` & `xray_report.py` against `Stage 4R/5b` fields.
+  - **🟢 Group B — Manager Check DONE + Unit Rigs DONE + Raw Data DONE (`13/14` SEALED; `#14` CODE-SEALED, Evening Audit remaining):**
+    11. **Account `%`-Equity Risk Manager (`risk_manager.py`):** **SEALED (`11/14`) on `replay-29` (`3458933`)** -- `18:00 ET` CME rollover, unified `%`-equity + `Stage 4R` `-12.0 pt` breaker, peak-safe HWM + latching `MANUAL_RESET` max-DD, asymmetric floating loss, `[8j]` scorecard (`HALT_S 3/5` on both `$10k` and `$100k` vs `0/5` legacy), `[8c]`/`[8d]`/`[8e]`/`[8h]` byte-identical.
+    12. **Macro & News Calendar Analyzers (`macro.py`, `news.py`, `EconomicCalendar`):** **SEALED (`12/14`) on `replay-30`** -- `Stage N1` WORLD-vote calibration (dead-band `+-0.15`, linear trust ramp, gold-tape-confirmed `macro_risk`), `[8k]` rendered; `Stage N2` (nearest-HIGH news perimeter, calendar cache in `DATA_DIR`, no fabricated events) VERIFIED on `replay-31` with `[8e] Bell_Share=33.5%`.
+    13. **Step 3 AI Doorman & Council Shadow (`step3_ai_decision.py`, `council_shadow.py`, `judge_report_card.py`):** **SEALED (`13/14`) on `replay-33` (`b6e79b0`)** -- `Stage D1` fail-closed JSON parsing + perimeter-aware decision-cache key + copy-on-read, `D1a` test-only fallback invariant, `D2` scalper candle window (`AI_PROMPT_BARS=4` = `12` min on `M3`); `11-03..11-06` byte-identical, zero strategy drift.
+    14. **Step 4 MT5 Execution & Evening Audit Office (`step4_mt5_execution.py`, `audit_day.py`, `tools/xray_report.py`):** **CODE-SEALED -- `X1` fill identity (`c823540`, `replay-34`), `X2` retcode taxonomy (`ddc5627`, `replay-35`), `X3` verified close + operator messaging (`8584d3b`, `replay-36`), each zero-drift, `673 passed, 3 subtests`.** REMAINING: **the Evening Audit** -- `audit_day.py` + `tools/xray_report.py` read line-by-line against every section's installed fields (`[8a]`..`[8k]`), then seal `#14` -> **`14/14`**.
+  - **📅 QUEUED AFTER `14/14` (do not bundle):** multi-timeframe **decision** roadmap (`M1` measure -> `M2` shadow -> `M3` veto-only), `Stage B1c` (first crossed book per session logged at `WARNING`), `Stage S2c` (rolling absorption `attacked`), `Step S1b` leftovers.
 
 ---
 
@@ -1744,6 +1744,8 @@ The committed `4f71043` follow-up supersedes the three audit-tool findings above
 5. **VERIFICATION REPLAYS ARE PINNED BY DATE, NOT DISCOVERED (`2026-11-10`):** `tools/raw_replay.py --days N` (default `11`, `:4293`) auto-discovers the newest raw folders, so the moment BookMap writes a new day the window silently shifts (`11-03..11-09` -> `11-04..11-10`) and every scorecard moves because the DAYS changed, not the code. Witness replays must pin the days: `--dates 2026-11-03,2026-11-04,2026-11-05,2026-11-06,2026-11-09` (`:4290`). `--days N` stays for exploratory runs only.
 6. **PATCH DELIVERY LAW (my process failure, recorded so it cannot repeat):** a patch is presentable only after `git apply --check` **and** `git apply` + `cmp` per file inside a clean worktree of a commit the owner actually has. My shadow branch is not evidence. A Book edit made after a patch ships rides only inside the next patch generated from the owner's base -- never as an undelivered standalone commit. Every Book file keeps LF endings, no trailing blank line at EOF, and its expected `wc -l` is stated before the owner applies.
 
+7. **ONE VERSION EVERYWHERE — WORKSPACE = OWNER'S PC = GITHUB (owner's instruction `2026-11-10`):** the app version is a **single fact**, never three. After every stage there must be exactly ONE commit that is simultaneously (a) the head of my shadow workspace, (b) `HEAD` of the owner's `/a/gitHub/Gold-BookMap` working tree, and (c) `origin/shadow-only-review` on `https://github.com/jafarimahdi/Gold-BookMap`. A stage is not "installed" until all three agree; a Book edit is not "done" until it is in the next patch (delivery law `§6`). **Verification is by content hash, not by eyeball:** the blob SHA (`git rev-parse <commit>:<path>`, i.e. `git hash-object <path>`) of every changed file must be identical in all three places -- blob SHAs are content hashes, so equal SHA = byte-identical file, LF endings included. **I verify the GitHub side myself** from the public API (`https://api.github.com/repos/jafarimahdi/Gold-BookMap/commits/shadow-only-review`) at every check-in and quote the remote `sha`, `tree`, `stats` and per-file blob SHAs in the report; the owner verifies his own side with `git log --oneline -1` + `git status -sb` + `git diff origin/shadow-only-review --stat` (must be empty). Divergence is a **stop-the-line** condition: never patch, never replay, never start the loop on a version that is not identical in all three places.
+
 ---
 
 ## Check-in stamp — `2026-11-10` `Stage X2` VERIFIED on `replay-35` + Section `#14` `Stage X3` (verified close + operator messaging)
@@ -1757,3 +1759,61 @@ The committed `4f71043` follow-up supersedes the three audit-tool findings above
   4. Owner portability preserved: retcode labels are platform/broker independent and **`margin_mode` is still never read** (asserted).
 - **Evidence:** `test_nov09_stage_x3_executor_close_verification.py` (`28` tests: confirmed close only when the ticket is gone; `DONE` + still open = failure; `DONE_PARTIAL` reports the remaining volume; unreadable/`None`/raising `positions_get` fail closed; failed send + gone ticket = flat; raising close send contained; polling until the ticket disappears; `close_bot_positions` surfaces the unverified close; every operator label; margin pre-check labelled; the message rides in the reason; `positions_get` wiring guards; `MT5_CLOSE_VERIFY_SECONDS` bounded; `margin_mode` absent; magic/comment unchanged) -> **`673 passed, 3 subtests passed`** (`M5`, `645 + 28`). Zero existing test altered.
 - **Next:** owner installs `Stage X3` -> **restart the loop** (live code) -> `replay-36` (must again be identical to `replay-35` outside the `SEC` column) -> **Evening Audit** across all fourteen sections -> seal `#14` -> **`14/14`** -> then the multi-timeframe roadmap (`M1 -> M2 -> M3`, frozen until `14/14`).
+
+### Owner install receipt — `Stage X3` (`2026-11-10`)
+
+Installed as **`8584d3b`** (`4` files, `+588/-12`, `1` new test file), pushed `3802c76..8584d3b`. Pre-flight `data/pm_state.json` showed **only `_flow` = FLAT**, so stopping/restarting the loop was safe (dead-feed law respected). `wc -l HOLY_BOOK.md` = **`1759`** exactly as stated. Tests: `28 passed` (`test_nov09_stage_x3_executor_close_verification.py`) and **`673 passed, 3 subtests passed`** full suite. `.env` untouched, no existing test altered.
+
+**`Stage X3` VERIFIED on `replay-36`** (generated `2026-11-10 02:03:11 CET`, `3,374` cyc / `3,169` SIG, days pinned `11-03..11-09`): **all eleven report blocks `[8]`..`[8k]` are byte-identical to `replay-35` *and* `replay-34`** -- cycles `629/739/784/427/795`, signals `15/9/30/21/18`, FIX `-59.2/+60.7/+4.1/-87.1/-18.5`, PM_TRAIL `-75.1/+7.0/-66.0/-34.7/+30.5`, `[8c] N=36`, `[8d] 9` trades `5/4`, `[8h] STOP=5 TARGET=2 TIME=5`, `[8j] HALT_S 3/5`, `[8e] Bell_Share=33.5%`, `[8k] HIGH_WINDOW=120m`. Only `Generated:` and the per-day `SEC` wall-clock column moved (`1171.9/1553.5/1897.5/924.6/1071.9s`), a runtime measurement outside the Law #8 identity contract.
+
+**Section `#14` (Step 4 MT5 Executor) CODE-SEALED (`14/14` pending the Evening Audit):** `X1` fill identity (`c823540` -> `replay-34`), `X2` retcode taxonomy (`ddc5627` -> `replay-35`), `X3` verified close + operator messaging (`8584d3b` -> `replay-36`) -- three isolated stages, three zero-drift witness replays, `673 passed, 3 subtests`. **Remaining: the Evening Audit** (`audit_day.py` + `tools/xray_report.py` read line-by-line against every section's installed fields) -> seal -> `14/14` -> then the multi-timeframe roadmap (`M1 -> M2 -> M3`).
+
+---
+
+## Morning runbook — `2026-11-10` (read this first when you wake)
+
+**State at write time (`2026-11-10`, ~01:20 Budapest):** rig HEAD **`8584d3b`** (`Stage X3`), Book **`1767`** lines, working tree clean, repo flat (`data/pm_state.json` = `_flow` only), loop **stopped**, BookMap **closed**, entries impossible before `08:00` Budapest (`session.is_budapest_trading_hours`, `step2_market_analysis.py:3697`) anyway. `14/14` needs one thing: the **Evening Audit** of `audit_day.py` + `tools/xray_report.py`.
+
+**Morning sequence (in order, no shortcuts):**
+1. **~`07:50` -- open BookMap first** (gold book + addon connected) and let it tick `1-2` min. *Never start the robot before the feed exists.*
+2. **Confirm the latest version is the one that will run:** `cd /a/gitHub/Gold-BookMap` -> `git log --oneline -1` must read **`8584d3b`**, `git status -sb` must show no local changes (and `## shadow-only-review...origin/shadow-only-review` with no ahead/behind).
+3. **Check flat before anything else:** `cat data/pm_state.json` -- only `_flow` means flat.
+4. **Start exactly ONE loop:** `PY=.venv/Scripts/python.exe; [ -x "$PY" ] || PY=python; echo "PY=$PY"` then `"$PY" main.py --loop`. One `main.py --loop` alive, ever.
+5. **Feed health (2 min later, second window):** `tail -n 80 logs/trading_$(date +%Y%m%d).log | grep -Ei "quality|quote=|L2=|MBO=|OFF-HOURS|SAFETY|STEP 4"` -> expect `quote=valid`, `L2=validated`, `MBO>0`; until `08:00` a `BUDAPEST OFF-HOURS` note is correct behaviour.
+6. **After `08:05`** confirm the session opened (`BUDAPEST trading ... LONDON session` note, no `OFF-HOURS`), and that Step 4 only fires on a real `EXECUTED`/`DEFERRED`.
+7. **Collect the Evening Audit evidence during the day** (upload at night): `data/decisions_YYYYMMDD.csv`, `data/xray_<DATE>.txt`, `data/trade_outcomes.csv`, `data/diary_YYYYMMDD.jsonl`, plus `grep -E "STEP 4 X2|STEP 4 X3|retcode|OPERATOR ACTION" logs/trading_$(date +%Y%m%d).log | tail -40`.
+8. **Evening:** the audit runs line by line over `audit_day.py` + `tools/xray_report.py` against `[8a]`..`[8k]`; on a clean sweep **Section `#14` is sealed -> `14/14`** -> then, and only then, `Stage M1`.
+
+**Standing safety while it runs:** never stop BookMap or the PC with an open position; a dead feed is fail-closed, not dangerous; do not loosen a threshold to force a trade.
+
+---
+
+## Tri-sync receipt — `2026-11-10` (workspace = owner's PC = GitHub)
+
+**Remote:** `https://github.com/jafarimahdi/Gold-BookMap`, branch `shadow-only-review`, read from the public API at check-in time (no credentials, no connector needed).
+
+| Fact | Value |
+|---|---|
+| Remote `HEAD` | **`8584d3bc39c1e4cf738d91763b405a9b4ce83bae`** (`Stage X3`) |
+| Remote `tree` | `bc8dd45bdb1ee96898cc87659f5eb7bc45376bd8` |
+| Remote stats | `4` files, `+588 / -12` -- matches the owner's local `git show --stat` exactly |
+| Remote parent | `3802c763f1e30a76b27c18b7e2d0187d87e2e74f` (Book laws, `3802c76`) |
+
+**Blob-SHA equality (content proof, all four files identical in all three places):**
+
+| File | GitHub `8584d3b` | My workspace `ff7cad9` | Match |
+|---|---|---|---|
+| `HOLY_BOOK.md` | `8b5a67a35e06ef6f1198590b29dfed52c979e34f` | `8b5a67a35e06ef6f1198590b29dfed52c979e34f` | YES |
+| `config.py` | `f28acf05f5f21dfd7882b09b8b1d6f16583e28a1` | `f28acf05f5f21dfd7882b09b8b1d6f16583e28a1` | YES |
+| `step4_mt5_execution.py` | `33bc14a0cd094163b067db0580abeb62807c4dd8` | `33bc14a0cd094163b067db0580abeb62807c4dd8` | YES |
+| `test_nov09_stage_x3_executor_close_verification.py` | `f81dfed2c7527c4691d342b3e8c191f13c7d1c11` | `f81dfed2c7527c4691d342b3e8c191f13c7d1c11` | YES |
+
+Owner's side was confirmed by his own receipt: `git log --oneline -1` printed `8584d3b (HEAD -> shadow-only-review, origin/shadow-only-review)` and `git status` was clean, so his working tree and GitHub `HEAD` are the same commit. My shadow branch (`x3`) has the same commit *content* (`ff7cad9` -> patch -> `8584d3b`), and everything after it (`139fc52`, `327242c`, `f20f2cc`, and this law) is **Book text only, not yet installed** -- it rides in the next patch, never as a stray commit. **The single version in force is `8584d3b`; Book-on-disk pending install reads `1,819` lines.**
+
+**Owner's morning one-liner for the GitHub side:**
+
+```bash
+cd /a/gitHub/Gold-BookMap
+git fetch -q && git log --oneline -1 && git status -sb && git diff origin/shadow-only-review --stat
+# expect the same commit as the remote, no ahead/behind, and an EMPTY diff
+```
