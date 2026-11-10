@@ -169,6 +169,16 @@ def _resolve_state_path(instance=None) -> Path:
     return Path(live_data_dir) / "pm_state.json"
 
 
+def _deal_position_id(deal) -> Optional[int]:
+    """The position a deal belongs to, or None when MT5 does not say."""
+    raw = getattr(deal, "position_id", None)
+    try:
+        val = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return val if val > 0 else None
+
+
 def _resolve_journal_path(instance=None) -> Path:
     inst_path = getattr(instance, "_journal_path", None) if instance is not None else None
     if inst_path is not None:
@@ -567,6 +577,56 @@ class PositionManager:
                 self._state.pop(t, None)
             self._save_state()
 
+    def _position_deals(self, ticket: int) -> List:
+        """Deals that belong to ONE position -- never a window of everyone's.
+
+        MT5's `history_deals_get(date_from, date_to, position=...)` silently
+        drops the `position` filter when a date range is supplied, so the
+        caller gets EVERY deal in the window. On `2026-11-10` that turned a
+        `+1.84` pt winner (`99353331`) into `-44.49` pts -- the average exit
+        price of two unrelated `11-09` trades -- and latched the `-12` pt
+        Stage-4R breaker for the rest of the session. So: ask by position only,
+        and filter by `position_id` in Python whatever comes back.
+        """
+        want = int(ticket)
+        getter = getattr(self._mt5, "history_deals_get", None)
+        if not callable(getter):
+            return []
+        now_dt = datetime.now(timezone.utc)
+        from_dt = datetime.fromtimestamp(
+            now_dt.timestamp() - 48 * 3600.0, tz=timezone.utc)
+
+        # 1) the correct form: by position only.
+        try:
+            deals = list(getter(position=want) or [])
+        except Exception:
+            deals = []
+        if deals:
+            mine = [d for d in deals if _deal_position_id(d) in (None, want)]
+            if mine:
+                return mine
+
+        # 2) legacy mixed form (older wrappers / test doubles).
+        try:
+            mixed = list(getter(from_dt, now_dt, position=want) or [])
+        except Exception:
+            mixed = []
+        if mixed:
+            ids = {_deal_position_id(d) for d in mixed}
+            if ids == {None}:
+                # the broker gave no position ids: nothing to filter on.
+                return mixed
+            mine = [d for d in mixed if _deal_position_id(d) == want]
+            if mine:
+                return mine
+
+        # 3) a plain date window, filtered strictly by position id.
+        try:
+            wide = list(getter(from_dt, now_dt) or [])
+        except Exception:
+            return []
+        return [d for d in wide if _deal_position_id(d) == want]
+
     def _record_gone(self, ticket: str, st: dict) -> None:
         """v4.4: a known position disappeared between cycles — almost
         always its SL or TP fired at the broker. Try MT5's deal history
@@ -583,11 +643,7 @@ class PositionManager:
             pnl_usd = None
             reason = "GONE (SL/TP hit or manual close)"
             try:
-                now_dt = datetime.now(timezone.utc)
-                from_dt = datetime.fromtimestamp(
-                    now_dt.timestamp() - 48 * 3600.0, tz=timezone.utc)
-                deals = self._mt5.history_deals_get(
-                    from_dt, now_dt, position=int(ticket))
+                deals = self._position_deals(int(ticket))
                 if deals:
                     pnl_usd = sum(float(getattr(d, "profit", 0.0) or 0.0)
                                   + float(getattr(d, "swap", 0.0) or 0.0)
@@ -617,14 +673,49 @@ class PositionManager:
                             if d_px > 0.0 and getattr(d, "entry", None) not in (0, 2):
                                 close_px = d_px
                                 break
+                    has_exit = any(
+                        getattr(d, "entry", None) in (1, 2, 3)
+                        or float(getattr(d, "profit", 0.0) or 0.0) != 0.0
+                        for d in deals
+                    )
+                    if not has_exit:
+                        # only the entry deal(s) are in history: the close is
+                        # not written yet -> we do NOT know the PnL, so this
+                        # stays an ESTIMATE (X5; pretending to know is how
+                        # trade_memory poisoned the -12 pt breaker).
+                        pnl_usd = None
+                    in_vol = sum(
+                        max(0.0, float(getattr(d, "volume", 0.0) or 0.0))
+                        for d in deals
+                        if getattr(d, "entry", None) in (0, 2)
+                    )
+                    if in_vol > 0.0:
+                        vol = in_vol
+                    price_gain = None
                     if close_px > 0.0 and entry > 0.0 and side in ("BUY", "SELL"):
-                        gain = (close_px - entry) if side == "BUY" else (entry - close_px)
+                        price_gain = (close_px - entry) if side == "BUY" else (entry - close_px)
+                        gain = price_gain
                         estimated_flag = False
                     elif pnl_usd is not None and vol > 0.0:
                         c_size = float(getattr(config, "CONTRACT_SIZE", 100.0) or 100.0)
                         if c_size > 0.0:
                             gain = float(pnl_usd) / (vol * c_size)
                             estimated_flag = False
+                    # X5: two independent routes must agree. When they do not,
+                    # the broker's money wins and the operator is told.
+                    if pnl_usd is not None and vol > 0.0:
+                        c_size = float(getattr(config, "CONTRACT_SIZE", 100.0) or 100.0)
+                        if c_size > 0.0:
+                            usd_gain = float(pnl_usd) / (vol * c_size)
+                            tol = max(1.0, 0.25 * abs(usd_gain))
+                            if price_gain is not None and abs(gain - usd_gain) > tol:
+                                logger.warning(
+                                    "PM X5: gain mismatch for ticket %s -- price route %+.2f pts, "
+                                    "broker route %+.2f pts (entry %.2f, close %.2f, vol %.2f). "
+                                    "Using the broker.", ticket, gain, usd_gain, entry, close_px, vol)
+                                gain = usd_gain
+                            elif price_gain is None:
+                                gain = usd_gain
                     for d in reversed(deals):
                         c = str(getattr(d, "comment", "") or "")
                         if c:

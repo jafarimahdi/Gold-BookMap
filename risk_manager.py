@@ -268,6 +268,48 @@ def _end_of_day(now: datetime) -> datetime:
     return session_bounds_utc(now)[1]
 
 
+def _trade_memory_session_records(
+    start_ep: float,
+    end_ep: float,
+    data_dir: Optional[Path] = None,
+) -> List[dict]:
+    """`trade_memory` closed records inside the window, one dict per record.
+
+    Each entry is `{pos_id, ticket, pts, usd, estimated, ts}` where `pos_id` is
+    the broker position id (`ticket` before the first `:`), so a record can be
+    matched to the broker's own per-position figure (`X5`).
+    """
+    mem_file = (Path(data_dir) if data_dir else _resolve_data_dir()) / "trade_memory.json"
+    if not mem_file.exists():
+        return []
+    try:
+        data = json.loads(mem_file.read_text(encoding="utf-8-sig"))
+    except (json.JSONDecodeError, OSError):
+        return []
+    if not isinstance(data, dict):
+        return []
+    out: List[dict] = []
+    for rec in data.get("closed", []) or []:
+        if not isinstance(rec, dict):
+            continue
+        try:
+            c_ts = float(rec.get("closed_ts", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if c_ts < start_ep - 1e-6 or c_ts > end_ep + 1e-6:
+            continue
+        raw_tkt = str(rec.get("ticket") or "").split(":")[0].strip()
+        out.append({
+            "pos_id": _positive_id(raw_tkt),
+            "ticket": raw_tkt,
+            "pts": float(rec.get("gain_pts", 0.0) or 0.0),
+            "usd": float(rec.get("pnl_usd_est", 0.0) or 0.0),
+            "estimated": bool(rec.get("estimated", False)),
+            "ts": c_ts,
+        })
+    return out
+
+
 def _trade_memory_session_totals(
     start_ep: float,
     end_ep: float,
@@ -540,27 +582,34 @@ class RiskManager:
         return mem_usd
 
     def daily_points_pnl(self, now: Optional[datetime] = None) -> float:
-        """Current risk-session realised bot PnL in Gold points (`Stage 4R` alignment)."""
+        """Current risk-session realised bot PnL in Gold points (`Stage 4R` alignment).
+
+        `X5`: the broker is the only authority on realised money. Each
+        `trade_memory` record is matched to the broker's own per-position
+        figure; when the two disagree beyond tolerance the broker's number is
+        used and the operator is warned. This is the guard that was missing on
+        `2026-11-10`, when one poisoned memory record (`-44.49` pts for a
+        `+1.84` pt trade) latched the `-12` pt breaker for 11 hours.
+        """
         u_now = _ensure_utc(now or _now())
         session_start, _, _ = session_bounds_utc(u_now)
-        _, mem_pts, covered_pos = _trade_memory_session_totals(
+        records = _trade_memory_session_records(
             session_start.timestamp(), u_now.timestamp(), data_dir=self._target_data_dir()
         )
+        mem_pts = sum(float(r.get("pts", 0.0) or 0.0) for r in records)
         deals = self._query_mt5_session_deals(session_start, u_now)
         if not deals:
-            return mem_pts
+            return round(mem_pts, 4)
 
         contract_sz = max(1.0, float(getattr(config, "CONTRACT_SIZE", 100.0) or 100.0))
-        by_pos: Dict[object, List[object]] = {}
+        by_pos: Dict[str, List[object]] = {}
         for idx, d in enumerate(deals):
             pid = _positive_id(getattr(d, "position_id", None))
-            p_key: object = str(pid) if pid is not None else f"_deal_{getattr(d, 'ticket', idx)}"
-            if str(p_key) in covered_pos:
-                continue
+            p_key = str(pid) if pid is not None else f"_deal_{getattr(d, 'ticket', idx)}"
             by_pos.setdefault(p_key, []).append(d)
 
-        mt5_pts = 0.0
-        for p_deals in by_pos.values():
+        broker_pts: Dict[str, float] = {}
+        for p_key, p_deals in by_pos.items():
             has_close = any(
                 getattr(d, "entry", None) in (1, 2, 3)
                 or (getattr(d, "entry", None) is None and float(getattr(d, "profit", 0.0) or 0.0) != 0.0)
@@ -569,11 +618,34 @@ class RiskManager:
             )
             if not has_close:
                 continue
+            total = 0.0
             for d in p_deals:
                 vol = float(getattr(d, "volume", 0.0) or 0.0)
                 if vol > 0.0:
-                    mt5_pts += _deal_value(d) / (vol * contract_sz)
-        return round(mem_pts + mt5_pts, 4)
+                    total += _deal_value(d) / (vol * contract_sz)
+            broker_pts[p_key] = total
+
+        total_pts = 0.0
+        seen: set = set()
+        for rec in records:
+            p_key = str(rec.get("pos_id") or "")
+            pts = float(rec.get("pts", 0.0) or 0.0)
+            if p_key and p_key in broker_pts:
+                truth = broker_pts[p_key]
+                tol = max(1.0, 0.25 * abs(truth)) if truth else 1.0
+                if abs(truth - pts) > tol:
+                    logger.warning(
+                        "RISK X5: trade_memory disagrees with MT5 for position %s "
+                        "(memory %+.2f pts vs broker %+.2f pts) -- using the broker.",
+                        p_key, pts, truth,
+                    )
+                pts = truth
+                seen.add(p_key)
+            total_pts += pts
+        for p_key, pts in broker_pts.items():
+            if p_key not in seen:
+                total_pts += pts
+        return round(total_pts, 4)
 
     def _open_bot_floating(self) -> Tuple[float, float]:
         """Return `(floating_usd, floating_pts)` across open bot MT5 positions (`magic == 234000`)."""
