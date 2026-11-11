@@ -1983,7 +1983,7 @@ The robot goes fishing (enters a trade). Fixed bracket pulls up — sometimes to
 Step 2 design recorded. Door 2 breakeven at +0.75×SL (owner decision). Two-Door Exit = Doors 1–5.
 
 ### Step 2b + 2c (`2026-11-11`) — wave-align + replay ruler
-2b `config.py`: `PM_WAVE_BE_TRIGGER_R` 1.0→0.75, `PM_WAVE_TRAIL_TRIGGER_R` 1.0→2.0, `PM_WAVE_TRAIL_ATR` 1.50→1.00 — the wave path silently UN-DID Doors 2+4 on non-burst M3 (`max(WAVE,0.75)`=1.0). 2c `tools/raw_replay.py` pure addition +104L: `_walk_bracket_two_door()` mirror + new row `Stage-2E Two-Door mirror` in `[8c]` — replay NEVER imports the live PM, so it must mirror the Doors to grade them; 5 synthetic cases pass (PARTIAL+TRAIL, TP, SELL-mirror, TIME_STOP, disaster SL). Replay `--dates` = comma-list NOT `..`; DayStop feeds `[8d]` only, never `[8c]`. Path-check caught both problems BEFORE any replay ran — slow-mode rule proven.
+2b `config.py`: `PM_WAVE_BE_TRIGGER_R` 1.0→0.75, `PM_WAVE_TRAIL_TRIGGER_R` 1.0→2.0, `PM_WAVE_TRAIL_ATR` 1.50→1.00 — the wave path silently UN-DID Doors 2+4 on non-burst M3 (`max(WAVE,0.75)`=1.0). 2c `tools/raw_replay.py` pure addition +104L: `_walk_bracket_two_door()` mirror + new row `Stage-2E Two-Door mirror` in `[8c]` — replay NEVER imports the live PM, so it must mirror the Doors to grade them; 5 synthetic cases pass (PARTIAL+TRAIL, TP, SELL-mirror, TIME_STOP, disaster SL). Replay `--dates` = comma-list NOT `..`; DayStop feeds `[8d]` only, never `[8c]`. Path-check caught both problems BEFORE any replay ran — slow-mode rule proven. **VERDICT `replay-37` (`2026-11-11`, N=36): LOSS — Stage-2E `-200.2 pts` (8/25, 24.2% WR) vs fixed-bracket bar `-2.1` (14/22, 38.9%);** old rows bit-identical to `replay-36` (-188.3/-168.9/-166.7/-108.0) so the tool is sound. Diagnosis: executed brackets Avg SL=10.66 (2.7x ATR 3.91) -> BE@0.75R=+8.0pts fires far, 45m gate@<1R cuts slow winners, partial@2R=+21.3 is BEYOND avg TP 19.03 => Doors 3+4 nearly unreachable; Two-Door degrades to bracket+early-BE+time-stop and LOSES to it. LIVE CODE REVERTED (config.py+position_manager.py checkout; loop never restarted); ruler row + 2b patch KEPT as tooling/history. Next stage = owner decision, thresholds never bent to manufacture a win.
 ### Step 2 code patch — written & tested (`2026-11-11`)
 config.py: Door 2 BE `0.5→0.75`; Door 3 partial `1.0→2.0`; Door 4 trail `0.50→2.0` / `0.50→1.00`. position_manager.py: Door 5 TIME_STOP fires at `r_now < 1.0`. 2 files, `--check`+`apply`+`cmp` on worktree `636f0ba`. Suite green: 738 passed, 3 subtests. Patch: `nov11_step2_code_patch.patch`. Next: pinned replay `--dates 2026-11-03..2026-11-09` vs −2.1 pts ([8c]); one isolated stage + one loop restart.
 
@@ -2349,15 +2349,16 @@ Only app code files count as version. `.bmw`, `data/`, `logs/` are not app versi
 | `#1`–`#14` | Sealed (`14/14`) |
 | Step 1 ("the entering") | Done |
 | Step 2 ("the leaving") — Book patch | Installed on owner rig (`64da38b`) |
-| Step 2 — Code patch | Built, tested, patch ready (`nov11_step2_code_patch.patch`) |
+| Step 2 — Code patch | FAILED replay-37 (-200.2 vs -2.1) -> reverted, uncommitted; Book keeps design+receipt (`nov11_step2_code_patch.patch`) |
 | Step 2 — Exit reporting rule | Documented in HOLY_BOOK.md, code ready to add |
 | Step 2 — Pinned replay verification | **PENDING** — next action |
 | Step 3 (multi-timeframe) | Frozen behind Step 2 |
 | Daily cap | Demo: 30 pts / 5%, Live: 12 pts |
 | L1d (STEP1 tail spikes) | Frozen behind Step 2 |
-| Loop | Running in Window 1 |
+| Step 2d entry-MTF to-do | **ACTIVE** (owner direction `2026-11-11`) — offline until a grid exists |
+| Loop | Running in Window 1 on the OLD exit code — never restarted; failed exit never installed |
 
-**Next action:** Run pinned replay `--dates 2026-11-03..2026-11-09` to verify Step 2 beats −2.1 pts.
+**Next action (owner direction `2026-11-11`):** Step 2d — multi-TF power-team ENTRY work first (`[8j]` grid, read-only; section Step 2d). The ATR door-study stays optional, replay-only. L1d latency and any ship-side MTF change stay frozen until the grid exists.
 
 ---
 
@@ -2667,11 +2668,7 @@ All other sections that need position info read from PositionManager state or MT
 
 ### Next action (your move)
 
-Run the pinned replay:
-```
---dates 2026-11-03..2026-11-09
-```
-Verify Step 2 beats −2.1 pts on N=36 brackets. If yes, ship the patch and restart the loop. Then decide whether to add exit reporting (with the 30-day keep-it-out test).
+SUPERSEDED `2026-11-11`: the pinned replay ran as `replay-37` — Step 2 LOST (−200.2 vs −2.1), live exit reverted, verdict is recorded above. This section now only holds the `exit_report_log()` build spec, QUEUED behind a winning exit method. The real next move = Step 2d Phase 0 (`[8j]` MTF grid, read-only) — see the Step 2d section.
 
 ---
 
@@ -2905,96 +2902,32 @@ self.exit_report_log(
 
 ---
 
-## What to Do Right Now — Step-by-Step (`2026-11-11`)
+## Step 2d — POWER x MTF ENTRY (`2026-11-11`, owner-directed: "keep this topic in the Book and the to-do")
 
-### If you want to run the replay verification NOW:
+**Why (tape, `replay-37`):** `[9]` GO n=36 −0.06 pts/sig vs SKIPPED-WAIT n=57 **+1.86** — the waiting hand already knows more than the shooting hand. `[8b]` 51/57 waits = `POWER v2 says NEITHER`: the gate has no opinion because it reads only ONE chart (M3, `AI_PROMPT_BARS=4`) — it lacks information, not courage. GO is worst at +3m (−0.48) and +6m (−0.67), recovers after +9m: M3 confirms late → we enter at M3-exhaustion. Owner design call: give POWER 2–3 timeframes.
 
-**Window 1 (loop running):** Leave it alone. The loop is running `main.py --loop`.
+**Phase 0 — measurement (judge-side ONLY; `tools/raw_replay.py` new section `[8j]`, read-only, ship-side untouched; same pinned dates):**
+- Per historical signal: sign(M15 trend/MA stack), M15 nearest structural wall vs own TP, sign(M3) agreement, M1 range/ATR ratio to M3, plus each team's per-TF score.
+- Buckets: `M15 x M3` agree/oppose grid, `wall-ahead < 1.2xATR` vs clear, M1 range 0.5/1.0/2.0 x M3 — forward pts at +3/+6/+9/+12/+21/+45 min per bucket, n shown.
+- Deliverable = the table that decides the design. No gate built from anything not in this table. `[8j]` text only, no browser-report change.
 
-**Window 2 (read-only replay):**
-```
-PY=.venv/Scripts/python.exe; [ -x "$PY" ] || PY=python; echo "PY=$PY"
-$PY tools/raw_replay.py --dates 2026-11-03..2026-11-09
-```
+**Phase 1 — gate spec (written AFTER grid exists, thresholds fixed BEFORE first score):**
+- M3 stays the SHOOTER. M15 = REFEREE: direction vote + wall-ahead veto. M1 = RULER, not judge: sizes fence/doors/tick-entry; a directional M1 vote allowed only if the grid proves it.
+- `POWER v2` keeps Law #11: per-TF scores computed separately, no negotiation, AI never re-weights; veto power lives in the gate table, never in the AI prompt.
+- Grid outcomes -> pre-registered rules, e.g. both signs agree -> GO; referee opposes -> WAIT; `NEITHER` + referee clear -> measured (maybe GO with small size). `NEITHER` must get a real meaning instead of a shrug.
+- Mirror the gate as a `[8k]` scoreboard row first; bar = new `GO` cohort must beat old-gate GO (−0.06) on the same signals; WAIT cohort must not out-score GO by more than today.
 
-**Expected result:** The replay should show Step 2 beats −2.1 pts on N=36 brackets ([8c]).
+**Phase 2 — sizing (M1 scalper geometry):** fence from M1 noise (1.0xATR_M1 ~ 2.5 pts on this week's sea) + wall shelter; doors sized in ATR units of the SAME TF as the fence — Step 2 autopsy law: **no door trigger beyond own TP; no teleport inside 1xATR of entry**. Ship order: gate scores win offline first, sizing second — never bundled.
 
-### If replay beats −2.1 pts:
+**Acceptance bar (pre-registered, never bent):** the new entry must beat old POWER v2 on the same signals over the same pinned tape at n>=30; else the old entry stays. First ship touch only after Phase 0 numbers exist AND a green shadow score exists.
 
-1. Apply patch: `git apply --check /home/user/nov11_step2_code_patch.patch` (on clean worktree of `636f0ba`)
-2. Apply patch: `git apply /home/user/nov11_step2_code_patch.patch`
-3. Verify: `git diff -- config.py position_manager.py` should match the patch exactly
-4. Commit and push to GitHub
-5. **One loop restart** after install
-
-### If you want to add exit reporting:
-
-1. Add `exit_report_log()` to `position_manager.py` (code in this Book)
-2. Call it at all 5 Door points in `_manage_one()`
-3. Test: `$PY -m pytest -q`
-4. Ship as separate isolated stage patch
-5. **One loop restart** after install
-6. Review after 30 days of demo — keep or remove per keep-it-out test
-
-### If you don't want exit reporting yet:
-
-Add it to the todo list (already done in this Book). The keep-it-out test means: if it doesn't make the app better and more clever, keep it out.
-
----
-
-**HOLY_BOOK.md line count:** 2998 lines (ceiling: < 3000)
-
-**Holy Book ceiling updated:** < 3000 lines (was < 2000, changed per owner instruction `2026-11-11`)
-
-**Next action:** Run pinned replay `--dates 2026-11-03..2026-11-09` to verify Step 2 beats −2.1 pts.
-
----
-
-## Quick Reference Card — Step 2 + Exit Reporting (`2026-11-11`)
-
-| Item | Value / Location |
-|------|-----------------|
-| Step 2 patch | `/home/user/nov11_step2_code_patch.patch` |
-| Patch sha256 | `0f3a116d7832eb0bd36ecd88625a5dc5c9985a1e1e679055d3c7b72fb9eedd4d` |
-| Shadow commit | `7bf14ec` (branch `x3`) |
-| Base commit | `636f0ba` |
-| Test suite | `738 passed, 3 subtests` |
-| Bar to beat | −2.1 pts (N=36, 38.9% WR) [8c] |
-| Replay dates | `--dates 2026-11-03..2026-11-09` |
-| Exit report function | `exit_report_log()` in `position_manager.py` |
-| Exit report format | `ts | ticket | action | old_sl→new_sl | old_tp→new_tp | r_now | door | reason | bid | ask` |
-| Keep-it-out test | 30 days of demo, remove if no actionable insight |
-| Loop restart required | Yes (code patch) |
-| Holy Book ceiling | < 3000 lines |
-| Current line count | 2998 lines |
-
-**Owner's real case (corrected):** market arrived at the TP line ~$16; the robot pulled TP up to ~$30 before it was touched; market never reached $30, reversed, hit the raised SL ~$9.65 — half the catch lost. Reports show which rule moved which line, at what R.
-
-**Do now:** Run pinned replay `--dates 2026-11-03..2026-11-09`.
-
-
-## End of Update (`2026-11-11`)
-
-The Holy Book now contains:
-- The exit reporting rule (every SL/TP move logged with reason)
-- The owner's real case study ($16 TP, $30 market, $3→$9.65 SL)
-- Detailed implementation code for `exit_report_log()`
-- Complete action steps for running the pinned replay
-- Updated ceiling: < 3000 lines
-
-**Next action:** Run pinned replay `--dates 2026-11-03..2026-11-09` to verify Step 2 beats −2.1 pts on N=36 brackets.
-
----
-
-## Five-Year-Old Final Recap — This Whole Update (`2026-11-11`)
-
-The robot catches fish (trades). Now every time it moves the hook (SL) or the bucket (TP), it writes one line in the fishing log: when, which door did it, old number → new number, how good the catch looked at that moment (R), and what the water (price) was doing. Last time, the fish was almost in the bucket at $16 — but the robot pulled the bucket line up to $30 too fast, the fish got away and back, touched the hook-line at $9.65, and half the catch was lost — and nobody could say exactly which door moved which line or when. Now the log answers that. If after 30 days the log is just scribbles nobody reads, we throw the notebook away — we only keep things that make the robot smarter. The alarm stays on, the goalkeeper stays strict, and the hands now explain every move.
+**Five-year-old recap:** the robot reads one small pond and guesses where the fish jump. It guesses wrong often, and when the water looks flat it freezes (“NEITHER”). Next we look at TWO more ponds — the big pond (are the fish swimming our way? any rocks ahead?) and the tiny pond (how big is one wave?) — then we write the rules DOWN, score them in the practice room against the old guesser, and only if it wins does it get on the boat.
 
 ## Book Health Notes (`2026-11-11`)
 
 - Ceiling raised `< 2000` → `< 3000` per owner instruction (this update).
 - Old-info hunt: the biggest dead weight is the October check-in stamps (lines 707–1005) — every fact in them already rides in a later sealed stage. When the Book passes 3000, compress those per Law #4 first, then the superseded `L1c` plan lines, then resolved docket items.
-- Nothing was deleted in this update — the Book was under the new ceiling the whole time.
+- `2026-11-11` tail purge: 63 dead lines removed (stale replay-date instructions with wrong `..` syntax, superseded verdict-menu copy, Quick-Reference row pointing at the dead Step-2 code patch). Protected and re-verified in place: owner's real-case facts ($16 -> $30 -> $9.65), `exit_report_log()` spec + action vocabulary incl. `TP_PULL`, no-silent-exit law, `replay-37` verdict, Step-2d to-do. Book now at its new count below.
 - New rule in force: **no silent exit** — every SL/TP move by Doors 1–5 writes an `exit_report_log()` line (old→new, R, door, why, bid/ask). Keep-it-out test after 30 demo days.
 
-*End of `2026-11-11` update — exit reporting rule enshrined, Book at 3000 lines.*
+*End of `2026-11-11` update — exit reporting rule enshrined, replay-37 verdict + Step-2d MTF to-do recorded, Book at 2937 lines (ceiling < 3000).*
