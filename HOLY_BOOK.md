@@ -2355,10 +2355,10 @@ Only app code files count as version. `.bmw`, `data/`, `logs/` are not app versi
 | Step 3 (multi-timeframe) | SUPERSEDED by Step 2d; direction-referee FROZEN NULL per `replay-38` |
 | Daily cap | Demo: 30 pts / 5%, Live: 12 pts |
 | L1d (STEP1 tail spikes) | Frozen behind Step 2 |
-| Step 2d entry-MTF | Phase 0 DONE (`replay-38`, grids on rig+GitHub `feda784`); Phase 1 = `[8m]` veto re-score |
+| Step 2d entry-MTF | Phase 0+1 DONE (`replay-38/40`); leak suspects survive honest count -> `[8n]` 5d+3d gate mirror |
 | Loop | Running in Window 1 on the OLD exit code — never restarted; failed exit never installed |
 
-**Next action (`2026-11-11`):** Step 2d Phase 1 — `[8l]` relabel + `[8m]` WRONGFUL-VETO episode re-score (judge-side patch; both-window rule in force). Live system untouched until a proposal wins offline on both windows.
+**Next action (`2026-11-11`):** run 5-day tape with current tool (`replay-41`) to complete the both-window check of `[8m]`; then build `[8n]` gate-mirror (lift/keep scored offline). Live system untouched until a proposal wins on both windows.
 
 ---
 
@@ -2922,6 +2922,8 @@ self.exit_report_log(
 **Acceptance bar (pre-registered, never bent):** the new entry must beat old POWER v2 on the same signals over the same pinned tape at n>=30; else the old entry stays. First ship touch only after Phase 0 numbers exist AND a green shadow score exists.
 
 **Phase 0 RESULT (`replay-38`, `2026-11-11`, 3 pinned days 11-05/06/09, tool `feda784`/`5d210d23…`, rig=GitHub=workspace by hash):** MTF grids N=69/69 actionable (GO 30, WAIT 39; 36 waits still `POWER v2 says NEITHER`). (a) **DIRECTION-REFEREE HYPOTHESIS = NULL on this tape:** in BOTH M12xM3 primary and M15xM3 comparison grids the agree cells are the worst (`M12 UP x M3 UP FIX -0.53`; `M12 DOWN x M3 FLAT -1.03`; oppose cells better: fwd +2.77/+2.93, n=6/9 thin); M1 x M3 audition: aligned M1 row = worst big cell (FIX -3.44, n=21), MIXED row best (+1.73 fwd, n=24). Verdict = *no evidence to build the multi-TF directional vote* — not proof it can never work; frozen, evidence-bound. (b) **REAL SUSPECT = GATE VETO BLOCKS:** `[2]` per-cycle means `Climax block +4.80/sig (n=9)`, `Non-Trend BUY guard +4.80 (n=6)`, `POWER Opposes +1.33 (n=9)` vs GO +1.30; `Dead-Zone -4.87` + `NEITHER -1.03` stay blocked. Cycle-counted = double-count → honest re-score needed (`[8m]` episode-dedup, next patch). (c) Wall hint: tight +6.26 FIX (n=4) = noise. (d) Sea sizes: Avg ATR M1=3.24 / M3=5.47 / M12=9.87 → Phase-2 scalper geometry grounded (M1 fence ~3 pts vs current avg 10.4). (e) 3-day champion bracket = +39.1 vs 5-day -2.1 = pure day-selection power → both-window rule (Hygiene #2).
+**Phase 1 v2 RESULT (`replay-40`, `2026-11-11`, same 3 days, tool `4d5d3f01…`): Hygiene #6 PASSED — `[8l]`+`[8c]` byte-identical to `replay-39` (verified by `diff`). Episode-accurate counts (GO control: 30 cyc -> 8 EP +15.1 = +1.89/ep). LEAK SUSPECTS SURVIVE HONEST COUNT (all [THIN]): `Non-Trend BUY guard` +21.3 (2 EP, +10.63/ep), `Late POWER Climax` +14.4 (3 EP, +4.80/ep), `POWER Opposes` +4.1 (3 EP, +1.36/ep) = +39.8 vs GO +15.1. CORRECTLY-BLOCKED (negative EPs, keep): `Family Gate` -60.4 (165 EP), `Dead-Zone` -16.8, `Conf<35` -17.9, `3b-Conflict` -6.9, all three WAIT cohorts negative. Reading: 5 of 8 goalkeeper rules proven right; 3 rules stand wrongful-veto candidates. Next = `[8n]` gate-mirror scored on 3d AND 5d with the same day set for both arms; only 3-day-positive candidates may be tried; bar = beat GO control on BOTH windows, n>=8 episodes per window per touched block else NOT proven.
+
 **RENAME receipt:** grids block shipped labeled `[8j]` — collides with sealed Risk-Manager section; relabel to `[8l]` in next replay patch (bookkeeping, zero logic); gate-mirror row pre-registered as `[8m]` (old text said `[8k]` — also taken by sealed `#12`).
 
 **Five-year-old recap:** the robot reads one small pond and guesses where the fish jump. It guesses wrong often, and when the water looks flat it freezes (“NEITHER”). Next we look at TWO more ponds — the big pond (are the fish swimming our way? any rocks ahead?) and the tiny pond (how big is one wave?) — then we write the rules DOWN, score them in the practice room against the old guesser, and only if it wins does it get on the boat.
