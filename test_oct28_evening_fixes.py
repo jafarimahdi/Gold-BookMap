@@ -408,6 +408,11 @@ def test_pytest_and_dynamic_data_dir_never_pollute_live_data_or_logs(monkeypatch
         r"session_levels\.json|news_cache\.json|macro_cache\.json|calendar_cache\.json|"
         r"gemini_keys_state\.json|ai_calls\.json|a2_burst_count\.json|pm_state\.json|"
         r"trade_guard_state\.json|trade_memory\.json|trade_outcomes\.csv|execution_tca\.jsonl|"
+        # 2026-11-11: the loop appends one feed-quality receipt per cycle to this
+        # file (63 MB and growing), and `tools/latency_spans.py` writes its own
+        # report into data/ -- neither is pytest pollution, both made this test
+        # fail on a Terminal-2 run while the loop was live.
+        r"market_quality_evidence\.jsonl|latency_spans_\d{4}-?\d{2}-?\d{2}\.txt|"
         r"bot\.log(\.\d+)?)$"
     )
 
