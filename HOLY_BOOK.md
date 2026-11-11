@@ -1978,7 +1978,7 @@ Fixed bracket `2.0×SL / 3.5×TP` = **−2.1 pts** (N=36, 38.9% WR) — bar to b
 | Door | Rule | Purpose |
 |------|------|---------|
 | **1 — Disaster stop** | Entry −2.0×SL, stop-market, never widens | Cap loss at 1R |
-| **2 — Breakeven** | At +1.0×SL, move stop to entry | Trade can't lose |
+| **2 — Breakeven** | At +0.75×SL, move stop to entry | Trade can't lose (owner: 0.75 instead of 1.0, protects sooner) |
 | **3 — Partial profit** | Take 50% off at +2.0×SL (limit) | Lock in gains |
 | **4 — Trailing runner** | Remaining 50% trails at 1.0×ATR below price | Let winners run |
 | **5 — Time stop** | No +1.0×SL after 4 M3 bars (~12 min) → close at market | No middle ground |
@@ -1992,8 +1992,8 @@ Fixed bracket `2.0×SL / 3.5×TP` = **−2.1 pts** (N=36, 38.9% WR) — bar to b
 
 ### Five-year-old recap
 
-The robot goes fishing (enters a trade). One fixed bracket pulls up at one time or when a fish yanks too hard — sometimes too late (loses), too early (big fish swims away). **Two-Door Exit:** (1) safety net — yank at −2, pull up immediately, never lose more than planned. (2) free game — fish to +1, hook slides to "can't lose." (3) pocket half — at +2, reel in half and keep. (4) let rest run — half on loose leash for big fish. (5) clock — nothing in 12 minutes, pull up and try elsewhere. Alarm stays on, goalkeeper strict — we teach the hands when to let go.
+The robot goes fishing (enters a trade). One fixed bracket pulls up at one time or when a fish yanks too hard — sometimes too late (loses), too early (big fish swims away). **Two-Door Exit:** (1) safety net — yank at −2, pull up immediately, never lose more than planned. (2) free game — fish to +0.75, hook slides to "can't lose." (3) pocket half — at +2, reel in half and keep. (4) let rest run — half on loose leash for big fish. (5) clock — nothing in 12 minutes, pull up and try elsewhere. Alarm stays on, goalkeeper strict — we teach the hands when to let go.
 ### Check-in stamp — `2026-11-11`
 
-Step 2 "the leaving" research + design recorded. Sources: Van Tharp (R-multiples, three exits), institutional bracket/OCO, Imkeller & Rogers (two-stop beats trailing), Alvarez (fixed bracket wins, 4x–5x > 2x–3x). Two-Door Exit = Doors 1–5. Next: write Stage Step 2 patch, verify on `--dates 2026-11-03..2026-11-09`, beat −2.1 pts on N=36, ship as one isolated stage + one loop restart.
+Step 2 "the leaving" research + design recorded. Owner decision: Door 2 breakeven triggers at +0.75×SL (not +1.0×SL) to protect sooner. Sources: Van Tharp (R-multiples, three exits), institutional bracket/OCO, Imkeller & Rogers (two-stop beats trailing), Alvarez (fixed bracket wins, 4x–5x > 2x–3x). Two-Door Exit = Doors 1–5. Next: write Stage Step 2 patch, verify on `--dates 2026-11-03..2026-11-09`, beat −2.1 pts on N=36, ship as one isolated stage + one loop restart.
 
