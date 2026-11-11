@@ -679,6 +679,79 @@ def _excursion_30m(
     return max(pxs), min(pxs)
 
 
+def _tf_atr(cd: Dict[str, np.ndarray], lookback: int = 14) -> float:
+    """ATR over resampled candle dict (high-low vs prev close). <=0 if not enough bars."""
+    try:
+        h = cd.get("high"); l = cd.get("low"); c = cd.get("close")
+        n = min(len(h), len(l), len(c))
+        if n < 3:
+            return 0.0
+        m = min(lookback, n - 1)
+        trs = [max(float(h[i]) - float(l[i]), abs(float(h[i]) - float(c[i - 1]))) for i in range(n - m, n)]
+        return sum(trs) / len(trs) if trs else 0.0
+    except Exception:
+        return 0.0
+
+
+def _mtf_ctx(
+    md: Dict[str, object],
+    px: float,
+    sig_dir: str,
+    near_sup: float = 0.0,
+    near_res: float = 0.0,
+    m12_cd: Optional[Dict[str, object]] = None,
+) -> Dict[str, float]:
+    """Step 2d Phase-0 (Book section 'Step 2d — POWER x MTF ENTRY'): judge-side
+    multi-timeframe context of ONE signal. CLOSED bars only (completed_before_ep
+    resampling upstream) — no look-ahead. NEVER imported by the live loop."""
+    m15 = md.get("candles_m15") or {}
+    m3 = md.get("candles_m3") or {}
+    m12 = m12_cd if isinstance(m12_cd, dict) else {}
+    m1 = md.get("candles") or {}
+    out = {"m15_dir": 0, "atr15": 0.0, "atr3": 0.0, "m3_dir": 0,
+           "wall_ahead": -1.0, "agree15": 0,
+           "m12_dir": 0, "atr12": 0.0, "m1_dir": 0, "atr1": 0.0}
+
+    def _dir_of(cd, atrv):
+        cc = cd.get("close")
+        if cc is None or len(cc) < 3 or atrv <= 0:
+            return 0
+        dd = float(cc[-1]) - float(cc[-3])
+        return 1 if dd > 0.30 * atrv else (-1 if dd < -0.30 * atrv else 0)
+
+    a1 = _tf_atr(m1)
+    out["atr1"] = a1
+    out["m1_dir"] = _dir_of(m1, a1)
+    a12 = _tf_atr(m12)
+    out["atr12"] = a12
+    out["m12_dir"] = _dir_of(m12, a12)
+    a15 = _tf_atr(m15)
+    out["atr15"] = a15
+    c15 = m15.get("close")
+    if c15 is not None and len(c15) >= 3 and a15 > 0:
+        d15 = float(c15[-1]) - float(c15[-3])
+        out["m15_dir"] = 1 if d15 > 0.30 * a15 else (-1 if d15 < -0.30 * a15 else 0)
+    a3 = _tf_atr(m3)
+    out["atr3"] = a3
+    c3 = m3.get("close")
+    if c3 is not None and len(c3) >= 3 and a3 > 0:
+        d3 = float(c3[-1]) - float(c3[-3])
+        out["m3_dir"] = 1 if d3 > 0.30 * a3 else (-1 if d3 < -0.30 * a3 else 0)
+    sgn = 1 if str(sig_dir).upper() == "BUY" else (-1 if str(sig_dir).upper() == "SELL" else 0)
+    out["agree15"] = int(sgn != 0 and out["m15_dir"] == sgn)
+    if sgn != 0 and px > 0:
+        try:
+            if sgn > 0:
+                nr = float(near_res or 0.0)
+                out["wall_ahead"] = (nr - px) if nr > px else -1.0
+            else:
+                ns = float(near_sup or 0.0)
+                out["wall_ahead"] = (px - ns) if 0 < ns < px else -1.0
+        except Exception:
+            out["wall_ahead"] = -1.0
+    return out
+
+
 def _walk_bracket_with_exit(
     bar_keys: List[int],
     bars: List[Tuple[int, float, float, float, float]],
@@ -2682,8 +2755,25 @@ def replay_single_day(
                             except (TypeError, ValueError):
                                 pass
 
+                # Step 2d Phase-0 ([8j]): forward-12m price for ALL cycles (cheap
+                # bisect), MTF context ONLY for actionable directional signals.
+                _f12 = _price_after(trade_eps, trades, tc_ep, 12.0, tol_s=tol_tf_s)
+                mtf_ctx = None
+                if sig_dir in ("BUY", "SELL") and sig_conf >= conf_thr:
+                    try:
+                        mtf_ctx = _mtf_ctx(
+                            md, px, sig_dir,
+                            near_sup=float(getattr(snap, "nearest_support", 0.0) or 0.0),
+                            near_res=float(getattr(snap, "nearest_resistance", 0.0) or 0.0),
+                            m12_cd=htf_m1_builder.to_resampled_dict(
+                                12, completed_before_ep=tc_ep),
+                        )
+                    except Exception:
+                        mtf_ctx = None
+
                 cycles_out.append({
                     "entry_ep": tc_ep,
+                    "fwd12_px": (round(float(_f12), 3) if _f12 else None),
                     "dt_utc": tc_dt,
                     "buda_hhmmss": tc_dt.astimezone(BUDA_TZ).strftime("%H:%M:%S"),
                     "buda_hour": tc_dt.astimezone(BUDA_TZ).hour,
@@ -2750,6 +2840,18 @@ def replay_single_day(
                     "paper_sim_status": sim_status,
                     "is_a1_serve": bool(is_a1_serve),
                 })
+                if mtf_ctx is not None:
+                    _r = cycles_out[-1]
+                    _r["mtf15"] = mtf_ctx["m15_dir"]
+                    _r["mtf15_atr"] = round(mtf_ctx["atr15"], 3)
+                    _r["mtf3"] = mtf_ctx["m3_dir"]
+                    _r["mtf3_atr"] = round(mtf_ctx["atr3"], 3)
+                    _r["mtf_wall"] = round(mtf_ctx["wall_ahead"], 3)
+                    _r["mtf_agree"] = mtf_ctx["agree15"]
+                    _r["mtf12"] = mtf_ctx["m12_dir"]
+                    _r["mtf12_atr"] = round(mtf_ctx["atr12"], 3)
+                    _r["mtf1"] = mtf_ctx["m1_dir"]
+                    _r["mtf1_atr"] = round(mtf_ctx["atr1"], 3)
                 tc_ep += every_s
 
             # Post-window walkout for open Escort positions & deferred shadow_naive counterfactuals
@@ -3366,6 +3468,119 @@ def synthesize_multi_day(results: List[Dict[str, Any]]) -> Tuple[str, str, Dict[
         lines.append(f"  SHOOTING WAIT REASONS ON ACTIONABLE SIGNALS (N={len(wait_cycles)}):")
         for wr_k, wr_n in sorted(wait_reasons.items(), key=lambda kv: -kv[1])[:6]:
             lines.append(f"    - {wr_n:>4}x  {wr_k}")
+
+    # ---- [8j] Step 2d Phase 0: multi-timeframe context grid (judge-side only) ----
+    _act = [
+        c for r in ok_days for c in r["cycles"]
+        if not c.get("error") and c.get("direction") in ("BUY", "SELL")
+        and c.get("confidence", 0.0) >= conf_thr
+    ]
+    _with = [c for c in _act if "mtf15" in c]
+    lines.append(f"\n[8j] STEP 2d PHASE-0 MTF GRID (actionable signals, closed bars only, N={len(_with)}/{len(_act)})")
+    lines.append(
+        "  Rule: gate design is built ONLY from this table; thresholds fixed before first [8k] score."
+    )
+    if _with:
+        def _jrow(cnt, pts, fixs, n_ref=None):
+            n = len(cnt)
+            mean = (sum(pts) / n) if n else 0.0
+            fw = (100.0 * sum(1 for p in pts if p > 0) / n) if n else 0.0
+            fm = (sum(fixs) / len(fixs)) if fixs else 0.0
+            fn = len(fixs) if fixs else 0
+            return f"  {n_ref:<34s} n={n:>4} | mean12m {mean:+6.2f} pts | fwd>0 {fw:5.1f}% | FIX mean {fm:+6.2f} (n={fn})"
+        _a3 = [float(c.get("mtf3_atr") or 0.0) for c in _with if c.get("mtf3_atr")]
+        _a12 = [float(c.get("mtf12_atr") or 0.0) for c in _with if c.get("mtf12_atr")]
+        _a1 = [float(c.get("mtf1_atr") or 0.0) for c in _with if c.get("mtf1_atr")]
+        if _a3:
+            _m = lambda xs: (sum(xs) / len(xs)) if xs else 0.0
+            lines.append(f"  Avg ATR: M1={_m(_a1):.2f} M3={_m(_a3):.2f} M12={_m(_a12):.2f} pts | horizons fwd12m; FIX = executed bracket pts where available")
+        _pairs = [(a, b) for a in (1, -1, 0) for b in (1, -1, 0)]
+        def _plabel(tfa, tfb):
+            _s = {1: "UP", -1: "DOWN", 0: "FLAT"}
+            d = {}
+            for i, (a, b) in enumerate(_pairs):
+                d[(a, b)] = f"{i + 1} {tfa} {_s[a]:<4s} x {tfb} {_s[b]}"
+            return d
+        _L12 = _plabel("M12", "M3")
+        _L1 = _plabel("M1 ", "M3")
+        _L15 = _plabel("M15", "M3")
+        _LM1 = {"UP=M3": "M1 UP   = M3 UP", "DOWN=M3": "M1 DOWN = M3 DOWN",
+                "MIXED": "M1 MIXED vs M3", "M3 FLAT": "M3 FLAT (vote meaningless)"}
+        def _wall_pick(c):
+            w = float(c.get("mtf_wall", -1.0) or -1.0)
+            a3 = float(c.get("mtf3_atr") or 0.0)
+            if w < 0.0 or a3 <= 0.0:
+                return "nowall"
+            if w < 1.2 * a3:
+                return "tight"
+            if w < 2.5 * a3:
+                return "mid"
+            return "clear"
+
+        def _ratio_pick(c):
+            a15 = float(c.get("mtf12_atr") or 0.0) or float(c.get("mtf15_atr") or 0.0)
+            a3 = float(c.get("mtf3_atr") or 0.0)
+            if a15 <= 0.0:
+                return "noisy"
+            r = a3 / a15
+            if r < 0.45:
+                return "quiet"
+            if r <= 0.75:
+                return "normal"
+            return "noisy"
+
+        def _m1_pick(c):
+            m1v = int(c.get("mtf1", 0)); m3v = int(c.get("mtf3", 0))
+            if m3v == 0:
+                return "M3 FLAT"
+            if m1v == 0:
+                return "MIXED"
+            return "UP=M3" if m1v == m3v else ("DOWN=M3" if (m1v == -1 and m3v == -1) else "MIXED")
+
+        _grids = [
+            (_pairs, "AGREEMENT GRID M12 x M3 - PRIMARY (owner pick `2026-11-11`: 12m = 4xM3, in-rhythm referee)",
+             lambda c: (int(c.get("mtf12", 0)), int(c["mtf3"])), _L12),
+            (_pairs, "AGREEMENT GRID M1 x M3 - M1 JUDGE AUDITION (1m = 1/3 of a decision bar)",
+             lambda c: (int(c.get("mtf1", 0)), int(c["mtf3"])), _L1),
+            (_pairs, "COMPARISON GRID M15 x M3 - OLD REF (live ladder TF; settles M12-vs-M15)",
+             lambda c: (int(c["mtf15"]), int(c["mtf3"])), _L15),
+            (["UP=M3", "DOWN=M3", "MIXED", "M3 FLAT"],
+             "M1 ALIGNED WITH M3 (is the tiny pond pulling the same way?)",
+             _m1_pick, _LM1),
+            (["tight", "mid", "clear", "nowall"],
+             "WALL-AHEAD GRID (nearest level vs 1.2x/2.5x ATR_M3)",
+             _wall_pick, {}),
+            (["quiet", "normal", "noisy"],
+             "ATR-RATIO GRID M3/M12 (sea of decision vs sea of referee; M3/M15 in row data)",
+             _ratio_pick, {}),
+        ]
+        for _gi, (keys, title, pick, lblmap) in enumerate(_grids):
+            lines.append(f"  {title}:")
+            for k in keys:
+                rows = [c for c in _with if pick(c) == k]
+                pts, fixs = [], []
+                go_n = go_pos = 0
+                for c in rows:
+                    e = float(c["price"]); f12 = c.get("fwd12_px")
+                    if f12:
+                        gain = (float(f12) - e) if c["direction"] == "BUY" else (e - float(f12))
+                        pts.append(gain)
+                    if c.get("fix_pts") is not None and c.get("fix_out") in ("TP", "SL", "TIMEOUT", "TRAIL"):
+                        fixs.append(float(c["fix_pts"]))
+                    if c.get("shot_action") == "GO":
+                        go_n += 1
+                        if float(c.get("fix_pts") or 0.0) > 0:
+                            go_pos += 1
+                lab = lblmap.get(k, str(k))
+                line = _jrow(rows, pts, fixs, n_ref=lab)
+                line += f" | GO-taken {go_n} (fix>0 {go_pos})"
+                lines.append(line)
+            lines.append("  (thin-cell law: n<8 = direction hint only, never a conclusion)")
+        _nw = [c for c in _act if c.get("shot_action") != "GO" and "mtf15" not in c]
+        if _nw:
+            lines.append(f"  NOTE: {len(_nw)} actionable non-GO cycles lack ctx (pre-patch records mixed in?) - excluded.")
+    else:
+        lines.append("  NO CTX RECORDED - cycles lack 'mtf15' (replay ran with a pre-2d raw_replay.py?).")
 
     # [8c] Stage 4 Exit Ruler Scorecard on Executed SHOOTING GO Brackets
     lines.append(f"\n[8c] STAGE 4 EXIT RULER SCORECARD (EXECUTED SHOOTING GO BRACKETS, N={len(go_cycles)})")
