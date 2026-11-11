@@ -2324,7 +2324,7 @@ Only app code files count as version. `.bmw`, `data/`, `logs/` are not app versi
 
 ## When the Holy Book Gets Full Again (`2026-11-11`)
 
-**Rule:** When HOLY_BOOK.md approaches the ceiling (now 3000 lines per updated owner instruction), delete old info that is no longer useful:
+**Rule:** When HOLY_BOOK.md approaches the ceiling (now 4500 lines per owner instruction `2026-11-11 late`), delete old info that is no longer useful:
 
 1. **Old check-in stamps** (>30 days old) — compress per Law #4, keep only facts
 2. **Superseded plans** — remove when replaced by executed versions
@@ -2512,9 +2512,9 @@ git show --stat HEAD
 ## Holy Book Law — Updated Ceiling (`2026-11-11`)
 
 **Previous ceiling:** < 2000 lines (set 2026-11-10)
-**Updated ceiling:** < 3000 lines (per owner instruction, 2026-11-11)
+**Updated ceiling:** < 4500 lines (owner `2026-11-11`, raising the same-day `< 3000`; room is for receipts and laws, NOT decoration — dead-line hunts still apply at every check-in)
 
-When the book approaches 3000 lines, delete old info that is no longer useful (see "When the Holy Book Gets Full Above"). Never delete: active acceptance criteria, consequential scope decisions, standing user constraints, laws #5–#11, patch-delivery law, or the exit reporting rule with its keep-it-out test.
+When the book approaches 4500 lines, delete old info that is no longer useful (see "When the Holy Book Gets Full Above"). Never delete: active acceptance criteria, consequential scope decisions, standing user constraints, laws #5–#11, patch-delivery law, or the exit reporting rule with its keep-it-out test.
 
 **Current line count:** see Quick Reference Card (single source).
 
@@ -2926,6 +2926,7 @@ self.exit_report_log(
 
 **RENAME receipt:** grids block shipped labeled `[8j]` — collides with sealed Risk-Manager section; relabel to `[8l]` in next replay patch (bookkeeping, zero logic); gate-mirror row pre-registered as `[8m]` (old text said `[8k]` — also taken by sealed `#12`).
 
+**STATUS SNAPSHOT (`2026-11-11`, night):** replay-38 (Phase 0 grids: direction-referee NULL) + replay-39/40 (veto episode count: 5 goalkeeper rules proven RIGHT incl. Family Gate 165 EP; 3 proven-leak suspects GUILTY-HINT, all [THIN]: Non-Trend BUY +10.63/2 EP, Climax +4.80/3 EP, Opposes +1.36/3 EP). **PENDING:** 5-day tape `replay-41` completes the both-window check of `[8m]` (owner rig). THEN build `[8n]` gate mirror (lift/keep, both arms same day set, bar = beat GO control on 3d AND 5d, >=8 EP/window/touched-block). Book ceiling raised to < 4500.
 **Five-year-old recap:** the robot reads one small pond and guesses where the fish jump. It guesses wrong often, and when the water looks flat it freezes (“NEITHER”). Next we look at TWO more ponds — the big pond (are the fish swimming our way? any rocks ahead?) and the tiny pond (how big is one wave?) — then we write the rules DOWN, score them in the practice room against the old guesser, and only if it wins does it get on the boat.
 
 ## Measurement Hygiene LAWS (`2026-11-11`, born from Step 2 + Step 2d the same day — standing)
@@ -2942,7 +2943,7 @@ self.exit_report_log(
 
 ## Book Health Notes (`2026-11-11`)
 
-- Ceiling raised `< 2000` → `< 3000` per owner instruction (this update).
+- Ceiling raised `< 2000` → `< 3000` → `< 4500` (owner `2026-11-11` late; stale numeric claims elsewhere in old receipts — e.g. `2998` lines — are historical, superseded by this line).
 - Old-info hunt: the biggest dead weight is the October check-in stamps (lines 707–1005) — every fact in them already rides in a later sealed stage. When the Book passes 3000, compress those per Law #4 first, then the superseded `L1c` plan lines, then resolved docket items.
 - `2026-11-11` tail purge: 63 dead lines removed (stale replay-date instructions with wrong `..` syntax, superseded verdict-menu copy, Quick-Reference row pointing at the dead Step-2 code patch). Protected and re-verified in place: owner's real-case facts ($16 -> $30 -> $9.65), `exit_report_log()` spec + action vocabulary incl. `TP_PULL`, no-silent-exit law, `replay-37` verdict, Step-2d to-do. Book now at its new count below.
 - New rule in force: **no silent exit** — every SL/TP move by Doors 1–5 writes an `exit_report_log()` line (old→new, R, door, why, bid/ask). Keep-it-out test after 30 demo days.
