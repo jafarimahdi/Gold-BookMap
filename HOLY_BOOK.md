@@ -1916,77 +1916,84 @@ The audit has two halves; the **code half needs no live files** and ran on the r
 
 **Post-seal check (hypothesis tested and DISPROVEN, `fb5b940`):** I suspected that the next restart would append `29`-column rows to `decisions_log.csv` whose mirrored header had already grown to `32` columns (a `csv.DictWriter` `ValueError` that would silently kill the day's evidence). **It cannot happen:** `_decision_csv_schema()` migrates whichever file it is about to append to, and the `24k (A2)` mirror block migrates `decisions_YYYYMMDD.csv` independently (`main.py:1024`). A trial rewrite of the primary target to the dated file was reverted -- it duplicated the mirror and broke `5` journal tests. **No defect, no patch, `713 passed`.**
 
-**Operational finding `2026-11-11 00:0x` (no patch, live observation):** `main.py:174-176` builds the log filename **once at startup** from the **local** date and there is **no rollover handler**. A loop started at `23:5x` therefore keeps writing into `trading_20261110.log` past midnight, while the decision mirror `decisions_YYYYMMDD.csv` switches at `datetime.now(timezone.utc)` (`main.py:1024`) -- i.e. both change at `00:00 CET` but only the mirror changes file. Practical rule: **start the loop after the local date changes** (the `07:50` runbook already does this) or the day's log will straddle two dates when the Evening Audit reads it. Second live observation of the same minute: the owner had **BookMap closed** when the loop was started, which is the reverse of runbook step 1 -- the robot then runs blind and fail-closed (`STALE_FEED`, no entries), which is safe but useless. Restart tomorrow with BookMap up and `1-2` min of ticks first.
+**Operational finding `2026-11-11 00:0x` (no patch):** `main.py:174-176` builds the log filename **once at startup** from the local date, no rollover. A loop started at `23:5x` keeps writing into `trading_20261110.log` past midnight while `decisions_YYYYMMDD.csv` switches at `datetime.now(timezone.utc)` (`main.py:1024`). Rule: **start the loop after the local date changes** (runbook `07:50`) or the log straddles two dates. Also: never start with BookMap closed — robot runs blind/fail-closed (`STALE_FEED`), safe but useless.
 
-## Stage L1a — the invisible 1.1 s of every cycle is now measured (`2026-11-11`)
+## Stage L1a — the invisible ~1.1 s of every cycle is now measured (`2026-11-11`)
 
-`audit_day.py` TEST 12 has **failed on every audited day** (`median 2,069 ms`, p95 `5,342 ms`, `0/910` cycles under the `500 ms` target) while only `STEP1`, `STEP2` and `STEP3` carried a clock. The remaining `~1.1 s` per cycle had **no name**, so no patch could be aimed at it -- worse, the obvious suspects were never checked: `run_pipeline()` reloads `.env`, harvests position ids (which reads `decisions_log.csv`, `25 MB`), touches the lock, runs maintenance, then after Step 5 does per-position **MT5 history queries**, the signal bridge, two snapshot writes and the journal write.
+`audit_day.py` TEST 12 failed on every audited day (`median 2,069 ms`, `0/910` under 500 ms) while only `STEP1`/`STEP2`/`STEP3` carried a clock. The remaining ~1.1 s had no name. L1a is **measurement only** (gated by `LATENCY_LOG_ENABLED`, no behaviour change): seven spans (`PREFLIGHT env+idharvest+lock+maint`, `STEP4 execute`, `STEP5 monitor`, `CLOSED-DEAL log (MT5 history)`, `SIGNAL bridge + persist`, `DECISION journal write`, `SUMMARY blocks`) + tool `tools/latency_spans.py` (median/p95/max/share, `NAMED` vs `TOTAL`, `LEFT OVER` remainder). Proof: `test_nov11_stage_l1a_latency_spans.py` (7 tests); full suite **`720 passed, 3 subtests`**.
 
-**L1a is measurement only, gated by the existing `LATENCY_LOG_ENABLED`** (no new switch, no behaviour change, no threshold): seven spans -- `PREFLIGHT env+idharvest+lock+maint`, `STEP4 execute`, `STEP5 monitor`, `CLOSED-DEAL log (MT5 history)`, `SIGNAL bridge + persist`, `DECISION journal write`, `SUMMARY blocks` -- each emitting the same `LATENCY <name> <ms>ms` line the auditor already reads.
-**New tool `tools/latency_spans.py`** rebuilds a whole cycle from those lines: per-span median/p95/max/share, `NAMED` vs `TOTAL pipeline`, and the **`LEFT OVER (unmeasured)`** remainder, plus the slowest cycles with timestamps. Read-only, no MT5 import.
-**Proof:** `test_nov11_stage_l1a_latency_spans.py` (`7` tests: all spans emitted, span order follows the pipeline, preflight sits after the id harvest and before STEP1, no second switch, `TOTAL pipeline` retained, analyzer rebuilds a cycle and finds the leftover, feed-age lines ignored / empty day survives). Full suite **`720 passed, 3 subtests passed`**.
-**Next (`L1b`):** run one session, read `bash` -> `tools/latency_spans.py --date <today>`, and aim the first real speed patch at whichever span owns the largest share. `STEP 2` (`663 ms`) and the `PREFLIGHT` id harvest are the pre-registered suspects.
+First live reading (one cycle): `PREFLIGHT 353` → `STEP1 198` → `STEP2 405` → `STEP3 1` → **gap 518** → `STEP4 1` → `STEP5 3` → `CLOSED-DEAL 1` → `SIGNAL 86` → `DECISION 8` → `SUMMARY 1` = **1,580 ms**. Named 1,057 ms (67%) | **LEFT OVER 523 ms** (33%). MT5 history query = 1 ms; decisions-log harvest sits inside PREFLIGHT; quote age at pre-execution 1,177→1,599 ms (robot decides on 1.2–1.6 s old price = TEST 12 complaint). L1b closed the 523 ms with 4 more spans; `LEFT OVER` → 30 ms.
 
-### `Stage L1a` FIRST LIVE READING (`2026-11-11 10:49`, owner rig) — and the 523 ms nobody had named
+## ⏱️ OPEN REGISTER — `2026-11-11` (single to-do list; items 1-4 done)
 
-First instrumented cycle, straight from the log (`LATENCY` lines, one cycle):
-`PREFLIGHT 353` -> `STEP1 198` -> `STEP2 405` -> `STEP3 1` -> **`gap 518`** -> `STEP4 1` -> `STEP5 3` -> `CLOSED-DEAL 1` -> `SIGNAL bridge + persist 86` -> `DECISION journal 8` -> `SUMMARY 1` = **`TOTAL 1,580 ms`**.
-- **`Named 1,057 ms` (67%) | `LEFT OVER 523 ms` (33%)** -- so a third of the cycle lives **between the `STEP3` line and `STEP4`**, which `L1a` deliberately did not touch.
-- **Two cost hypotheses killed by measurement, not opinion:** the MT5 per-position history query is **`1 ms`** (`CLOSED-DEAL log`) and the `25 MB` decisions-log harvest sits inside `PREFLIGHT 353 ms` -- the *shared* preflight cost, not a standalone monster.
-- **The business cost is visible in the same cycle:** `quote age at pre-execution 1,177 -> 1,599 ms`. The robot decides on a price that is already `1.2-1.6 s` old -- exactly the `TEST 12` complaint.
-- **`L1b` (built the same hour):** four more spans close the 523 ms -- `GATE recheck + quality evidence`, `RL size/pause check`, `STEP4a position management`, `EXEC-TIME feed recheck` -- plus the analyzer's canonical order and `11` tests (`724 passed, 3 subtests`). Measurement only, no behaviour change.
+**A. DONE** — `L1a` measured, `L1b` blind spot closed (`LEFT OVER` 523→30 ms), `L1c` installed (`journal tail` 559→0.09 ms, `738 passed`), test-whitelist patch pushed (`32b511a`).
 
-## ⏱️ OPEN REGISTER — `2026-11-11` (the single to-do list; nothing else is outstanding)
+**B. ACTIVE — Step 2 "the leaving":** beat `Benchmark 2.0x SL / 3.5x TP = −2.1 pts` on same `N=36` (`[8c]`). Working material: `Legacy C3` 63.9% WR, shooter skips profitable cohort (`WAIT` +1.86 vs `GO` −0.32), tight stop wins (−43.2 vs −98.8).
 
-**A. THE NEXT 60 MINUTES (owner, in order)**
-1. **Restart the loop** on `a383220` (`L1b` installed and pushed): `PY=.venv/Scripts/python.exe; [ -x "$PY" ] || PY=python` -> `"$PY" main.py --loop`. One loop, BookMap already up.
-2. **At T+60 min**, take the measurement and send the file:
-   `"$PY" tools/latency_spans.py --date $(date +%Y-%m-%d) --top 5` -> `data/latency_spans_<date>.txt`.
-3. Expect the table to rank `PREFLIGHT`, `STEP2 analyze`, `GATE recheck + quality evidence`, `RL size/pause check`, `STEP4a position management`, `EXEC-TIME feed recheck` -- and to leave **`LEFT OVER` near zero** (that is the proof `L1b` closed the blind spot).
+**C. THIS WEEK (after Step 2, one stage at a time):** `[8d]`/`[8e]` consequences: `POS_D 1/4` watch, `Escort` negative value-add (−9.5 pts, `Stage E2` candidate), passive-limit save ~76 pts.
 
-**B. THIS WEEK (in this order, one stage at a time)**
-4. **`Stage L1c`** -- the first real speed patch, aimed at whichever span the measurement names (no strategy change, must stay replay-neutral).
-5. **Step 2 -- "the leaving"**: beat `Benchmark 2.0x SL / 3.5x TP = -2.1 pts` on the same `N=36` (`[8c]`). Working material: `Legacy C3` `63.9%` WR, shooter skips the profitable cohort (`WAIT +1.86` vs `GO -0.32`), tight stop wins (`-43.2` vs `-98.8`).
-6. Then the `[8d]`/`[8e]` consequences: `POS_D 1/4` watch item, `Escort` negative value-add (`-9.5 pts`, `Stage E2` candidate), passive-limit save `~76 pts`.
+**D. WAITING ON OWNER DECISION:** `C1 whale_walls` −0.853/call → CUT; `C2 htf_poc` +0.105/call → keep/retire; `vwap_bands` weight card (97%, +4.28/call); `Gemini-outage safe trading` (parked 10-24); `MAX_TRADES_PER_DAY` (default 20, check `.env`); Bookmark **Delivery Van** (Step 4 GC→XAUUSD basis, redesign ordered); Bookmark #6 `A2 _l3_opposes` (observe DEMO bursts).
 
-**C. WAITING ON AN OWNER DECISION (not blocked technically)**
-7. `C1 whale_walls` `-0.853/call` -> `DECIDE: CUT`; `C2 htf_poc` `+0.105/call` -> keep or retire (matured, parked for owner).
-8. `vwap_bands` weight card (`97%`, `+4.28/call`) -- one-change law, owner picks the week.
-9. `Gemini-outage safe trading`: design a verified way to trade when the AI cannot answer (parked `10-24`).
-10. `MAX_TRADES_PER_DAY` -- source default is `20`; if the private `.env` still says `999`, change it.
-11. Bookmark: **Delivery Van** (`Step 4` GC->XAUUSD basis + real spread) -- owner ordered a redesign, interim fix live.
-12. Bookmark `#6`: `A2 _l3_opposes` strictness -- observe real DEMO bursts first (untouched by design).
+**E. QUEUED BEHIND STEP 2 (do not bundle):** `M1→M2→M3` multi-timeframe (frozen); `Stage B1c` (first crossed book per session at WARNING); `Stage S2c` (rolling absorption `attacked`); `Step S1b` leftovers.
 
-**D. QUEUED BEHIND STEP 2 (do not bundle)**
-13. `M1` measure -> `M2` shadow -> `M3` veto-only (multi-timeframe decision) -- **frozen**.
-14. `Stage B1c` (first crossed book per session at `WARNING`), `Stage S2c` (rolling absorption `attacked`), `Step S1b` leftovers.
+**F. SOMEDAY / CHORES:** `v2.1` MBO queue-ahead; feed auto-resubscribe; Watchman never ran a real day; owner `C:` disk 90%; inert `SHOOT_ROAD_RATIO` in `.env` may be deleted.
 
-**E. SOMEDAY / CHORES (unchanged, low risk)**
-15. `v2.1` MBO queue-ahead; feed auto-resubscribe; Watchman has never run a real day; owner `C:` disk `90%`; inert `SHOOT_ROAD_RATIO` line in `.env` may be deleted.
+**G. OPERATIONAL LESSONS:** Start loop **after** local date changes (log filename fixed at startup, no rollover) + **always with BookMap ticking** (BookMap-closed start is fail-closed but blind). Never stop BookMap/PC with open position; dead feed is fail-closed, not dangerous.
 
-**F. OPERATIONAL LESSONS (no code action)**
-16. Start the loop **after** the local date changes (log filename is fixed at startup, no rollover) and **always with BookMap already ticking** -- a BookMap-closed start is fail-closed but blind.
-17. Never stop BookMap or the PC with an open position; a dead feed is fail-closed, not dangerous.
+### `Stage L1b` RESULT (`2026-11-11`, 152 cycles, owner rig) — blind spot closed, target named
 
-### `Stage L1b` RESULT (`2026-11-11`, 152 cycles, owner rig) — the blind spot is closed, the target is named
+`tools/latency_spans.py`, loop untouched: **median `1,067 ms` | p95 `1,727 ms` | max `7,555 ms`**, `NAMED 95.3%`, **`LEFT OVER 30 ms` (was `523 ms`)** → `L1b` did its job; cycle fully attributed.
+- Cycle owners (median): `GATE recheck + quality evidence 287` (26.9%) + `STEP2 analyze 259` (24.3%) + `PREFLIGHT 206` (19.3%) + `EXEC-TIME feed recheck 94` (8.8%) + `STEP1 98` (9.2%) + `SIGNAL bridge 52` (4.9%).
+- Killed by measurement (2nd time): `CLOSED-DEAL log (MT5 history) 1 ms`, `RL 1 ms`, `STEP4a 0 ms`, `STEP4 1 ms`, `SUMMARY 0 ms`. MT5-history and preflight-harvest guesses are dead.
+- The duplicate is the story: `GATE recheck` + `EXEC-TIME feed recheck` = **`381 ms` (35.7%)** — same two things (`_preflight_data_reason()` + `_market_quality_evidence()`) twice per cycle.
+- Tail is `STEP1`, not median: three cycles at **`3,500-3,880 ms`** (`00:09`, `10:42`, `10:59`) vs `98 ms` median — p95/max source (chunk rotation / large tape read), separate from median. AI answers: `STEP3 AI 792 ms` at `10:59` (median `0 ms`, throttled/async); sync answer ~0.8 s.
+- `L1c` plan SUPERSEDED by executed `L1c`: item (1) killed by measurement (duplicate evidence ~1 ms, not 250 ms); item (2) replaced — mtime cache impossible (journal appended every cycle), so `L1c` uses append-only **tail read**. `STEP1` spikes stay for `L1d`. Acceptance bar unchanged: suite green, `[8c]` identical, median ≤ `500 ms` audit bar or stated reason.
 
-`tools/latency_spans.py`, loop untouched: **median `1,067 ms` | p95 `1,727 ms` | max `7,555 ms`**, `NAMED 95.3%`, **`LEFT OVER 30 ms` (was `523 ms`)** -> `L1b` did its job; the cycle is now fully attributed.
-- **Who owns the cycle (median):** `GATE recheck + quality evidence 287` (26.9%) + `STEP2 analyze 259` (24.3%) + `PREFLIGHT 206` (19.3%) + `EXEC-TIME feed recheck 94` (8.8%) + `STEP1 98` (9.2%) + `SIGNAL bridge 52` (4.9%).
-- **Killed by measurement (second time):** `CLOSED-DEAL log (MT5 history) 1 ms`, `RL 1 ms`, `STEP4a 0 ms`, `STEP4 1 ms`, `SUMMARY 0 ms`. The MT5-history and preflight-harvest guesses are dead.
-- **The duplicate is the story:** `GATE recheck` + `EXEC-TIME feed recheck` = **`381 ms` (35.7%)** and they compute the *same two things* (`_preflight_data_reason()` + `_market_quality_evidence()`) twice per cycle.
-- **The tail is `STEP1`, not the median:** three cycles at **`3,500-3,880 ms`** (`00:09`, `10:42`, `10:59`) against a `98 ms` median -- that is where p95/max come from (chunk rotation / large tape read), a separate defect from the median.
-- **When the AI really answers it is the biggest single block:** `STEP3 AI 792 ms` at `10:59` (median `0 ms` because it is throttled/async) -- the async refresh is doing its job, but a synchronous answer still costs ~0.8 s.
-- **`L1c` plan -- SUPERSEDED by the executed `L1c` below:** item (1) below was killed by measurement (the duplicate evidence is `~1 ms`, not `250 ms`) and item (2) was replaced: an mtime cache cannot work because the journal is appended every cycle, so `L1c` uses an append-only **tail read** instead. `STEP1` spikes stay for `L1d` (tail, separate). The acceptance bar did not change: suite green, `[8c]` identical, median at or under the `500 ms` audit bar or a stated reason why not.
+### RISK-CAP CONFIG (`2026-11-11`, demo only)
 
-### RISK-CAP CONFIG (`2026-11-11`, demo only) — one `.env` number, three consumers
-`STAGE4R_DAILY_MAX_LOSS_PTS` was absent from `.env`, so `config._ffloat()` fell back to its code default `12.0` (`config.py:298`) -- proof-of-state: `python -c "import config; print(config.STAGE4R_DAILY_MAX_LOSS_PTS)"` prints `12.0` when the key is absent, `30.0` when live. Owner set `30` and `DAILY_LOSS_LIMIT_PCT=5` (demo, restart-free: `reload_env()` per cycle). Consumers: `risk_manager.py:375` (the live `SAFETY: RISK` gate, latch `stage4r_daily_pts` until session end), `trade_guard.py:82` (pre-trade daily cap -- same key, no second number), `tools/raw_replay.py:3330` (`[8d]` DayStop and its `Npt Stop` label). `[8c]`, the `-2.1 pts` bar, is per-trade and **unaffected**. `[8d]` **is** affected: a replay at `30` is not like-for-like with the sealed `12pt Stop` record, and there is no CLI flag (`load_dotenv(override=True)` overwrites a shell var), so a regression replay must temporarily set `.env` back to `12` and restore after. A leash is not a fix: it creates no trades and improves no result; demo only.
+`STAGE4R_DAILY_MAX_LOSS_PTS` absent from `.env` → code default `12.0` (`config.py:298`); owner set `30` + `DAILY_LOSS_LIMIT_PCT=5`. Consumers: `risk_manager.py:375` (SAFETY: RISK gate, latch until session end), `trade_guard.py:82` (pre-trade cap), `tools/raw_replay.py:3330` (`[8d]` DayStop). `[8c]` (−2.1 pts bar) is per-trade, **unaffected**. `[8d]` **is** affected: replay at `30` ≠ sealed `12pt` record; no CLI flag (`load_dotenv(override=True)` beats shell vars) — regression replay must temporarily set `.env` to `12` and restore. A leash is not a fix: demo only, creates no trades, improves no result.
 
-### `Stage L1c` (`2026-11-11`) — the journal harvest stops re-reading 25 MB, and the last two blocks get children
-First speed patch of `L1`. No threshold, judge, exit or risk number is touched.
-**Measured first** (local, real-shaped 33-column journal, `137,970` rows / `24.0 MB`): `_load_tracked_position_ids()` re-parsed the whole journal every cycle with `csv.DictReader` to recover IDs of `EXECUTED` rows -> **`559 ms`**; new reader: full scan `418 ms`, steady state **`0.09 ms`**, identical id set (`2,760`) across multi-line rationales, CRLF, unknown schema, trimmed and `os.replace`d files, half-written last row.
-**Changes:** (1) `_journal_executed_order_ids()` append-only tail read (offset + inode + 64-byte anchor + header signature), any anomaly -> full scan; its one blind spot (in-place edit behind the offset keeping the file as long) cannot occur -- `log_decision()` appends, `_trim_csv()` shrinks, migration `os.replace()`s a new inode, all three pinned by test. (2) `PREFLIGHT` children `env reload`/`id harvest`/`lock+maint`, `_LATENCY_LOG.clear()` moved to the top of `run_pipeline()`. (3) `GATE` children `session+switch`/`feed recheck`/`risk check (MT5)`/`RL loss-streak`/`trade guard`/`quality evidence`, control flow preserved. (4) `EXEC-TIME` children `data recheck`/`quality evidence`. (5) `latency_spans.py` `CHILD_OF`: children print under the parent and never enter `NAMED`, else milliseconds double-count and `LEFT OVER` goes negative.
-**Killed by measurement (third time):** duplicate quality evidence is `~1 ms`, not `250 ms`; so are `_preflight_data_reason` `1.06`, `reload_env` `0.46`, `RiskManager.check()` without a terminal `0.09`, `TradeGuard.can_trade()` `0.04`. Remaining `GATE` time on the owner rig is therefore rig-side (MT5 IPC) and the new `GATE risk check (MT5)` child will prove or kill it.
-**Verification:** `738 passed, 3 subtests passed` (was `724`), `14` new tests in `test_nov11_stage_l1c_journal_tail.py`. Owner rig: temporarily restore `STAGE4R_DAILY_MAX_LOSS_PTS=12`, run the pinned replay, `[8c]` must be identical. **Code patch -> one loop restart.**
+### `Stage L1c` (`2026-11-11`) — journal harvest stops re-reading 25 MB; last two blocks get children
 
-### TEST-HYGIENE FIX (`2026-11-11`) — the Terminal-2 whitelist was incomplete, not the code
-Running the suite in window 2 while the loop runs in window 1 failed `test_oct28_evening_fixes.py::test_pytest_and_dynamic_data_dir_never_pollute_live_data_or_logs`: the loop appended to `data/market_quality_evidence.jsonl` (`63,993,294 -> 64,007,877` B) during the ~3 min fingerprint window. That file and the `latency_spans_<date>.txt` report were missing from the test's own `live_loop_stream_re` whitelist, whose stated purpose is exactly this concurrent case. Whitelist extended (test-only, no app behaviour, **no restart**). Verified: that test passes, full suite `738 passed, 3 subtests passed`. The first `L1c` install attempt failed only because the patch file never reached `Downloads`; nothing was applied (`HOLY_BOOK.md` stayed `1969`, HEAD stayed `40c1896`, `push` reported `Everything up-to-date`) -- re-download and verify the sha256 before applying.
+First speed patch of `L1`. No threshold, judge, exit or risk number touched.
+**Measured** (33-column journal, `137,970` rows / `24.0 MB`): old `csv.DictReader` full re-parse = **559 ms**/cycle; new append-only tail read = **0.09 ms** steady state, identical ID set (2,760) across CRLF/quoted/multi-line rows, trimmed/`os.replace`d files, half-written last row.
+**Changes:** (1) `_journal_executed_order_ids()` tail read (offset + inode + 64-byte anchor + header signature), anomaly → full scan; blind spot impossible (`log_decision` appends, `_trim_csv` shrinks, migration `os.replace`s new inode — pinned by test). (2-4) `PREFLIGHT`/`GATE`/`EXEC-TIME` children named under parent (`env reload`/`id harvest`/`lock+maint`; `session+switch`/`feed recheck`/`risk check (MT5)`/`RL loss-streak`/`trade guard`/`quality evidence`; `data recheck`/`quality evidence`). (5) `latency_spans.py` `CHILD_OF`: children under parent, never in `NAMED` (else double-count → negative `LEFT OVER`).
+**Killed by measurement (3rd time):** duplicate quality evidence ~1 ms (not 250 ms); `_preflight_data_reason` 1.06, `reload_env` 0.46, `RiskManager.check()` 0.09, `TradeGuard.can_trade()` 0.04. Remaining `GATE` time is rig-side (MT5 IPC); `GATE risk check (MT5)` child proves/kills it.
+**Verification:** `738 passed, 3 subtests` (was 724), 14 new tests. Owner: restore `STAGE4R_DAILY_MAX_LOSS_PTS=12`, pinned replay, `[8c]` identical. **Code patch → one loop restart.**
+
+## Stage L1c — Research & Design: Step 2 "the leaving" (Two-Door Exit) — `2026-11-11`
+
+### Sources (reliable, for future upgrades)
+
+- Van Tharp, *Trade Your Way to Financial Freedom* (1998): Exits > entries. R-multiples; three exits: disaster stop, trailing stop, profit target; never widen a stop. [newtraderu.com / vantharpinstitute.com]
+- Institutional bracket/OCO: entry + stop-market + take-profit limit, atomic, OCO-linked; never hold without a stop. [nexusfi.com / thortradecopier.com]
+- Imkeller & Rogers (2014), *Trading to Stops*: fixed lower stop + fixed upper target beats trailing stops alone and fixed-time exits. [researchgate.net] · Cesar Alvarez 10-yr stop study: fixed max-loss + fixed target beats all trailing stops; 4x–5x R:R beats 2x–3x; no "middle ground." [bettersystemtrader.com]
+
+### Problem on our tape (`replay-36`, `11-03..11-09`)
+
+Fixed bracket `2.0×SL / 3.5×TP` = **−2.1 pts** (N=36, 38.9% WR) — bar to beat. All live exit rulers lose more: Stage-4a −188.3, Stage-4b −168.9, Legacy C3 −108.0. Shooter skips profitable half: `WAIT` +1.86 vs `GO` −0.32. Tight stops win: −43.2 vs −98.8.
+
+### Two-Door Exit design (one isolated stage, Law #9 — entry untouched)
+
+| Door | Rule | Purpose |
+|------|------|---------|
+| **1 — Disaster stop** | Entry −2.0×SL, stop-market, never widens | Cap loss at 1R |
+| **2 — Breakeven** | At +1.0×SL, move stop to entry | Trade can't lose |
+| **3 — Partial profit** | Take 50% off at +2.0×SL (limit) | Lock in gains |
+| **4 — Trailing runner** | Remaining 50% trails at 1.0×ATR below price | Let winners run |
+| **5 — Time stop** | No +1.0×SL after 4 M3 bars (~12 min) → close at market | No middle ground |
+
+### Fit with the app
+
+- M3 scalper: 4 bars = 12 min = `+12` min grading clock; `AI_PROMPT_BARS=4` already the lookback. Reuses Escort (Stage PM-1) wave trailing. No entry changes — only *how we leave*. Demo-only (`ALLOW_LIVE_TRADING=0`); never lower thresholds; fixed bracket stays the bar.
+### Acceptance criteria
+
+- Pinned replay `--dates 2026-11-03,...,2026-11-09` beats −2.1 pts on same N=36 brackets ([8c]); suite green `738 passed, 3 subtests`; one isolated stage patch (`--check` + `apply` + `cmp` on worktree); one loop restart after install.
+
+### Five-year-old recap
+
+The robot goes fishing (enters a trade). One fixed bracket pulls up at one time or when a fish yanks too hard — sometimes too late (loses), too early (big fish swims away). **Two-Door Exit:** (1) safety net — yank at −2, pull up immediately, never lose more than planned. (2) free game — fish to +1, hook slides to "can't lose." (3) pocket half — at +2, reel in half and keep. (4) let rest run — half on loose leash for big fish. (5) clock — nothing in 12 minutes, pull up and try elsewhere. Alarm stays on, goalkeeper strict — we teach the hands when to let go.
+### Check-in stamp — `2026-11-11`
+
+Step 2 "the leaving" research + design recorded. Sources: Van Tharp (R-multiples, three exits), institutional bracket/OCO, Imkeller & Rogers (two-stop beats trailing), Alvarez (fixed bracket wins, 4x–5x > 2x–3x). Two-Door Exit = Doors 1–5. Next: write Stage Step 2 patch, verify on `--dates 2026-11-03..2026-11-09`, beat −2.1 pts on N=36, ship as one isolated stage + one loop restart.
+
