@@ -3469,16 +3469,16 @@ def synthesize_multi_day(results: List[Dict[str, Any]]) -> Tuple[str, str, Dict[
         for wr_k, wr_n in sorted(wait_reasons.items(), key=lambda kv: -kv[1])[:6]:
             lines.append(f"    - {wr_n:>4}x  {wr_k}")
 
-    # ---- [8j] Step 2d Phase 0: multi-timeframe context grid (judge-side only) ----
+    # ---- [8l] Step 2d Phase 0: multi-timeframe context grid (judge-side only) ----
     _act = [
         c for r in ok_days for c in r["cycles"]
         if not c.get("error") and c.get("direction") in ("BUY", "SELL")
         and c.get("confidence", 0.0) >= conf_thr
     ]
     _with = [c for c in _act if "mtf15" in c]
-    lines.append(f"\n[8j] STEP 2d PHASE-0 MTF GRID (actionable signals, closed bars only, N={len(_with)}/{len(_act)})")
+    lines.append(f"\n[8l] STEP 2d PHASE-0 MTF GRID (actionable signals, closed bars only, N={len(_with)}/{len(_act)})")
     lines.append(
-        "  Rule: gate design is built ONLY from this table; thresholds fixed before first [8k] score."
+        "  Rule: gate design is built ONLY from this table; thresholds fixed before first [8m] score."
     )
     if _with:
         def _jrow(cnt, pts, fixs, n_ref=None):
@@ -3581,6 +3581,67 @@ def synthesize_multi_day(results: List[Dict[str, Any]]) -> Tuple[str, str, Dict[
             lines.append(f"  NOTE: {len(_nw)} actionable non-GO cycles lack ctx (pre-patch records mixed in?) - excluded.")
     else:
         lines.append("  NO CTX RECORDED - cycles lack 'mtf15' (replay ran with a pre-2d raw_replay.py?).")
+
+    # ---- [8m] Step 2d Phase 1: episode-deduped re-score of blocked cohorts ----
+    # Hygiene #3: per-cycle cohort numbers double-count a signal that stays
+    # flagged across minutes; this section counts ONE episode per blocked
+    # cohort, deduped by the cohort's own bracket lifetime (like [8d] sim).
+    def _j_eps(pred_fn) -> Tuple[List[Dict[str, Any]], int, set]:
+        out: List[Dict[str, Any]] = []
+        n_cyc = 0
+        days: set = set()
+        for r_e in ok_days:
+            next_ok = -1e18
+            for c_e in r_e["cycles"]:
+                if c_e.get("error") or not pred_fn(c_e):
+                    continue
+                n_cyc += 1
+                e_ep = float(c_e.get("entry_ep") or 0.0)
+                if e_ep < next_ok:
+                    continue
+                x_ep = float(c_e.get("shot_br_exit_ep") or (e_ep + 12.0 * 60.0))
+                next_ok = max(e_ep + 60.0, x_ep)
+                out.append(c_e)
+                days.add(str(r_e.get("day") or "?"))
+        return out, n_cyc, days
+
+    def _act_e(p) -> bool:
+        return (not p.get("error") and p.get("direction") in ("BUY", "SELL")
+                and p.get("confidence", 0.0) >= conf_thr)
+
+    _veto_keys = sorted({
+        str(c.get("gate_stage") or "?")
+        for r_e in ok_days for c in r_e["cycles"]
+        if _act_e(c) and c.get("shot_action") != "GO" and str(c.get("gate_stage") or "").strip()
+    })
+    lines.append("\n[8m] STEP 2d PHASE-1 WRONGFUL-VETO RE-SCORE (EPISODE-DEDUPED, BRACKET-LIFETIME GAP RULE)")
+    lines.append("  Fix = counterfactual planned bracket at the signal minute (same walk as [8c]); bar for any gate change: beat GO episodes on BOTH pinned windows.")
+    for _vk in (["TAKEN / GO (CONTROL)"] + _veto_keys):
+        if _vk == "TAKEN / GO (CONTROL)":
+            def _pred(c, _go=True):
+                return c.get("shot_action") == "GO"
+        else:
+            def _pred(c, _k=_vk):
+                return (c.get("shot_action") != "GO"
+                        and str(c.get("gate_stage") or "?") == _k)
+        eps, n_cyc, _days = _j_eps(lambda c: _act_e(c) and _pred(c))
+        if not eps:
+            lines.append(f"  {_vk[:58]:<60s} EP=  0 cyc={n_cyc:>4}  (no episodes)")
+            continue
+        fp = [float(x["fix_pts"]) for x in eps if x.get("fix_pts") is not None]
+        bp = [float(x["shot_br_pts"]) for x in eps if x.get("shot_br_pts") is not None]
+        tp = sum(1 for v in fp if v > 0)
+        tl = sum(1 for v in fp if v <= 0)
+        line = (
+            f"  {_vk[:58]:<60s} EP={len(eps):>3} cyc={n_cyc:>4}"
+            f" | FIX {sum(fp):+7.1f} pts ({(sum(fp)/len(fp)) if fp else 0.0:+.2f}/ep, TP/SL {tp}/{tl})"
+            f" | SCOUT-BR {sum(bp):+7.1f} pts ({(sum(bp)/len(bp)) if bp else 0.0:+.2f}/ep)"
+            f" | days {len(_days)}/{len(ok_days)}"
+        )
+        if len(eps) < 8:
+            line += "  [THIN: n<8]"
+        lines.append(line)
+    lines.append("  (episode = same cohort, next allowed only after the kept bracket exits; Hygiene #3 in force)")
 
     # [8c] Stage 4 Exit Ruler Scorecard on Executed SHOOTING GO Brackets
     lines.append(f"\n[8c] STAGE 4 EXIT RULER SCORECARD (EXECUTED SHOOTING GO BRACKETS, N={len(go_cycles)})")
