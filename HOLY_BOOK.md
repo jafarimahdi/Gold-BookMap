@@ -1926,3 +1926,12 @@ The audit has two halves; the **code half needs no live files** and ran on the r
 **New tool `tools/latency_spans.py`** rebuilds a whole cycle from those lines: per-span median/p95/max/share, `NAMED` vs `TOTAL pipeline`, and the **`LEFT OVER (unmeasured)`** remainder, plus the slowest cycles with timestamps. Read-only, no MT5 import.
 **Proof:** `test_nov11_stage_l1a_latency_spans.py` (`7` tests: all spans emitted, span order follows the pipeline, preflight sits after the id harvest and before STEP1, no second switch, `TOTAL pipeline` retained, analyzer rebuilds a cycle and finds the leftover, feed-age lines ignored / empty day survives). Full suite **`720 passed, 3 subtests passed`**.
 **Next (`L1b`):** run one session, read `bash` -> `tools/latency_spans.py --date <today>`, and aim the first real speed patch at whichever span owns the largest share. `STEP 2` (`663 ms`) and the `PREFLIGHT` id harvest are the pre-registered suspects.
+
+### `Stage L1a` FIRST LIVE READING (`2026-11-11 10:49`, owner rig) — and the 523 ms nobody had named
+
+First instrumented cycle, straight from the log (`LATENCY` lines, one cycle):
+`PREFLIGHT 353` -> `STEP1 198` -> `STEP2 405` -> `STEP3 1` -> **`gap 518`** -> `STEP4 1` -> `STEP5 3` -> `CLOSED-DEAL 1` -> `SIGNAL bridge + persist 86` -> `DECISION journal 8` -> `SUMMARY 1` = **`TOTAL 1,580 ms`**.
+- **`Named 1,057 ms` (67%) | `LEFT OVER 523 ms` (33%)** -- so a third of the cycle lives **between the `STEP3` line and `STEP4`**, which `L1a` deliberately did not touch.
+- **Two cost hypotheses killed by measurement, not opinion:** the MT5 per-position history query is **`1 ms`** (`CLOSED-DEAL log`) and the `25 MB` decisions-log harvest sits inside `PREFLIGHT 353 ms` -- the *shared* preflight cost, not a standalone monster.
+- **The business cost is visible in the same cycle:** `quote age at pre-execution 1,177 -> 1,599 ms`. The robot decides on a price that is already `1.2-1.6 s` old -- exactly the `TEST 12` complaint.
+- **`L1b` (built the same hour):** four more spans close the 523 ms -- `GATE recheck + quality evidence`, `RL size/pause check`, `STEP4a position management`, `EXEC-TIME feed recheck` -- plus the analyzer's canonical order and `11` tests (`724 passed, 3 subtests`). Measurement only, no behaviour change.

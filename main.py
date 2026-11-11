@@ -2897,6 +2897,7 @@ def run_pipeline(allow_new_entries: bool = True) -> None:
 
     _feed_elapsed = (max(0.0, time.monotonic() - data_acquired_monotonic)
                     if data_acquired_monotonic is not None else 0.0)
+    _t_gate = time.time()
     if _flash_crash_reason:
         gate_ok, gate_reason = False, _flash_crash_reason
     elif _drift_block_reason:
@@ -2925,8 +2926,10 @@ def run_pipeline(allow_new_entries: bool = True) -> None:
                 "capture_error": type(exc).__name__,
             }
         _attach_quality_evidence_to_shadow_candidates(snapshot)
+    _record_latency("GATE recheck + quality evidence", (time.time()-_t_gate)*1000)
 
     # L5 RL size multiplier check after snapshot
+    _t_rl = time.time()
     if snapshot is not None:
         try:
             import trade_history as th
@@ -2945,8 +2948,10 @@ def run_pipeline(allow_new_entries: bool = True) -> None:
                     # Skip execution but still manage
         except Exception as e:
             logger.warning(f"L5 RL snapshot check failed: {e}")
+    _record_latency("RL size/pause check", (time.time()-_t_rl)*1000)
 
     # STEP 4a: manage any OPEN positions with the fresh market data (v4).
+    _t_4a = time.time()
     # Runs before new entries so a flip-exit frees the slot in the same
     # cycle. Management only ever reduces risk (tighten/BE/close) and must
     # never break the pipeline — all errors are contained.
@@ -2956,10 +2961,12 @@ def run_pipeline(allow_new_entries: bool = True) -> None:
             get_position_manager().manage(snapshot)
         except Exception:
             logger.exception("position manager failed (non-fatal)")
+    _record_latency("STEP4a position management", (time.time()-_t_4a)*1000)
 
     # Recheck the data-side feed immediately before the execution step. The
     # earlier full safety gate also checked risk/session/trade guards; this
     # second check only ages the acquired quote/depth through Step 3/4 prep.
+    _t_exfeed = time.time()
     if decision is not None and gate_ok:
         _execution_feed_elapsed = (
             max(0.0, time.monotonic() - data_acquired_monotonic)
@@ -2990,6 +2997,7 @@ def run_pipeline(allow_new_entries: bool = True) -> None:
                     "capture_error": type(exc).__name__,
                 }
             _attach_quality_evidence_to_shadow_candidates(snapshot)
+    _record_latency("EXEC-TIME feed recheck", (time.time()-_t_exfeed)*1000)
 
     # STEP 4  (L1a: timed -- was invisible inside TOTAL)
     _t_step4 = time.time()

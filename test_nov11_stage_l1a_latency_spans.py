@@ -17,6 +17,13 @@ from pathlib import Path
 MAIN = Path(__file__).resolve().parent / "main.py"
 SPANS_TOOL = Path(__file__).resolve().parent / "tools" / "latency_spans.py"
 
+L1B_SPANS = [
+    "GATE recheck + quality evidence",
+    "RL size/pause check",
+    "STEP4a position management",
+    "EXEC-TIME feed recheck",
+]
+
 NEW_SPANS = [
     "PREFLIGHT env+idharvest+lock+maint",
     "STEP4 execute",
@@ -123,3 +130,54 @@ def test_analyzer_ignores_feed_age_lines_and_survives_empty_days(tmp_path):
     empty = tmp_path / "empty.log"
     empty.write_text("", encoding="utf-8")
     assert "no complete cycles" in tool.report(tool.parse_cycles(empty), top=1)
+
+
+# ---------------------------- Stage L1b ----------------------------------- #
+# L1a left 523 ms of a 1,580 ms cycle completely unmeasured (the block between
+# the STEP3 line and STEP4). L1b names it.
+
+def test_l1b_spans_are_emitted():
+    src = _main_src()
+    for span in L1B_SPANS:
+        assert f'_record_latency("{span}"' in src, span
+
+
+def test_l1b_spans_sit_between_step3_and_step4():
+    src = _main_src()
+    body = src[src.index("def run_pipeline("):]
+    step3 = body.index('_record_latency("STEP3 AI"')
+    step4 = body.index('_record_latency("STEP4 execute"')
+    for span in L1B_SPANS:
+        pos = body.index(f'_record_latency("{span}"')
+        assert step3 < pos < step4, span
+    ordered = [body.index(f'_record_latency("{s}"') for s in L1B_SPANS]
+    assert ordered == sorted(ordered), "L1b span order no longer follows the pipeline"
+
+
+def test_l1b_gate_span_covers_the_safety_recheck_and_evidence():
+    src = _main_src()
+    body = src[src.index("def run_pipeline("):]
+    gate = body.index('_record_latency("GATE recheck + quality evidence"')
+    assert body.index("_safety_gates(data, _feed_elapsed)") < gate
+    assert body.index("_attach_quality_evidence_to_shadow_candidates(snapshot)") < gate
+
+
+def test_analyzer_reports_l1b_spans_in_order(tmp_path):
+    tool = _load_tool()
+    spans = {
+        "PREFLIGHT env+idharvest+lock+maint": 353,
+        "STEP1 acquire": 198,
+        "STEP2 analyze": 405,
+        "STEP3 AI": 1,
+        "GATE recheck + quality evidence": 300,
+        "RL size/pause check": 120,
+        "STEP4a position management": 60,
+        "EXEC-TIME feed recheck": 38,
+        "STEP4 execute": 1,
+        "TOTAL pipeline": 1480,
+    }
+    path = _fake_log(tmp_path, [spans])
+    text = tool.report(tool.parse_cycles(path), top=1)
+    order = [text.index(s) for s in tool.STAGE_ORDER if s in text]
+    assert order == sorted(order)
+    assert "LEFT OVER (unmeasured)" in text
