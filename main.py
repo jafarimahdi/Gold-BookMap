@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import io
 import importlib.util
 import json
 import logging
@@ -778,6 +779,12 @@ def _safety_gates(data, elapsed_since_acquire_seconds: float = 0.0) -> tuple:
     """
     from session import is_market_open, describe_now
 
+    # Stage L1c: the gate was one opaque 287 ms block. Each child below is timed
+    # separately so the next reading says which check owns the time (switch/
+    # session, feed, MT5 risk, RL loss-streak history, trade guard). The control
+    # flow is unchanged: every check still records its refusal and returns.
+    _t_gate_part = time.time()
+
     # 0) master on/off switch
     if not config.TRADING_ENABLED:
         _record("SAFETY: SWITCH", "TRADING OFF (TRADING_ENABLED=0) — analyse only")
@@ -795,43 +802,60 @@ def _safety_gates(data, elapsed_since_acquire_seconds: float = 0.0) -> tuple:
     if not is_market_open():
         _record("SAFETY: SESSION", f"CLOSED — {describe_now()} — no trading")
         return False, f"market closed ({describe_now()})"
+    _record_latency("GATE session+switch check", (time.time() - _t_gate_part) * 1000)
 
     # 2) live feed / quote / spread / L2 integrity
+    _t_gate_part = time.time()
     feed_reason = _preflight_data_reason(data, elapsed_since_acquire_seconds)
+    _record_latency("GATE feed recheck", (time.time() - _t_gate_part) * 1000)
     if feed_reason:
         _record("SAFETY: FEED", feed_reason)
         return False, feed_reason
 
     # 3) risk limits
+    _t_gate_part = time.time()
+    risk_ok, risk_reason = True, ""
     try:
         from risk_manager import RiskManager
-        ok, reason = RiskManager().check()
-        if not ok:
-            _record("SAFETY: RISK", f"HALTED — {reason}")
-            return False, f"risk halt: {reason}"
+        risk_ok, risk_reason = RiskManager().check()
     except Exception as exc:
         logger.warning("Risk check failed (proceeding): %s", exc)
+    _record_latency("GATE risk check (MT5)", (time.time() - _t_gate_part) * 1000)
+    if not risk_ok:
+        _record("SAFETY: RISK", f"HALTED — {risk_reason}")
+        return False, f"risk halt: {risk_reason}"
 
     # 4b) L5 RL adaptive: after 3 losses same regime, reduce size or pause
+    _t_gate_part = time.time()
+    rl_hit = False
+    rl_record_reason = rl_return_reason = None
     try:
         if getattr(config, "RL_ENABLED", True):
             import trade_history as th
             rl_res = th.check_loss_streak_regime("", within_hours=24.0)
             if rl_res.get("should_pause"):
-                _record("SAFETY: RL_PAUSE", f"BLOCKED — {rl_res.get('reason')}")
-                return False, rl_res.get('reason', 'RL pause: 4 losses streak')
+                rl_hit = True
+                rl_record_reason = rl_res.get('reason')
+                rl_return_reason = rl_res.get('reason', 'RL pause: 4 losses streak')
     except Exception as exc:
         logger.warning(f"RL check failed: {exc}")
+    _record_latency("GATE RL loss-streak check", (time.time() - _t_gate_part) * 1000)
+    if rl_hit:
+        _record("SAFETY: RL_PAUSE", f"BLOCKED — {rl_record_reason}")
+        return False, rl_return_reason
 
     # 4) anti-overtrading guard (cooldown + daily cap)
+    _t_gate_part = time.time()
+    guard_ok, guard_reason = True, ""
     try:
         from trade_guard import TradeGuard
-        ok, reason = TradeGuard().can_trade()
-        if not ok:
-            _record("SAFETY: OVERTRADE", f"BLOCKED — {reason}")
-            return False, reason
+        guard_ok, guard_reason = TradeGuard().can_trade()
     except Exception as exc:
         logger.warning("Trade-guard check failed (proceeding): %s", exc)
+    _record_latency("GATE trade guard", (time.time() - _t_gate_part) * 1000)
+    if not guard_ok:
+        _record("SAFETY: OVERTRADE", f"BLOCKED — {guard_reason}")
+        return False, guard_reason
 
     return True, "ok"
 
@@ -2402,6 +2426,79 @@ def _load_plumbing_test_position_ids() -> set:
     return ids
 
 
+# Stage L1c: the decision journal is append-only between maintenance trims, and a
+# full 33-column re-parse of a ~25 MB journal costs ~600 ms per cycle (measured:
+# 606 ms at 24 MB / 137,970 rows) purely to recover the order IDs of rows whose
+# status is EXECUTED. Keep that ID set and parse only the bytes appended since the
+# last cycle. Every anomaly -- schema change, trimmed/replaced file, an unreadable
+# chunk -- falls back to a full scan, so the result is always exactly what the old
+# full parse returned (proven by test_nov11_stage_l1c_journal_tail.py). The one
+# thing an offset reader cannot see is an in-place edit *behind* the offset that
+# leaves the file at least as long; that cannot occur here because log_decision()
+# only appends, maintenance trims a strictly smaller file and the schema migration
+# os.replace()s a new inode in (both pinned by test).
+_JOURNAL_TAIL = {"path": "", "inode": None, "header": b"", "offset": 0,
+                 "anchor": b"", "ids": frozenset()}
+
+
+def _journal_executed_order_ids(path: Path) -> set:
+    """EXECUTED order IDs from the decision journal, read incrementally."""
+    try:
+        stat = path.stat()
+    except OSError:
+        return set()
+    inode = int(getattr(stat, "st_ino", 0) or 0)
+    size = int(stat.st_size)
+    cache = _JOURNAL_TAIL
+    same_file = (cache["path"] == str(path) and inode == cache["inode"]
+                 and 0 < int(cache["offset"]) <= size)
+    ids = set(cache["ids"]) if same_file else set()
+    start = int(cache["offset"]) if same_file else 0
+    anchor = cache.get("anchor") or b"" if same_file else b""
+    try:
+        with open(path, "rb") as handle:
+            header_bytes = handle.readline(1 << 20)
+            if not start or cache.get("header") != header_bytes:
+                start, ids, anchor = len(header_bytes), set(), b""
+            elif anchor:
+                handle.seek(start - len(anchor))
+                if handle.read(len(anchor)) != anchor:
+                    # The file shrank or was rewritten under the offset: rescan.
+                    start, ids, anchor = len(header_bytes), set(), b""
+            handle.seek(start)
+            blob = handle.read()
+            offset = start
+            if blob:
+                cut = blob.rfind(b"\n")
+                if cut >= 0:
+                    chunk = blob[:cut + 1]
+                    offset = start + len(chunk)
+                    anchor = chunk[-64:]
+                    try:
+                        header_text = header_bytes.decode("utf-8", errors="replace")
+                        columns = next(csv.reader([header_text]))
+                        i_status = columns.index("exec_status")
+                        i_order = columns.index("order_id")
+                    except (StopIteration, ValueError):
+                        return ids
+                    need = max(i_status, i_order)
+                    text = chunk.decode("utf-8", errors="replace")
+                    # `newline=""` + StringIO = exactly how the old full parse
+                    # read the file, so CRLF, quoted commas and multi-line
+                    # rationales parse identically.
+                    for row in csv.reader(io.StringIO(text, newline="")):
+                        if len(row) <= need or row[i_status].strip() != "EXECUTED":
+                            continue
+                        number = _as_position_id(row[i_order])
+                        if number:
+                            ids.add(number)
+    except OSError:
+        return ids
+    cache.update(path=str(path), inode=inode, header=header_bytes,
+                 offset=offset, anchor=anchor, ids=frozenset(ids))
+    return ids
+
+
 def _load_tracked_position_ids() -> set:
     """Load strategy position IDs whose close deals should be checked.
 
@@ -2428,13 +2525,8 @@ def _load_tracked_position_ids() -> set:
     decisions = DATA_DIR / "decisions_log.csv"
     try:
         if decisions.exists():
-            with open(decisions, "r", newline="", encoding="utf-8") as fh:
-                for row in csv.DictReader(fh):
-                    if (row.get("exec_status") or "").strip() != "EXECUTED":
-                        continue
-                    number = _as_position_id(row.get("order_id"))
-                    if number and number not in plumbing_ids:
-                        ids.add(number)
+            # L1c: incremental tail read instead of a full journal parse.
+            ids |= _journal_executed_order_ids(decisions) - plumbing_ids
     except (OSError, csv.Error):
         pass
     return ids
@@ -2602,16 +2694,23 @@ def log_trade_outcome(order_id, symbol, side, pnl, exit_price,
 # --------------------------------------------------------------------------- #
 def run_pipeline(allow_new_entries: bool = True) -> None:
     """One full pass; no-new-entry mode still manages and monitors open positions."""
+    # Stage L1c: the preflight clock starts on the first line and the log is
+    # cleared here (not after the reload), so the three child spans below add up
+    # to the `PREFLIGHT` parent instead of hiding inside it.
+    _LATENCY_LOG.clear()
+    t_pipeline_start = time.time()
     STATUS.clear()
     config.reload_env()   # pick up edited .env (credentials/markets) each cycle
+    _record_latency("PREFLIGHT env reload", (time.time() - t_pipeline_start) * 1000)
     if allow_new_entries is True:
         _record("ENTRY MODE", "new entries subject to all hard safety gates")
     else:
         _record("ENTRY MODE", "NO NEW ENTRIES; position management/monitoring continue")
-    t_pipeline_start = time.time()
-    _LATENCY_LOG.clear()
+    _t_harvest = time.time()
     plumbing_position_ids = _load_plumbing_test_position_ids()
     tracked_position_ids = _load_tracked_position_ids()
+    _record_latency("PREFLIGHT id harvest", (time.time() - _t_harvest) * 1000)
+    _t_lockmaint = time.time()
     _touch_lock()         # keep the single-instance lock fresh
 
     # automatic file maintenance (runs at most once per day — keeps the app
@@ -2622,6 +2721,7 @@ def run_pipeline(allow_new_entries: bool = True) -> None:
     except Exception as exc:
         logger.warning("maintenance skipped: %s", exc)
 
+    _record_latency("PREFLIGHT lock+maint", (time.time() - _t_lockmaint) * 1000)
     _record_latency("PREFLIGHT env+idharvest+lock+maint", (time.time()-t_pipeline_start)*1000)
 
     logger.info("=" * 70)
@@ -2914,6 +3014,7 @@ def run_pipeline(allow_new_entries: bool = True) -> None:
                             model="none-safety-gate")
         if snapshot is not None:
             snapshot.notes.append(gate_reason)
+    _t_evidence = time.time()
     if snapshot is not None:
         try:
             snapshot.quality_evidence = _market_quality_evidence(
@@ -2926,6 +3027,7 @@ def run_pipeline(allow_new_entries: bool = True) -> None:
                 "capture_error": type(exc).__name__,
             }
         _attach_quality_evidence_to_shadow_candidates(snapshot)
+    _record_latency("GATE quality evidence", (time.time() - _t_evidence) * 1000)
     _record_latency("GATE recheck + quality evidence", (time.time()-_t_gate)*1000)
 
     # L5 RL size multiplier check after snapshot
@@ -2973,6 +3075,8 @@ def run_pipeline(allow_new_entries: bool = True) -> None:
             if data_acquired_monotonic is not None else 0.0)
         _execution_feed_reason = _preflight_data_reason(
             data, _execution_feed_elapsed)
+        _record_latency("EXEC-TIME data recheck",
+                        (time.time() - _t_exfeed) * 1000)
         if _execution_feed_reason:
             _record("SAFETY: EXECUTION FEED", _execution_feed_reason)
             gate_ok = False
@@ -2985,6 +3089,7 @@ def run_pipeline(allow_new_entries: bool = True) -> None:
             if snapshot is not None:
                 if _execution_feed_reason not in snapshot.notes:
                     snapshot.notes.append(_execution_feed_reason)
+        _t_exec_evidence = time.time()
         if snapshot is not None:
             try:
                 snapshot.quality_evidence = _market_quality_evidence(
@@ -2997,6 +3102,8 @@ def run_pipeline(allow_new_entries: bool = True) -> None:
                     "capture_error": type(exc).__name__,
                 }
             _attach_quality_evidence_to_shadow_candidates(snapshot)
+        _record_latency("EXEC-TIME quality evidence",
+                        (time.time() - _t_exec_evidence) * 1000)
     _record_latency("EXEC-TIME feed recheck", (time.time()-_t_exfeed)*1000)
 
     # STEP 4  (L1a: timed -- was invisible inside TOTAL)

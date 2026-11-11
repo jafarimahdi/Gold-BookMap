@@ -34,13 +34,24 @@ STAMP_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2})")
 SPAN_RE = re.compile(r"LATENCY\s+(?P<name>[A-Za-z][^>]*?)\s+(?P<ms>[\d.]+)\s*ms")
 STAGE_ORDER = [
     "PREFLIGHT env+idharvest+lock+maint",
+    "PREFLIGHT env reload",
+    "PREFLIGHT id harvest",
+    "PREFLIGHT lock+maint",
     "STEP1 acquire",
     "STEP2 analyze",
     "STEP3 AI",
     "GATE recheck + quality evidence",
+    "GATE session+switch check",
+    "GATE feed recheck",
+    "GATE risk check (MT5)",
+    "GATE RL loss-streak check",
+    "GATE trade guard",
+    "GATE quality evidence",
     "RL size/pause check",
     "STEP4a position management",
     "EXEC-TIME feed recheck",
+    "EXEC-TIME data recheck",
+    "EXEC-TIME quality evidence",
     "STEP4 execute",
     "STEP5 monitor",
     "CLOSED-DEAL log (MT5 history)",
@@ -48,6 +59,23 @@ STAGE_ORDER = [
     "DECISION journal write",
     "SUMMARY blocks",
 ]
+
+# Stage L1c: a child span is measured *inside* its parent. Children are printed
+# under their parent and are never added to NAMED, or the same milliseconds would
+# be counted twice and LEFT OVER would go negative.
+CHILD_OF = {
+    "PREFLIGHT env reload": "PREFLIGHT env+idharvest+lock+maint",
+    "PREFLIGHT id harvest": "PREFLIGHT env+idharvest+lock+maint",
+    "PREFLIGHT lock+maint": "PREFLIGHT env+idharvest+lock+maint",
+    "GATE session+switch check": "GATE recheck + quality evidence",
+    "GATE feed recheck": "GATE recheck + quality evidence",
+    "GATE risk check (MT5)": "GATE recheck + quality evidence",
+    "GATE RL loss-streak check": "GATE recheck + quality evidence",
+    "GATE trade guard": "GATE recheck + quality evidence",
+    "GATE quality evidence": "GATE recheck + quality evidence",
+    "EXEC-TIME data recheck": "EXEC-TIME feed recheck",
+    "EXEC-TIME quality evidence": "EXEC-TIME feed recheck",
+}
 TOTAL = "TOTAL pipeline"
 
 
@@ -104,26 +132,28 @@ def report(cycles, top: int) -> str:
     head = f"{'SPAN':<38}{'n':>5}{'median':>9}{'p95':>9}{'max':>9}{'share':>8}"
     out.append(head)
     out.append("-" * len(head))
+    top_level = [n for n in names if n not in CHILD_OF]
     for name in names:
         vals = [c[name] for _, c in cycles if name in c]
         if not vals:
             continue
         share = (statistics.median(vals) / med_total * 100.0) if med_total else 0.0
-        out.append(f"{name:<38}{len(vals):>5}{statistics.median(vals):>9.0f}"
+        label = f"  -- {name}" if name in CHILD_OF else name
+        out.append(f"{label:<38}{len(vals):>5}{statistics.median(vals):>9.0f}"
                    f"{_pct(vals,0.95):>9.0f}{max(vals):>9.0f}{share:>7.1f}%")
-    named = [sum(c[n] for n in names if n in c) for _, c in cycles]
+    named = [sum(c[n] for n in top_level if n in c) for _, c in cycles]
     out.append("-" * len(head))
     out.append(f"{'NAMED (sum of spans)':<38}{len(named):>5}{statistics.median(named):>9.0f}"
                f"{_pct(named,0.95):>9.0f}{max(named):>9.0f}"
                f"{(statistics.median(named)/med_total*100.0) if med_total else 0:>7.1f}%")
-    leftover = [c[TOTAL] - sum(c[n] for n in names if n in c) for _, c in cycles]
+    leftover = [c[TOTAL] - sum(c[n] for n in top_level if n in c) for _, c in cycles]
     out.append(f"{'LEFT OVER (unmeasured)':<38}{len(leftover):>5}{statistics.median(leftover):>9.0f}"
                f"{_pct(leftover,0.95):>9.0f}{max(leftover):>9.0f}"
                f"{(statistics.median(leftover)/med_total*100.0) if med_total else 0:>7.1f}%")
     out.append("")
     out.append(f"slowest {top} cycles:")
     for clock, c in sorted(cycles, key=lambda x: x[1][TOTAL], reverse=True)[:top]:
-        parts = ", ".join(f"{n.split(' ')[0]}={c[n]:.0f}" for n in names if n in c)
+        parts = ", ".join(f"{n.split(' ')[0]}={c[n]:.0f}" for n in top_level if n in c)
         out.append(f"  {clock}  total={c[TOTAL]:.0f} ms  [{parts}]")
     return "\n".join(out)
 

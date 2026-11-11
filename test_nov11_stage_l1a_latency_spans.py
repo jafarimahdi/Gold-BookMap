@@ -55,10 +55,15 @@ def test_spans_are_ordered_the_way_the_pipeline_runs():
 def test_preflight_span_sits_before_step1_and_covers_the_harvest():
     src = _main_src()
     body = src[src.index("def run_pipeline("):]
-    pre = body.index('_record_latency("PREFLIGHT')
+    # Stage L1c split this block into a parent plus three child spans; the parent
+    # line is still the one that closes it, so it must sit after the harvest and
+    # before STEP1, with the children recorded inside that window.
+    parent = '_record_latency("PREFLIGHT env+idharvest+lock+maint"'
+    pre = body.index(parent)
     step1 = body.index('_record_latency("STEP1 acquire"')
     harvest = body.index("_load_tracked_position_ids()")
     assert harvest < pre < step1
+    assert body.index('_record_latency("PREFLIGHT env reload"') < harvest
 
 
 def test_measurement_is_gated_by_the_existing_switch():
