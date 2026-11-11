@@ -1924,13 +1924,13 @@ First live reading (one cycle): `PREFLIGHT 353` → `STEP1 198` → `STEP2 405` 
 
 **A. DONE** — `L1a` measured, `L1b` blind spot closed (`LEFT OVER` 523→30 ms), `L1c` installed (`journal tail` 559→0.09 ms, `738 passed`), test-whitelist patch pushed (`32b511a`).
 
-**B. ACTIVE — Step 2 "the leaving":** beat `Benchmark 2.0x SL / 3.5x TP = −2.1 pts` on same `N=36` (`[8c]`). Working material: `Legacy C3` 63.9% WR, shooter skips profitable cohort (`WAIT` +1.86 vs `GO` −0.32), tight stop wins (−43.2 vs −98.8).
+**B. CLOSED AS LOSS (`replay-37`) — Step 2 "the leaving":** `Stage-2E` Two-Door −200.2 vs bar −2.1 (N=36); live exit reverted; mirror row kept in `[8c]` as door-testing machine. Autopsy: R-multiples were sea-blind (partial@2R=+21.3 beyond avg TP 19.03 = dead door; BE@0.75R=+8.0 into 3.9-pt chop ate winners; 45m@<1R cut slow fish). ACTIVE NEXT = Step 2d Phase 1 (`[8m]` episode re-score; `replay-38` grids measured — referee hypothesis NULL, veto blocks under honest audit).
 
 **C. THIS WEEK (after Step 2, one stage at a time):** `[8d]`/`[8e]` consequences: `POS_D 1/4` watch, `Escort` negative value-add (−9.5 pts, `Stage E2` candidate), passive-limit save ~76 pts.
 
 **D. WAITING ON OWNER DECISION:** `C1 whale_walls` −0.853/call → CUT; `C2 htf_poc` +0.105/call → keep/retire; `vwap_bands` weight card (97%, +4.28/call); `Gemini-outage safe trading` (parked 10-24); `MAX_TRADES_PER_DAY` (default 20, check `.env`); Bookmark **Delivery Van** (Step 4 GC→XAUUSD basis, redesign ordered); Bookmark #6 `A2 _l3_opposes` (observe DEMO bursts).
 
-**E. QUEUED BEHIND STEP 2 (do not bundle):** `M1→M2→M3` multi-timeframe (frozen); `Stage B1c` (first crossed book per session at WARNING); `Stage S2c` (rolling absorption `attacked`); `Step S1b` leftovers.
+**E. QUEUED:** `Stage B1c` (first crossed book per session at WARNING); `Stage S2c` (rolling absorption `attacked`); `Step S1b` leftovers. Multi-TF `M12/M1/M15` referee = measured `replay-38`, FROZEN NULL (re-open needs 5-day evidence in its favor, not optimism).
 
 **F. SOMEDAY / CHORES:** `v2.1` MBO queue-ahead; feed auto-resubscribe; Watchman never ran a real day; owner `C:` disk 90%; inert `SHOOT_ROAD_RATIO` in `.env` may be deleted.
 
@@ -2351,14 +2351,14 @@ Only app code files count as version. `.bmw`, `data/`, `logs/` are not app versi
 | Step 2 ("the leaving") — Book patch | Installed on owner rig (`64da38b`) |
 | Step 2 — Code patch | FAILED replay-37 (-200.2 vs -2.1) -> reverted, uncommitted; Book keeps design+receipt (`nov11_step2_code_patch.patch`) |
 | Step 2 — Exit reporting rule | Documented in HOLY_BOOK.md, code ready to add |
-| Step 2 — Pinned replay verification | **PENDING** — next action |
-| Step 3 (multi-timeframe) | Frozen behind Step 2 |
+| Step 2 — Pinned replay verification | DONE `replay-37` = LOSS; verdict recorded; no re-grade of same config |
+| Step 3 (multi-timeframe) | SUPERSEDED by Step 2d; direction-referee FROZEN NULL per `replay-38` |
 | Daily cap | Demo: 30 pts / 5%, Live: 12 pts |
 | L1d (STEP1 tail spikes) | Frozen behind Step 2 |
-| Step 2d entry-MTF to-do | **ACTIVE** (owner direction `2026-11-11`) — offline until a grid exists |
+| Step 2d entry-MTF | Phase 0 DONE (`replay-38`, grids on rig+GitHub `feda784`); Phase 1 = `[8m]` veto re-score |
 | Loop | Running in Window 1 on the OLD exit code — never restarted; failed exit never installed |
 
-**Next action (owner direction `2026-11-11`):** Step 2d — multi-TF power-team ENTRY work first (`[8j]` grid, read-only; section Step 2d). The ATR door-study stays optional, replay-only. L1d latency and any ship-side MTF change stay frozen until the grid exists.
+**Next action (`2026-11-11`):** Step 2d Phase 1 — `[8l]` relabel + `[8m]` WRONGFUL-VETO episode re-score (judge-side patch; both-window rule in force). Live system untouched until a proposal wins offline on both windows.
 
 ---
 
@@ -2668,7 +2668,7 @@ All other sections that need position info read from PositionManager state or MT
 
 ### Next action (your move)
 
-SUPERSEDED `2026-11-11`: the pinned replay ran as `replay-37` — Step 2 LOST (−200.2 vs −2.1), live exit reverted, verdict is recorded above. This section now only holds the `exit_report_log()` build spec, QUEUED behind a winning exit method. The real next move = Step 2d Phase 0 (`[8j]` MTF grid, read-only) — see the Step 2d section.
+SUPERSEDED `2026-11-11`: the pinned replay ran as `replay-37` — Step 2 LOST (−200.2 vs −2.1), live exit reverted, verdict is recorded above. This section now only holds the `exit_report_log()` build spec, QUEUED behind a winning exit method. The real next move = Step 2d Phase 1 (`[8m]` veto re-score; Phase 0 grids done via `replay-38`) — see the Step 2d section.
 
 ---
 
@@ -2915,13 +2915,28 @@ self.exit_report_log(
 - M3 stays the SHOOTER. M15 = REFEREE: direction vote + wall-ahead veto. M1 = RULER, not judge: sizes fence/doors/tick-entry; a directional M1 vote allowed only if the grid proves it.
 - `POWER v2` keeps Law #11: per-TF scores computed separately, no negotiation, AI never re-weights; veto power lives in the gate table, never in the AI prompt.
 - Grid outcomes -> pre-registered rules, e.g. both signs agree -> GO; referee opposes -> WAIT; `NEITHER` + referee clear -> measured (maybe GO with small size). `NEITHER` must get a real meaning instead of a shrug.
-- Mirror the gate as a `[8k]` scoreboard row first; bar = new `GO` cohort must beat old-gate GO (−0.06) on the same signals; WAIT cohort must not out-score GO by more than today.
+- Mirror the gate as an `[8m]` scoreboard row (episode-deduped); bar = new `GO` cohort must beat old-gate GO on the SAME signals **and on both day windows (3d and 5d)**. Phase-1 first move = `[8m]` WRONGFUL-VETO RE-SCORE (episode-deduped) of the blocked cohorts, offline only.
 
 **Phase 2 — sizing (M1 scalper geometry):** fence from M1 noise (1.0xATR_M1 ~ 2.5 pts on this week's sea) + wall shelter; doors sized in ATR units of the SAME TF as the fence — Step 2 autopsy law: **no door trigger beyond own TP; no teleport inside 1xATR of entry**. Ship order: gate scores win offline first, sizing second — never bundled.
 
 **Acceptance bar (pre-registered, never bent):** the new entry must beat old POWER v2 on the same signals over the same pinned tape at n>=30; else the old entry stays. First ship touch only after Phase 0 numbers exist AND a green shadow score exists.
 
+**Phase 0 RESULT (`replay-38`, `2026-11-11`, 3 pinned days 11-05/06/09, tool `feda784`/`5d210d23…`, rig=GitHub=workspace by hash):** MTF grids N=69/69 actionable (GO 30, WAIT 39; 36 waits still `POWER v2 says NEITHER`). (a) **DIRECTION-REFEREE HYPOTHESIS = NULL on this tape:** in BOTH M12xM3 primary and M15xM3 comparison grids the agree cells are the worst (`M12 UP x M3 UP FIX -0.53`; `M12 DOWN x M3 FLAT -1.03`; oppose cells better: fwd +2.77/+2.93, n=6/9 thin); M1 x M3 audition: aligned M1 row = worst big cell (FIX -3.44, n=21), MIXED row best (+1.73 fwd, n=24). Verdict = *no evidence to build the multi-TF directional vote* — not proof it can never work; frozen, evidence-bound. (b) **REAL SUSPECT = GATE VETO BLOCKS:** `[2]` per-cycle means `Climax block +4.80/sig (n=9)`, `Non-Trend BUY guard +4.80 (n=6)`, `POWER Opposes +1.33 (n=9)` vs GO +1.30; `Dead-Zone -4.87` + `NEITHER -1.03` stay blocked. Cycle-counted = double-count → honest re-score needed (`[8m]` episode-dedup, next patch). (c) Wall hint: tight +6.26 FIX (n=4) = noise. (d) Sea sizes: Avg ATR M1=3.24 / M3=5.47 / M12=9.87 → Phase-2 scalper geometry grounded (M1 fence ~3 pts vs current avg 10.4). (e) 3-day champion bracket = +39.1 vs 5-day -2.1 = pure day-selection power → both-window rule (Hygiene #2).
+**RENAME receipt:** grids block shipped labeled `[8j]` — collides with sealed Risk-Manager section; relabel to `[8l]` in next replay patch (bookkeeping, zero logic); gate-mirror row pre-registered as `[8m]` (old text said `[8k]` — also taken by sealed `#12`).
+
 **Five-year-old recap:** the robot reads one small pond and guesses where the fish jump. It guesses wrong often, and when the water looks flat it freezes (“NEITHER”). Next we look at TWO more ponds — the big pond (are the fish swimming our way? any rocks ahead?) and the tiny pond (how big is one wave?) — then we write the rules DOWN, score them in the practice room against the old guesser, and only if it wins does it get on the boat.
+
+## Measurement Hygiene LAWS (`2026-11-11`, born from Step 2 + Step 2d the same day — standing)
+
+1. **Measure before you code.** One pinned replay day kills a whole design before it reaches the boat — two losers prevented this way (R-multiple doors, direction-referee).
+2. **Both-window rule.** Any cohort score (gate or exit proposal) is reported on the pinned 3-day AND 5-day windows and must win on BOTH; absolute numbers are window-scoped, never compared across day-sets (same tool: +39.1 on 3d vs -2.1 on 5d).
+3. **Per-cycle bucket numbers are HINTS, not verdicts** — a flag held across minutes double-counts; money claims require episode-level dedup (`[8g]` style) before any gate change is proposed.
+4. **Thin-cell law: n<8 = direction hint, never a conclusion** — printed inside every grid so a reader cannot miss it.
+5. **Size in the sea's units, never in our fear's units** — doors/fences in ATR of the SAME TF as the plan; no door trigger beyond own TP; no BE teleport inside 1xATR of entry (Step 2 autopsy).
+6. **Identical old rows = proof of tool honesty.** A measure-only change must leave every pre-existing section bit-identical; if not, the tool (not the market) is guilty first.
+7. **Revert failing experiments immediately; commit only judge-side files; state LIVE vs NOT-LIVE explicitly.** An uncommitted failed patch on disk is a loaded gun aimed at the next accidental restart.
+8. **Delivery addendum:** the viewer DISPLAYS, it does not transfer — patches must physically land in `Downloads` and be `wc -l` + `sha256sum` verified BEFORE `git apply`; ship ONE patch computed from the rig's CURRENT exact blob, never dependent chains that can half-fail.
+9. **Anchors are read, never recalled.** This very update: a script that edited by remembered strings silently no-oped two register lines (caught by post-write grep re-read — the Book's own #1 law applies to the Book itself).
 
 ## Book Health Notes (`2026-11-11`)
 
