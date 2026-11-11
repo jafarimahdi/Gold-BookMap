@@ -745,6 +745,100 @@ def _walk_bracket_with_exit(
     return "TIMEOUT", round(pts - spread_cost, 2), float(last_b_min + 60)
 
 
+def _walk_bracket_two_door(
+    bar_keys: List[int],
+    bars: List[Tuple[int, float, float, float, float]],
+    entry_ep: float,
+    direction: str,
+    entry_px: float,
+    sl_px: float,
+    tp_px: float,
+    max_hold_min: int,
+    spread_cost: float,
+    atr: float,
+    be_trigger_r: float = 0.75,
+    partial_trigger_r: float = 2.0,
+    partial_frac: float = 0.5,
+    trail_trigger_r: float = 2.0,
+    trail_atr_mult: float = 1.0,
+    time_stop_min: float = 45.0,
+    ts_min_profit_r: float = 1.0,
+) -> Tuple[str, float, float]:
+    """Stage-2c MEASUREMENT mirror of the LIVE Two-Door exit (Book Step 2,
+    position_manager `_manage_one` after Steps 2+2b). Doors: 1 disaster SL;
+    2 breakeven at +be_trigger_r*R (floor entry +/- max(0.1*ATR, spread));
+    3 partial `partial_frac` booked at +partial_trigger_r*R; 4 high-water
+    trail `trail_atr_mult*ATR` once best profit >= trail_trigger_r*R;
+    5 time stop: age >= time_stop_min with profit < ts_min_profit_r*R.
+    Conservative M1 walk, SL checked before TP, no intra-bar peek.
+    Known simplifications vs live: BE/partial/trail trigger on the bar HIGH
+    (live polls current price each 60s cycle), the partial fill is booked at
+    the trigger level (live closes at market), no C3 wall-shelter tightening.
+    Returns `(outcome, net_pts, exit_ep)`. NEVER used by the live loop."""
+    entry_min = int(entry_ep // 60) * 60
+    start_idx = bisect.bisect_right(bar_keys, entry_min)
+    if start_idx >= len(bars):
+        return "last_bar", 0.0, float(entry_ep)
+    init_risk = abs(entry_px - sl_px)
+    if init_risk <= 0:
+        return "NO_RISK", 0.0, float(entry_ep)
+    is_buy = direction.upper() == "BUY"
+    sign = 1.0 if is_buy else -1.0
+    end_min = entry_min + max_hold_min * 60
+    cur_sl = sl_px
+    be_level = entry_px + sign * max(0.1 * atr, spread_cost)
+    hwm = entry_px
+    last_close = entry_px
+    last_b_min = entry_min
+    be_done = False
+    partial_done = False
+    trail_done = False
+    partial_net = 0.0
+
+    def _net(exit_price: float) -> float:
+        base = (exit_price - entry_px) * sign - spread_cost
+        if partial_done:
+            return partial_frac * partial_net + (1.0 - partial_frac) * base
+        return base
+
+    for idx in range(start_idx, len(bars)):
+        b_min, _o, hi, lo, cl = bars[idx]
+        if b_min > end_min:
+            break
+        last_close = cl
+        last_b_min = b_min
+        if (lo <= cur_sl) if is_buy else (hi >= cur_sl):
+            if trail_done:
+                tag = "TD_TRAIL"
+            elif cur_sl != sl_px:
+                tag = "TD_BE"
+            else:
+                tag = "TD_SL"
+            return tag, round(_net(cur_sl), 2), float(b_min + 60)
+        if (hi >= tp_px) if is_buy else (lo <= tp_px):
+            return "TD_TP", round(_net(tp_px), 2), float(b_min + 60)
+        if (hi > hwm) if is_buy else (lo < hwm):
+            hwm = hi if is_buy else lo
+        best_r = (hwm - entry_px) * sign / init_risk
+        if not be_done and best_r >= be_trigger_r:
+            if be_level * sign > cur_sl * sign + 1e-9:
+                cur_sl = be_level
+            be_done = True
+        if not partial_done and best_r >= partial_trigger_r:
+            partial_done = True
+            partial_net = partial_trigger_r * init_risk - spread_cost
+        if best_r >= trail_trigger_r and atr > 0:
+            cand = hwm - sign * (trail_atr_mult * atr)
+            if cand * sign > cur_sl * sign + 1e-9:
+                cur_sl = cand
+                trail_done = True
+        age_min = (b_min - entry_min) / 60.0
+        r_now = (cl - entry_px) * sign / init_risk
+        if time_stop_min > 0 and age_min >= time_stop_min and r_now < ts_min_profit_r:
+            return "TD_TIME", round(_net(cl), 2), float(b_min + 60)
+    return "TD_HOLD", round(_net(last_close), 2), float(last_b_min + 60)
+
+
 def _walk_bracket(
     bar_keys: List[int],
     bars: List[Tuple[int, float, float, float, float]],
@@ -2212,6 +2306,7 @@ def replay_single_day(
                 shot_ch15_out, shot_ch15_pts = "NO_SIGNAL", None
                 shot_ch10_out, shot_ch10_pts = "NO_SIGNAL", None
                 shot_c3p_out, shot_c3p_pts = "NO_SIGNAL", None
+                shot_td2_out, shot_td2_pts = "NO_SIGNAL", None
                 a2_fix_pts = a2_atr_pts = None
 
                 if sig_dir in ("BUY", "SELL") and px > 0:
@@ -2315,6 +2410,13 @@ def replay_single_day(
                                     sh_sl, sh_tp, max_hold_min, spread_cost,
                                     trail_atr=atr_live, trail_dist_mult=0.5, trail_trigger_r=0.5,
                                 )
+                                # Stage-2c: measurement mirror of the LIVE
+                                # Two-Door exit (Book Step 2, after 2+2b).
+                                shot_td2_out, shot_td2_pts = _walk_bracket_two_door(
+                                    bar_keys, walk_bars, tc_ep, sig_dir, px,
+                                    sh_sl, sh_tp, max_hold_min, spread_cost,
+                                    atr_live,
+                                )[:2]
                             _s15_sl = (px - 1.5 * atr_live) if is_b else (px + 1.5 * atr_live)
                             _s15_tp = (px + 3.0 * atr_live) if is_b else (px - 3.0 * atr_live)
                             shot_s15_out, shot_s15_pts = _walk_bracket(
@@ -2640,6 +2742,7 @@ def replay_single_day(
                     "shot_ch15_out": shot_ch15_out, "shot_ch15_pts": shot_ch15_pts,
                     "shot_ch10_out": shot_ch10_out, "shot_ch10_pts": shot_ch10_pts,
                     "shot_c3p_out": shot_c3p_out, "shot_c3p_pts": shot_c3p_pts,
+                    "shot_td2_out": shot_td2_out, "shot_td2_pts": shot_td2_pts,
                     "a2_fix_pts": a2_fix_pts, "a2_atr_pts": a2_atr_pts,
                     "scout": scout_diag,
                     "power_diag": power_diag,
@@ -3284,6 +3387,7 @@ def synthesize_multi_day(results: List[Dict[str, Any]]) -> Tuple[str, str, Dict[
             ("Stage-4b Preview: Planned + 1.5xATR Trail@1R", "shot_ch15_out", "shot_ch15_pts"),
             ("Stage-4b Preview: Planned + 1.0xATR Trail@1R", "shot_ch10_out", "shot_ch10_pts"),
             ("Legacy PM C3 (Retired): 0.5xATR Trail@0.5R", "shot_c3p_out", "shot_c3p_pts"),
+            ("Stage-2E Two-Door mirror: BE.75 P50@2R 1xATR@2R TS", "shot_td2_out", "shot_td2_pts"),
             ("Benchmark: 2.0x SL / 3.5x TP Fixed Wave", "fix_out", "fix_pts"),
             ("Benchmark: 1.5x SL / 3.0x TP Live ATR", "shot_s15_out", "shot_s15_pts"),
         ]

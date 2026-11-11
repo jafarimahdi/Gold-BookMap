@@ -1982,6 +1982,8 @@ The robot goes fishing (enters a trade). Fixed bracket pulls up — sometimes to
 
 Step 2 design recorded. Door 2 breakeven at +0.75×SL (owner decision). Two-Door Exit = Doors 1–5.
 
+### Step 2b + 2c (`2026-11-11`) — wave-align + replay ruler
+2b `config.py`: `PM_WAVE_BE_TRIGGER_R` 1.0→0.75, `PM_WAVE_TRAIL_TRIGGER_R` 1.0→2.0, `PM_WAVE_TRAIL_ATR` 1.50→1.00 — the wave path silently UN-DID Doors 2+4 on non-burst M3 (`max(WAVE,0.75)`=1.0). 2c `tools/raw_replay.py` pure addition +104L: `_walk_bracket_two_door()` mirror + new row `Stage-2E Two-Door mirror` in `[8c]` — replay NEVER imports the live PM, so it must mirror the Doors to grade them; 5 synthetic cases pass (PARTIAL+TRAIL, TP, SELL-mirror, TIME_STOP, disaster SL). Replay `--dates` = comma-list NOT `..`; DayStop feeds `[8d]` only, never `[8c]`. Path-check caught both problems BEFORE any replay ran — slow-mode rule proven.
 ### Step 2 code patch — written & tested (`2026-11-11`)
 config.py: Door 2 BE `0.5→0.75`; Door 3 partial `1.0→2.0`; Door 4 trail `0.50→2.0` / `0.50→1.00`. position_manager.py: Door 5 TIME_STOP fires at `r_now < 1.0`. 2 files, `--check`+`apply`+`cmp` on worktree `636f0ba`. Suite green: 738 passed, 3 subtests. Patch: `nov11_step2_code_patch.patch`. Next: pinned replay `--dates 2026-11-03..2026-11-09` vs −2.1 pts ([8c]); one isolated stage + one loop restart.
 
