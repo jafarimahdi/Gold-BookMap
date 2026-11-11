@@ -1935,3 +1935,35 @@ First instrumented cycle, straight from the log (`LATENCY` lines, one cycle):
 - **Two cost hypotheses killed by measurement, not opinion:** the MT5 per-position history query is **`1 ms`** (`CLOSED-DEAL log`) and the `25 MB` decisions-log harvest sits inside `PREFLIGHT 353 ms` -- the *shared* preflight cost, not a standalone monster.
 - **The business cost is visible in the same cycle:** `quote age at pre-execution 1,177 -> 1,599 ms`. The robot decides on a price that is already `1.2-1.6 s` old -- exactly the `TEST 12` complaint.
 - **`L1b` (built the same hour):** four more spans close the 523 ms -- `GATE recheck + quality evidence`, `RL size/pause check`, `STEP4a position management`, `EXEC-TIME feed recheck` -- plus the analyzer's canonical order and `11` tests (`724 passed, 3 subtests`). Measurement only, no behaviour change.
+
+## ⏱️ OPEN REGISTER — `2026-11-11` (the single to-do list; nothing else is outstanding)
+
+**A. THE NEXT 60 MINUTES (owner, in order)**
+1. **Restart the loop** on `a383220` (`L1b` installed and pushed): `PY=.venv/Scripts/python.exe; [ -x "$PY" ] || PY=python` -> `"$PY" main.py --loop`. One loop, BookMap already up.
+2. **At T+60 min**, take the measurement and send the file:
+   `"$PY" tools/latency_spans.py --date $(date +%Y-%m-%d) --top 5` -> `data/latency_spans_<date>.txt`.
+3. Expect the table to rank `PREFLIGHT`, `STEP2 analyze`, `GATE recheck + quality evidence`, `RL size/pause check`, `STEP4a position management`, `EXEC-TIME feed recheck` -- and to leave **`LEFT OVER` near zero** (that is the proof `L1b` closed the blind spot).
+
+**B. THIS WEEK (in this order, one stage at a time)**
+4. **`Stage L1c`** -- the first real speed patch, aimed at whichever span the measurement names (no strategy change, must stay replay-neutral).
+5. **Step 2 -- "the leaving"**: beat `Benchmark 2.0x SL / 3.5x TP = -2.1 pts` on the same `N=36` (`[8c]`). Working material: `Legacy C3` `63.9%` WR, shooter skips the profitable cohort (`WAIT +1.86` vs `GO -0.32`), tight stop wins (`-43.2` vs `-98.8`).
+6. Then the `[8d]`/`[8e]` consequences: `POS_D 1/4` watch item, `Escort` negative value-add (`-9.5 pts`, `Stage E2` candidate), passive-limit save `~76 pts`.
+
+**C. WAITING ON AN OWNER DECISION (not blocked technically)**
+7. `C1 whale_walls` `-0.853/call` -> `DECIDE: CUT`; `C2 htf_poc` `+0.105/call` -> keep or retire (matured, parked for owner).
+8. `vwap_bands` weight card (`97%`, `+4.28/call`) -- one-change law, owner picks the week.
+9. `Gemini-outage safe trading`: design a verified way to trade when the AI cannot answer (parked `10-24`).
+10. `MAX_TRADES_PER_DAY` -- source default is `20`; if the private `.env` still says `999`, change it.
+11. Bookmark: **Delivery Van** (`Step 4` GC->XAUUSD basis + real spread) -- owner ordered a redesign, interim fix live.
+12. Bookmark `#6`: `A2 _l3_opposes` strictness -- observe real DEMO bursts first (untouched by design).
+
+**D. QUEUED BEHIND STEP 2 (do not bundle)**
+13. `M1` measure -> `M2` shadow -> `M3` veto-only (multi-timeframe decision) -- **frozen**.
+14. `Stage B1c` (first crossed book per session at `WARNING`), `Stage S2c` (rolling absorption `attacked`), `Step S1b` leftovers.
+
+**E. SOMEDAY / CHORES (unchanged, low risk)**
+15. `v2.1` MBO queue-ahead; feed auto-resubscribe; Watchman has never run a real day; owner `C:` disk `90%`; inert `SHOOT_ROAD_RATIO` line in `.env` may be deleted.
+
+**F. OPERATIONAL LESSONS (no code action)**
+16. Start the loop **after** the local date changes (log filename is fixed at startup, no rollover) and **always with BookMap already ticking** -- a BookMap-closed start is fail-closed but blind.
+17. Never stop BookMap or the PC with an open position; a dead feed is fail-closed, not dangerous.
