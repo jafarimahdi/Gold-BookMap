@@ -2622,6 +2622,8 @@ def run_pipeline(allow_new_entries: bool = True) -> None:
     except Exception as exc:
         logger.warning("maintenance skipped: %s", exc)
 
+    _record_latency("PREFLIGHT env+idharvest+lock+maint", (time.time()-t_pipeline_start)*1000)
+
     logger.info("=" * 70)
     logger.info("GOLD TRADING SYSTEM — pipeline start "
                 "(trade=%s, timeframe=%s, source=%s)",
@@ -2989,7 +2991,8 @@ def run_pipeline(allow_new_entries: bool = True) -> None:
                 }
             _attach_quality_evidence_to_shadow_candidates(snapshot)
 
-    # STEP 4
+    # STEP 4  (L1a: timed -- was invisible inside TOTAL)
+    _t_step4 = time.time()
     exec_result = None
     entry_authorized = (gate_ok is True and allow_new_entries is True)
     if not allow_new_entries:
@@ -3022,8 +3025,10 @@ def run_pipeline(allow_new_entries: bool = True) -> None:
             _record("STEP 4  EXECUTION", f"ERROR — {exc}")
     else:
         _record("STEP 4  EXECUTION", "SKIPPED (no decision)")
+    _record_latency("STEP4 execute", (time.time()-_t_step4)*1000)
 
     # STEP 5
+    _t_step5 = time.time()
     open_positions = []
     try:
         open_positions = run_step5() or []
@@ -3038,10 +3043,12 @@ def run_pipeline(allow_new_entries: bool = True) -> None:
         logger.exception("STEP 5 failed")
         _record("STEP 5  MONITORING", f"ERROR — {exc}")
     _save_tracked_position_ids(tracked_position_ids)
+    _record_latency("STEP5 monitor", (time.time()-_t_step5)*1000)
 
     # ---- trade-outcome logging (closed MT5 deals -> data/trade_outcomes.csv) --
     # Pepperstone reliably returns these deals when queried by position ID.
     # Persist unique IDs/signatures so the same closed deal is logged only once.
+    _t_out = time.time()
     try:
         from step5_monitoring import TradeMonitor
         monitor = TradeMonitor()
@@ -3127,8 +3134,10 @@ def run_pipeline(allow_new_entries: bool = True) -> None:
             _save_logged_outcome_keys(logged_keys | new_keys)
     except Exception as exc:
         logger.warning("trade-outcome logging failed: %s", exc)
+    _record_latency("CLOSED-DEAL log (MT5 history)", (time.time()-_t_out)*1000)
 
     # MT5 signal bridge (for the EA / indicator on MT5)
+    _t_sig = time.time()
     if snapshot is not None and decision is not None:
         try:
             run_signal_bridge(
@@ -3141,17 +3150,23 @@ def run_pipeline(allow_new_entries: bool = True) -> None:
     if snapshot is not None:
         _persist_market_quality_snapshot(snapshot)
 
+    _record_latency("SIGNAL bridge + persist", (time.time()-_t_sig)*1000)
+
     # decision journal (for later tuning / backtesting)
+    _t_j = time.time()
     if snapshot is not None and decision is not None:
         try:
             log_decision(snapshot, decision, exec_result)
         except Exception as exc:
             logger.warning("decision log failed: %s", exc)
+    _record_latency("DECISION journal write", (time.time()-_t_j)*1000)
 
+    _t_tail = time.time()
     total_ms = (time.time()-t_pipeline_start)*1000
     _record_latency("TOTAL pipeline", total_ms)
     if getattr(config, "LATENCY_LOG_ENABLED", True):
         logger.info(f"L4 Latency summary: total {total_ms:.0f}ms target {getattr(config,'LATENCY_TARGET_MS',500)}ms")
+    _record_latency("SUMMARY blocks", (time.time()-_t_tail)*1000)
 
     try:
         _pw_ctx = (getattr(snapshot, "power", None) or {}) if snapshot is not None else {}
