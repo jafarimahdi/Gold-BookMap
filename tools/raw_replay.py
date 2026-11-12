@@ -1017,6 +1017,78 @@ def _walk_ladder(
     pts = (last_close - entry_px) * d
     return "TIMEOUT", round(pts - spread_cost, 2)
 
+def _walk_elastic(
+    bar_keys: List[int],
+    bars: List[Tuple[int, float, float, float, float]],
+    entry_ep: float,
+    direction: str,
+    entry_px: float,
+    sl_px: float,
+    tp_px: float,
+    max_hold_min: int,
+    spread_cost: float,
+    atr: float,
+    start_gap_atr: float = 1.5,
+    tighten_per_r: float = 0.25,
+) -> Tuple[str, float]:
+    """Step 2f (2026-11-12): ELASTIC-ROPE rehearsal arm (owner idea).
+
+    One smooth ratchet instead of rungs: the SL line trails the PEAK closed
+    gain by a gap that SHRINKS the further the price has moved from entry -
+    gap = (start_gap_atr - tighten_per_r x peak_R) x ATR, floored at 0.5R of
+    the opening bracket (no 0.30xATR choke, law #1 stays intact: TP frozen).
+    The SL never moves away from profit; moves are decided on bar CLOSES and
+    exits are checked against the lines valid at bar start (SL before TP on
+    the same bar - conservative, no intra-bar peek). Universe/geometry are
+    the champion's own (fix_out-eligible cycles, fixed-wave sl/tp, run ATR)
+    so this row vs `Benchmark: 2.0x SL / 3.5x TP Fixed Wave` is one-variable
+    fair. Returns (outcome, pts).
+    """
+    entry_min = int(entry_ep // 60) * 60
+    start_idx = bisect.bisect_right(bar_keys, entry_min)
+    if start_idx >= len(bars):
+        return "NO_BARS", 0.0
+    end_min = entry_min + max_hold_min * 60
+    is_buy = direction.upper() == "BUY"
+    d = 1.0 if is_buy else -1.0
+    init_r = abs(entry_px - sl_px)
+    tp_dist = abs(tp_px - entry_px)
+    if init_r <= 0.0 or tp_dist <= 0.0:
+        return "BAD_GEOM", 0.0
+    atr_eff = atr if atr > 0.0 else max(init_r / 2.0, 1e-9)
+    floor_gap = 0.5 * init_r
+
+    def _improves(new_v: float, cur_v: float) -> bool:
+        return (new_v > cur_v) if is_buy else (new_v < cur_v)
+
+    cur_sl = sl_px
+    peak = 0.0
+    for idx in range(start_idx, len(bars)):
+        b_min, _o, hi, lo, cl = bars[idx]
+        if b_min > end_min:
+            break
+        if is_buy:
+            if lo <= cur_sl:
+                tag = "ELASTIC" if cur_sl > sl_px + 1e-9 else "SL"
+                return tag, round((cur_sl - entry_px) - spread_cost, 2)
+            if hi >= tp_px:
+                return "TP", round((tp_px - entry_px) - spread_cost, 2)
+        else:
+            if hi >= cur_sl:
+                tag = "ELASTIC" if cur_sl < sl_px - 1e-9 else "SL"
+                return tag, round((entry_px - cur_sl) - spread_cost, 2)
+            if lo <= tp_px:
+                return "TP", round((entry_px - tp_px) - spread_cost, 2)
+        prog = (cl - entry_px) * d
+        if prog > peak:
+            peak = prog
+            gap = max(floor_gap, (start_gap_atr - tighten_per_r * (peak / init_r)) * atr_eff)
+            new_sl = entry_px + d * (peak - gap)
+            if _improves(new_sl, cur_sl):
+                cur_sl = new_sl
+    pts = (cl - entry_px) * d if bars else 0.0
+    return "TIMEOUT", round(pts - spread_cost, 2)
+
 def simulate_one_pos_portfolio(
     ok_days: Sequence[Dict[str, Any]],
     conf_thr: float,
@@ -2461,6 +2533,7 @@ def replay_single_day(
                 shot_c3p_out, shot_c3p_pts = "NO_SIGNAL", None
                 shot_td2_out, shot_td2_pts = "NO_SIGNAL", None
                 shot_ladx_out, shot_ladx_pts = "NO_SIGNAL", None
+                shot_elas_out, shot_elas_pts = "NO_SIGNAL", None
                 shot_lad_out, shot_lad_pts = "NO_SIGNAL", None
                 shot_lad2_out, shot_lad2_pts = "NO_SIGNAL", None
                 a2_fix_pts = a2_atr_pts = None
@@ -2487,6 +2560,10 @@ def replay_single_day(
                     )
                     if fix_out in ("TP", "SL", "TIMEOUT"):
                         shot_ladx_out, shot_ladx_pts = _walk_ladder(
+                            bar_keys, walk_bars, tc_ep, sig_dir, px,
+                            sl_fix, tp_fix, max_hold_min, spread_cost, atr_const,
+                        )
+                        shot_elas_out, shot_elas_pts = _walk_elastic(
                             bar_keys, walk_bars, tc_ep, sig_dir, px,
                             sl_fix, tp_fix, max_hold_min, spread_cost, atr_const,
                         )
@@ -2931,6 +3008,7 @@ def replay_single_day(
                     "shot_c3p_out": shot_c3p_out, "shot_c3p_pts": shot_c3p_pts,
                     "shot_td2_out": shot_td2_out, "shot_td2_pts": shot_td2_pts,
                     "shot_ladx_out": shot_ladx_out, "shot_ladx_pts": shot_ladx_pts,
+                    "shot_elas_out": shot_elas_out, "shot_elas_pts": shot_elas_pts,
                     "shot_lad_out": shot_lad_out, "shot_lad_pts": shot_lad_pts,
                     "shot_lad2_out": shot_lad2_out, "shot_lad2_pts": shot_lad2_pts,
                     "a2_fix_pts": a2_fix_pts, "a2_atr_pts": a2_atr_pts,
@@ -3777,6 +3855,7 @@ def synthesize_multi_day(results: List[Dict[str, Any]]) -> Tuple[str, str, Dict[
             ("Stage-2E Two-Door mirror: BE.75 P50@2R 1xATR@2R TS", "shot_td2_out", "shot_td2_pts"),
             ("Step 2e Preview: OWNER-LADDER v2 (fixed TP)", "shot_lad_out", "shot_lad_pts"),
             ("Step 2e Preview: LADDER on FIXED WAVE 2.0/3.5", "shot_ladx_out", "shot_ladx_pts"),
+            ("Step 2f Preview: ELASTIC TRAIL on FIXED WAVE", "shot_elas_out", "shot_elas_pts"),
             ("Step 2e Control: LADDER lock-only arm", "shot_lad2_out", "shot_lad2_pts"),
             ("Benchmark: 2.0x SL / 3.5x TP Fixed Wave", "fix_out", "fix_pts"),
             ("Benchmark: 1.5x SL / 3.0x TP Live ATR", "shot_s15_out", "shot_s15_pts"),

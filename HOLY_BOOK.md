@@ -2964,3 +2964,12 @@ self.exit_report_log(
 - New rule in force: **no silent exit** — every SL/TP move by Doors 1–5 writes an `exit_report_log()` line (old→new, R, door, why, bid/ask). Keep-it-out test after 30 demo days.
 
 *End of `2026-11-11` update — exit reporting rule enshrined, replay-37 verdict + Step-2d MTF to-do recorded, Book at 2937 lines (ceiling < 3000).*
+
+
+---
+
+### STEP 2f PRE-REGISTRATION — THE ELASTIC ROPE (`2026-11-12`, written BEFORE the tape; owner's own design)
+**The idea:** keep the SL line trailing the peak, but the gap is not constant - it shrinks the further price has run from entry (more profit earned = less slack allowed). Smooth (no rungs), ratchet-only (never loosens), TP frozen at the wave (Law #1).
+**Arm in the ruler (tool blob `a8925e51`, row `Step 2f Preview: ELASTIC TRAIL on FIXED WAVE`):** gap = max(0.5 x opening-R, (1.5 - 0.25 x peak_R) x ATR_run); moves decided on closed-M3 peaks; exits against lines valid at bar start (SL before TP, no intra-bar peek); universe = the champion's own fix_out-eligible cycles with sl_fix/tp_fix + run-constant ATR - exactly the ladder arm's geometry, so row-vs-Benchmark is one-variable fair.
+**The bar, fixed now, no re-tuning EVER:** on BOTH pinned seas (`--dates 2026-11-03,2026-11-04,2026-11-05,2026-11-06,2026-11-09` and `--dates 2026-11-09,2026-11-10,2026-11-11`) the elastic row must beat `Benchmark: 2.0x SL / 3.5x TP Fixed Wave` (-2.1 A / +82.0 B). The ladder row stays printed as the archive reference. **Win both** -> live arm proposal may be drafted (behind flag, with `exit_report_log()` finally built to justify it). **Lose either** -> rope-tightening retires with the ladder: this engine's exit = anchor well + hands off, no further rope chapters on borrowed seas.
+**Prediction on record (made before, so it can be caught):** loses sea A (chop eats slack); on sea B it may claw near the champion but not past it - "close" is not "beats", and only beats ships.
