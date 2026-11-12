@@ -937,6 +937,86 @@ def _walk_bracket(
     return out, pts
 
 
+def _walk_ladder(
+    bar_keys: List[int],
+    bars: List[Tuple[int, float, float, float, float]],
+    entry_ep: float,
+    direction: str,
+    entry_px: float,
+    sl_px: float,
+    tp_px: float,
+    max_hold_min: int,
+    spread_cost: float,
+    atr: float,
+    lock_r: float = 0.5,
+    use_early: bool = True,
+) -> Tuple[str, float]:
+    """Step 2e (2026-11-12): the OWNER-LADDER exit policy - rehearsal arm.
+
+    The TP promise is FROZEN at opening (rung 4 IS the fixed target - law #1,
+    no door-chasing, ever). The SL ratchets forward ONLY on closed-bar rung
+    events, max three moves per trade:
+      +0.75R -> SL halfway toward entry (risk cut ~50%, breathing kept)
+      +1.00R -> SL to entry + 0.1xATR buffer (risk-free vs normal breaths)
+      75% of the TP distance -> SL locks +lock_r x R (half the wave banked)
+    use_early=False is the CONTROL arm (lock only) that isolates whether the
+    two early protections earn or cost. Rung counts on the bar CLOSE only;
+    exits are checked against the lines valid at bar start (SL before TP on
+    the same bar - conservative, no intra-bar peek). Returns (outcome, pts).
+    """
+    entry_min = int(entry_ep // 60) * 60
+    start_idx = bisect.bisect_right(bar_keys, entry_min)
+    if start_idx >= len(bars):
+        return "NO_BARS", 0.0
+    end_min = entry_min + max_hold_min * 60
+    is_buy = direction.upper() == "BUY"
+    d = 1.0 if is_buy else -1.0
+    init_r = abs(entry_px - sl_px)
+    tp_dist = abs(tp_px - entry_px)
+    if init_r <= 0.0 or tp_dist <= 0.0:
+        return "BAD_GEOM", 0.0
+    atr_eff = atr if atr > 0.0 else max(init_r / 2.0, 1e-9)
+    half_sl = entry_px - d * 0.5 * init_r
+    be_sl = entry_px + d * 0.1 * atr_eff
+    lock_sl = entry_px + d * lock_r * init_r
+    rung3_prog = 0.75 * tp_dist
+
+    def _improves(new_v: float, cur_v: float) -> bool:
+        return (new_v > cur_v) if is_buy else (new_v < cur_v)
+
+    cur_sl = sl_px
+    state = 0
+    last_close = entry_px
+    for idx in range(start_idx, len(bars)):
+        b_min, _o, hi, lo, cl = bars[idx]
+        if b_min > end_min:
+            break
+        if is_buy:
+            if lo <= cur_sl:
+                tag = "LADDER" if cur_sl > sl_px + 1e-9 else "SL"
+                return tag, round((cur_sl - entry_px) - spread_cost, 2)
+            if hi >= tp_px:
+                return "TP", round((tp_px - entry_px) - spread_cost, 2)
+        else:
+            if hi >= cur_sl:
+                tag = "LADDER" if cur_sl < sl_px - 1e-9 else "SL"
+                return tag, round((entry_px - cur_sl) - spread_cost, 2)
+            if lo <= tp_px:
+                return "TP", round((entry_px - tp_px) - spread_cost, 2)
+        prog = (cl - entry_px) * d
+        if use_early and state < 1 and prog >= 0.75 * init_r and _improves(half_sl, cur_sl):
+            cur_sl = half_sl
+            state = 1
+        if use_early and state < 2 and prog >= init_r and _improves(be_sl, cur_sl):
+            cur_sl = be_sl
+            state = 2
+        if state < 3 and prog >= rung3_prog and _improves(lock_sl, cur_sl):
+            cur_sl = lock_sl
+            state = 3
+        last_close = cl
+    pts = (last_close - entry_px) * d
+    return "TIMEOUT", round(pts - spread_cost, 2)
+
 def simulate_one_pos_portfolio(
     ok_days: Sequence[Dict[str, Any]],
     conf_thr: float,
@@ -2380,6 +2460,8 @@ def replay_single_day(
                 shot_ch10_out, shot_ch10_pts = "NO_SIGNAL", None
                 shot_c3p_out, shot_c3p_pts = "NO_SIGNAL", None
                 shot_td2_out, shot_td2_pts = "NO_SIGNAL", None
+                shot_lad_out, shot_lad_pts = "NO_SIGNAL", None
+                shot_lad2_out, shot_lad2_pts = "NO_SIGNAL", None
                 a2_fix_pts = a2_atr_pts = None
 
                 if sig_dir in ("BUY", "SELL") and px > 0:
@@ -2477,6 +2559,15 @@ def replay_single_day(
                                     bar_keys, walk_bars, tc_ep, sig_dir, px,
                                     sh_sl, sh_tp, max_hold_min, spread_cost,
                                     trail_atr=atr_live, trail_dist_mult=1.0, trail_trigger_r=1.0,
+                                )
+                                shot_lad_out, shot_lad_pts = _walk_ladder(
+                                    bar_keys, walk_bars, tc_ep, sig_dir, px,
+                                    sh_sl, sh_tp, max_hold_min, spread_cost, atr_live,
+                                )
+                                shot_lad2_out, shot_lad2_pts = _walk_ladder(
+                                    bar_keys, walk_bars, tc_ep, sig_dir, px,
+                                    sh_sl, sh_tp, max_hold_min, spread_cost, atr_live,
+                                    use_early=False,
                                 )
                                 shot_c3p_out, shot_c3p_pts = _walk_bracket(
                                     bar_keys, walk_bars, tc_ep, sig_dir, px,
@@ -2833,6 +2924,8 @@ def replay_single_day(
                     "shot_ch10_out": shot_ch10_out, "shot_ch10_pts": shot_ch10_pts,
                     "shot_c3p_out": shot_c3p_out, "shot_c3p_pts": shot_c3p_pts,
                     "shot_td2_out": shot_td2_out, "shot_td2_pts": shot_td2_pts,
+                    "shot_lad_out": shot_lad_out, "shot_lad_pts": shot_lad_pts,
+                    "shot_lad2_out": shot_lad2_out, "shot_lad2_pts": shot_lad2_pts,
                     "a2_fix_pts": a2_fix_pts, "a2_atr_pts": a2_atr_pts,
                     "scout": scout_diag,
                     "power_diag": power_diag,
@@ -3675,6 +3768,8 @@ def synthesize_multi_day(results: List[Dict[str, Any]]) -> Tuple[str, str, Dict[
             ("Stage-4b Preview: Planned + 1.0xATR Trail@1R", "shot_ch10_out", "shot_ch10_pts"),
             ("Legacy PM C3 (Retired): 0.5xATR Trail@0.5R", "shot_c3p_out", "shot_c3p_pts"),
             ("Stage-2E Two-Door mirror: BE.75 P50@2R 1xATR@2R TS", "shot_td2_out", "shot_td2_pts"),
+            ("Step 2e Preview: OWNER-LADDER v2 (fixed TP)", "shot_lad_out", "shot_lad_pts"),
+            ("Step 2e Control: LADDER lock-only arm", "shot_lad2_out", "shot_lad2_pts"),
             ("Benchmark: 2.0x SL / 3.5x TP Fixed Wave", "fix_out", "fix_pts"),
             ("Benchmark: 1.5x SL / 3.0x TP Live ATR", "shot_s15_out", "shot_s15_pts"),
         ]
