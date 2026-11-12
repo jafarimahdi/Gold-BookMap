@@ -2460,6 +2460,7 @@ def replay_single_day(
                 shot_ch10_out, shot_ch10_pts = "NO_SIGNAL", None
                 shot_c3p_out, shot_c3p_pts = "NO_SIGNAL", None
                 shot_td2_out, shot_td2_pts = "NO_SIGNAL", None
+                shot_ladx_out, shot_ladx_pts = "NO_SIGNAL", None
                 shot_lad_out, shot_lad_pts = "NO_SIGNAL", None
                 shot_lad2_out, shot_lad2_pts = "NO_SIGNAL", None
                 a2_fix_pts = a2_atr_pts = None
@@ -2484,6 +2485,11 @@ def replay_single_day(
                     fix_out, fix_pts = _walk_bracket(
                         bar_keys, walk_bars, tc_ep, sig_dir, px, sl_fix, tp_fix, max_hold_min, spread_cost
                     )
+                    if fix_out in ("TP", "SL", "TIMEOUT"):
+                        shot_ladx_out, shot_ladx_pts = _walk_ladder(
+                            bar_keys, walk_bars, tc_ep, sig_dir, px,
+                            sl_fix, tp_fix, max_hold_min, spread_cost, atr_const,
+                        )
 
                     # 2) Active Stage-4b PositionManager Wave Trail (1.5xATR + BE@1R) vs 1.0xATR Trail
                     _s4b_on = bool(getattr(config, "STAGE4B_WAVE_TRAIL_ENABLED", True))
@@ -2924,6 +2930,7 @@ def replay_single_day(
                     "shot_ch10_out": shot_ch10_out, "shot_ch10_pts": shot_ch10_pts,
                     "shot_c3p_out": shot_c3p_out, "shot_c3p_pts": shot_c3p_pts,
                     "shot_td2_out": shot_td2_out, "shot_td2_pts": shot_td2_pts,
+                    "shot_ladx_out": shot_ladx_out, "shot_ladx_pts": shot_ladx_pts,
                     "shot_lad_out": shot_lad_out, "shot_lad_pts": shot_lad_pts,
                     "shot_lad2_out": shot_lad2_out, "shot_lad2_pts": shot_lad2_pts,
                     "a2_fix_pts": a2_fix_pts, "a2_atr_pts": a2_atr_pts,
@@ -3769,6 +3776,7 @@ def synthesize_multi_day(results: List[Dict[str, Any]]) -> Tuple[str, str, Dict[
             ("Legacy PM C3 (Retired): 0.5xATR Trail@0.5R", "shot_c3p_out", "shot_c3p_pts"),
             ("Stage-2E Two-Door mirror: BE.75 P50@2R 1xATR@2R TS", "shot_td2_out", "shot_td2_pts"),
             ("Step 2e Preview: OWNER-LADDER v2 (fixed TP)", "shot_lad_out", "shot_lad_pts"),
+            ("Step 2e Preview: LADDER on FIXED WAVE 2.0/3.5", "shot_ladx_out", "shot_ladx_pts"),
             ("Step 2e Control: LADDER lock-only arm", "shot_lad2_out", "shot_lad2_pts"),
             ("Benchmark: 2.0x SL / 3.5x TP Fixed Wave", "fix_out", "fix_pts"),
             ("Benchmark: 1.5x SL / 3.0x TP Live ATR", "shot_s15_out", "shot_s15_pts"),
