@@ -13,16 +13,30 @@ with ONE patch (TALLY-2, stamps → `…2026-11-17.3`) and ONE re-sail. TODO 12 
 WORK), and your step 2 receipt still stands: `post-last-row 65`, `stale 0`, 7 PASS / 0 WARN / 0 FAIL, 55 passed.
 3d's CODE half is PUBLISHED and read back from GitHub (`f70728d`, 8 files byte-identical to the tree that
 measured `56 passed`). The owner's own 224 Book lines are MERGED IN (section 3.5w), laws 66-68 are theirs. NEXT:
-install the three pages I hand over, make commit 2 with those three paths alone, push - then row 3c, the re-sail,
-whenever the field is quiet.  ← YOU ARE HERE.
+row 3c, the re-sail - one command, whenever the field is quiet. Both halves of 3d are now PUBLISHED and read
+back from GitHub (`f70728d` code, `dc280b0` paper).  ← YOU ARE HERE.
 ──────────────────────────────────────────────────────────────────────────────
 WHERE WE ARE GOING — one step per message, in THIS order (the number is the TODO row; `[you]` = you run a block,
 `[me]` = I cut it). Nothing in rows 3-9 changes what the factory DECIDES; they make it impossible to misread what
 it DID.
-  ▸NOW   row 3c THE RE-SAIL       open — one command, needs a quiet field, prints ROW 3 ASSERTED on fresh paper
-        row 3d PAGES              merged ✅ (Book 4,490 L: their 224 + my 1,355, 0 lost either way) —
-                                  awaiting commit 2 + push, which are the owner's hands, then I read the
-                                  sha back off GitHub.  Code half of 3d is DONE (`f70728d`, 8/8 identical).
+  ▸NOW   row 4                    Room A is CLOSED: rows 0,1,2,3,3b,3c,3d all have receipts. Row 3's
+                                  close is `§3.5z`: `ROW 3 ASSERTED on fresh paper`, PASS, on `git=dc280b0`,
+                                  7 gates OK, the belt card abstaining in words, 124 = 116 + 8 on live `.3`
+                                  paper that reproduces the `.2` counts exactly. NEXT: row 4, the ±$80 rung
+                                  band (start by reading `errors 84` - two thirds of that day was SKIPPED for
+                                  a cause, which is a MAP problem, not a counting one). Row 4 needs no new code in the sea: `rung_band`, `levels_seen`, `levels_kept`,
+                                  `band_empty`, `skip_kinds` and the stamp `printed_by` are ALREADY on
+                                  every day's paper - only a reader is needed. window/every/prewarm are
+                                  NOT on the paper (never were), which is law 74 and why my dials line
+                                  will honestly say 1 of 4.
+        block               : v5 = 399 L / 23005 B / `51ad7761f84656b3` fixes my v4 over-correction
+                                  (law 73: identity test ≠ completeness test). The 6-day sweep on it will also
+                                  print each day's old-paper confession line.
+        row 3d PAGES              PUBLISHED ✅ `dc280b0` on `origin/strategy-v2` (parent `f70728d`),
+                                  Book 4,503 L `173d420bbe7eb891` · map `d74331a071e51317` ·
+                                  to-do `d38745ea618fb61d`, all three hashed off the PUBLISHED blobs.
+                                  (This row first said 4,490 L - a prediction, not a measurement; fixed,
+                                  and the lesson is in the Book §3.5w.)
         row 3b TALLY-2, the one patch DONE by you: applied + `56 passed in 142.60s`
   DONE   row 3d PUBLISHED            ✅ code: `f70728d` on `origin/strategy-v2`, parent `807ac51`, 8 files
                                        byte-identical to my measured tree (Book §3.5v has the 8 sha256s); the
@@ -120,6 +134,21 @@ PATTERNS IN FORCE ON THIS PAGE — the laws, and the reason each one exists (ful
       dead code
   69  two writers, one file: MERGE, never `cp`, and    the 224-line episode. three-way against the base, count
       renumber the arrival.                             BOTH directions, then commit.  59/63 backfilled too
+  70  an interpreter must be PROBED, not named.       `python3` = the Store stub (rc 49, empty stdout):
+                                      one dead name, two lies - a loud sail failure and a
+                                      silent "no old paper".
+  71  an OWNERSHIP test before any preference ties    `belt_a.json` - a BELT-1 artifact carrying `day` and a
+      a break.                                         wider grid - beat the day's own paper on 'widest
+                                                       grid wins' (3.5y)
+  72  decode foreign files with a LADDER, not an       the sea's own em dash (0x97, cp1252) killed a
+      assumption.                                      finished sail: rc=0 earned, verdict lost
+  73  a fix that turns a WRONG PICK into NO PICK        v4 demanded a full `cycle_grid` to recognise the
+      is not a fix: identity is not completeness.       day's own paper, and so lost it. `none found` was a
+                                                        regression wearing a safety belt (3.5z)
+  74  a reader's FIELD NAMES come from the WRITER,        `cycle_grid` / `window_start_utc` / `every_s`
+      not from a fixture I built myself.                   are not paper keys at all (`grep -c` = 0 at
+                                                           f70728d and 99b3cc8): `0 qualified` was
+                                                           arithmetic, not bad luck (3.5z, law 74)
 
   standing, and unchanged: process verification only - no signal, no trading · your repo is never committed or
   pushed by me · the old factory is untouched (N1) · hall `--hall-off` · the ±80 USD mapper law · the live loop
