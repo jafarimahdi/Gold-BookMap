@@ -38,6 +38,18 @@ FLAT_LAKE_ER = 0.22        # G1 guard: ER below this FORCES hard BELLY
 MAX_SPREAD_PCT = 0.010     # fire-law (4) look-both-ways: sanity cap, tuned at rules-time
 TOLL_CLOSES = 2            # verdict law 1: 2 consecutive M3 closes beyond = moved in
 TOLL_HOLD_MIN = 5.0        # verdict law 1: or 5+ minutes holding with volume building
+# v8f (2026-11-14, the owner's two measured nights - item 48). Law 1 could only
+# ever speak ONE sentence: `elif ... and not paid: BOUNCE` meant an UNPAID toll
+# (the weakest moment a cycle can offer: EXCESS=c1/h3m, the first close beyond) was
+# the ONLY state in which BOUNCE existed, while a PAID cycle with 2 break desks
+# printed UNDECIDED and died as NO-VERDICT. 11 tickets over 2 days, all 11 at c1, 0
+# of 10 measured went the way - the mouth opened when there was nothing to say.
+# ACCEPT_BEFORE_BOUNCE demands the same acceptance a BREAK needs BEFORE a bounce may
+# be spoken. DEFAULT OFF: the live factory borrows this file (their
+# factory2_gates.py:340 `import committee`), so a live cycle cannot gain the law by
+# accident - it arms only when gates_replay stamps the snapshot, i.e. in the hall.
+ACCEPT_BEFORE_BOUNCE = True
+ACCEPT_MARK = "REPLAY/"        # what the hall stamps into cv["symbol"]
 
 # ---- G3: the closed club, exactly as pinned in "GATE 3 JUDGE SIGNING" ----
 G3_DESKS: Dict[str, Tuple[str, ...]] = {
@@ -297,7 +309,8 @@ def evaluate_fight(rung: Optional[Rung], judges: List[Dict[str, Any]],
                    toll: Optional[Dict[str, Any]] = None,
                    trap: Optional[Dict[str, Any]] = None,
                    l3q: str = "ok", oi: str = "",
-                   effort: Optional[float] = None) -> Dict[str, Any]:
+                   effort: Optional[float] = None,
+                   armed: Optional[bool] = None) -> Dict[str, Any]:
     """G3 = the only ballot box. Inputs: the fused rung card from G2, the parsed
     judge panel (the 18 eyes), the toll state, the snap-back stamp, feed quality."""
     toll = dict(toll or {})
@@ -309,6 +322,26 @@ def evaluate_fight(rung: Optional[Rung], judges: List[Dict[str, Any]],
     d = v["delta"] or v["creak"] or v["tilt"]
     paid = toll_paid(toll)
     snapback = bool(trap.get("snapback"))
+    # v8f ACCEPT-BEFORE-BOUNCE (item 48). Two readings were wrong before this line was
+    # checked against a 12-line truth table, not by reading. THREE things were wrong in
+    # my first attempt, all caught by measurement: (1) BOUNCE desks count when they vote
+    # AGAINST the push (`v[desk] == -d`), so on the owner's real cards - `absorb tired`
+    # blank, `iceberg-` - there were ZERO bounce votes and every one of the 11 tickets was
+    # spoken by `SNAPBACK=1` alone, at EXCESS=c1/h3m; (2) the old branch demanded
+    # `not paid`, so acceptance MOUSED the bounce as well as BREAK's rivals - adding a
+    # naive "require the toll" gate yields an EMPTY reachability set (paid -> refused by
+    # `not paid`, unpaid -> refused by the gate) = ZERO verdicts forever; (3) writing
+    # `(not paid or accept_required)` looks equivalent and is NOT - it still lets the
+    # first touch bounce. The law is therefore `not (armed and not paid)`: when armed,
+    # silence is only for the UNPAID case, and paid+snapback/bounce-desks may finally
+    # speak. `armed` = AUTO on the hall's mark, so a live caller (their
+    # factory2_gates.py:340 `import committee`) keeps the old law byte-for-byte.
+    _mark = str(trap.get("symbol", "")).startswith(ACCEPT_MARK)
+    if armed is None:
+        armed = bool(_mark and ACCEPT_BEFORE_BOUNCE)
+    else:
+        armed = bool(armed)
+    accept_met = bool(armed and paid)      # acceptance proven -> a bounce may be spoken
     if d == 0:
         verdict = "UNDECIDED"
     else:
@@ -318,7 +351,7 @@ def evaluate_fight(rung: Optional[Rung], judges: List[Dict[str, Any]],
             + (1 if v["scarecrow"] == -d else 0) + (1 if v["iceberg"] == -d else 0)
         if paid and brk >= 3:
             verdict = "BREAK"
-        elif (snapback or bon >= 2) and not paid:
+        elif (snapback or bon >= 2) and not (armed and not paid):
             verdict = "BOUNCE"
         else:
             verdict = "UNDECIDED"
@@ -329,8 +362,13 @@ def evaluate_fight(rung: Optional[Rung], judges: List[Dict[str, Any]],
             f"| DESKS {desks} | TOLL={'paid' if paid else 'unpaid'} "
             f"| EXCESS=c{int(toll.get('closes_beyond', 0))}/h{float(toll.get('holds_minutes', 0.0)):.0f}m "
             f"| EFFORT={'n/a' if effort is None else f'{effort:.2f}'} | OI={oi or 'BLIND'} "
-            f"| SNAPBACK={'1' if snapback else '0'} | L3Q={l3q} | VERDICT={verdict}")
-    return {"verdict": verdict, "dir": d, "desks": v, "toll_paid": paid, "card": card}
+            f"| SNAPBACK={'1' if snapback else '0'} | L3Q={l3q} | VERDICT={verdict}"
+            + (" | ACCEPT=required" if (armed and not paid) else ""))
+    # `blocked_at_the_door`: the honest name for "a bounce wanted to speak and the
+    # acceptance law refused it" - counted as NO-EDGE in attempt_fire, never as NO-VERDICT.
+    blocked = bool(armed and not paid and d != 0 and (snapback or bon >= 2))
+    return {"verdict": verdict, "dir": d, "desks": v, "toll_paid": paid,
+            "armed": armed, "accept_met": accept_met, "blocked": blocked, "card": card}
 
 
 # ------------------------------------------------------------- fire-laws ----
@@ -359,7 +397,12 @@ def attempt_fire(verdict: Dict[str, Any], rung: Optional[Rung], pre: Dict[str, A
     A verdict can exist while the ticket stays in the pocket (that is the point)."""
     fails: List[str] = []
     if verdict.get("verdict") not in ("BOUNCE", "BREAK"):
-        return {"allow": False, "ticket": None, "fails": ["NO-VERDICT"]}
+        # v8f: "no word" and "the law refused the word" are DIFFERENT findings and
+        # must never share a tally. The refusal tally is how we will measure whether
+        # the acceptance law is earning its keep, so a suppressed first-touch bounce
+        # has to be countable as such.
+        _why = ["NO-EDGE"] if verdict.get("blocked") else ["NO-VERDICT"]
+        return {"allow": False, "ticket": None, "fails": _why}
     age = float(pre.get("age_s", 9e9))
     if not (age >= 0 and age <= FRESH_MAX_SECONDS):
         fails.append("FRESH-EYES")                               # law 1
@@ -416,9 +459,16 @@ def committee_evaluate(cyc: Dict[str, Any], ledger: TicketLedger) -> Dict[str, A
         judges = cyc.get("judges")
         if judges is None:
             judges = judges_from_notes(list(cyc.get("notes") or []))
+        # v8f: arm on cyc["symbol"], never on an invented key. Measured, not assumed:
+        # f2.cv_from_snapshot_dict() returns a FIXED whitelist (it dropped my first
+        # attempt's cv["shadow_law"], and "toll" too), while f2.build_cyc() - what actually
+        # feeds this function from the hall - carries symbol/toll/trap. A live snapshot
+        # carries the broker symbol, so an unmarked cycle keeps the old law byte-for-byte.
+        _armed = str(cyc.get("symbol") or "").startswith(ACCEPT_MARK)
         g3 = evaluate_fight(g2["rung"], list(judges), cyc.get("toll"),
                             cyc.get("trap"), l3q=str(cyc.get("l3q") or "ok"),
-                            oi=str(cyc.get("oi") or ""), effort=cyc.get("effort"))
+                            oi=str(cyc.get("oi") or ""), effort=cyc.get("effort"),
+                            armed=_armed)
         out["g3"] = g3["card"]
         pre = dict(cyc.get("prefire") or {})
         pre.setdefault("symbol", str(cyc.get("symbol", "?")))
