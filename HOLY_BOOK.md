@@ -4040,7 +4040,7 @@ word-bound the patterns (`api[_-]?token`, `access[_-]?token`, `(?i)password\b`, 
 69. **A NOTEBOOK TWO PEOPLE WRITE IN IS MERGED, NEVER COPIED OVER - AND ON A NUMBER COLLISION THE NEW ARRIVAL RENUMBERED (`2026-11-17`, the 224-line episode):** my owner laid my own printed copy of this Book over their working copy, which held 224 lines of their writing I had never seen. Nothing was lost ONLY because a `git diff` snapshot had been taken 19 hours earlier, on my asking, for another reason entirely. The rule: (a) before a shared file moves between our machines, they send me `git diff -- <file>`; (b) the merge runs THREE-WAY against the committed base, never side-by-side; (c) when both copies have a law 48 that means different things, NOBODY renumbers a cited law - the arrival takes the next free number and states where it came from; (d) the merge is proved by counting BOTH directions - every one of their lines present, every one of mine present, zero conflict markers - before a single file is committed. A file two people edit is a merge problem, and `cp` is not a merge.
 
 70. **AN INTERPRETER MUST BE PROBED, NOT NAMED (`2026-11-17`, the rc=49 sail on the owner's rig):** my re-sail block asked for `python3`. On HP-240 in UCRT64 that name resolves to the Microsoft Store ALIAS STUB in `.../AppData/Local/Microsoft/WindowsApps`, which prints "Python was not found" to **stderr**, writes **nothing** to stdout, and exits **49**. One dead name then produced TWO different failures in the same receipt: the sail died loudly (`SAIL FAILED rc=49`), while the paper-search stage - which reads STDOUT of a `python3` call - got an empty string and announced the FALSE fact `old paper : none found with day==2026-11-06 - dials fall back to the signed recipe`. The silent one is the dangerous one: a tool that reports "absent" when it means "I could not run" has already lost the difference between an empty shelf and a broken lamp. Rule: never name an interpreter and hope - ask each candidate to run code (`-c 'import sys'`), refuse any path containing `WindowsApps` on sight, print the chosen interpreter and its `-V` INTO the receipt, and let the operator override with `PYBIN=...`. `python` is the real one on this rig, which is why `56 passed in 142.60s` and the doorman block never met this stub - the defect was introduced by ME writing a new block instead of copying the working one.
-
+  [AMENDED `2026-11-18`, same evening - the example was wrong and the rule is stronger: the pick that inspired this law did not lose on 'widest grid wins' at ALL. Reading my own v2 (`.scratch/merge/resail_v2.sh` lines 104-118) it says `best, ticks = "", -1`, then `t = int(((j.get("cycle_grid") or {}).get("ticks")) or 0)`, then `if t > ticks`. No sea paper has ever carried `cycle_grid` (law 74), so EVERY candidate tied at t=0, the first `>` fired on the first name in `sorted()` order, and ties never replaced it - `belt_a.json` won because "b" sorts before "g", not because it was wider. And `belt_a.json` / `belt_b.json` are NOT foreign artifacts: the inventory of their `data/` shows both carrying day 2026-11-06 with cycles 124, tickets 8, errors 84, band 80.0, kept/seen 1401/1401 - the SAME numbers as the day's own paper, at 5,866 bytes each. A dead tie-break key is not a neutral default: it silently becomes an alphabetical pick, and a reader that reports "widest grid won" is narrating a field it never read.]
 71. **A PICK MUST PASS AN OWNERSHIP TEST BEFORE ANY PREFERENCE IS ALLOWED TO TIE-BREAK (`2026-11-17`, 71b: `belt_a.json` beat the day's own paper on my "widest grid wins"):** my re-sail block looked for "the paper of 2026-11-06" as *any* json whose `day` field matched, then took the widest `cycle_grid.ticks`. A BELT-1 test artifact carrying that same `day` AND a `cycle_grid` with more ticks won - and the block would have printed `old paper : DOES NOT ADD UP` about a file that is not the day's paper, with a straight face. `day` is a CLAIM, not an OWNERSHIP proof; so is a plausible-looking shape. The rule: qualify first (name carries the day AND `printed_by` starts with the producer's own stamp), prefer only inside the winners, and when nothing is qualified, SAY `tier 2: WEAK SELECTION` instead of picking silently - and print the whole candidate table, with a REASON beside every rejection, into the receipt (`2>>"$R"`). A selection the reader cannot audit is a guess with a filename on it.
 
 72. **A FILE ANOTHER PROCESS WROTE IS DECODED WITH A LADDER, NEVER AN ASSUMPTION (`2026-11-17`, the 0x97 that ate a completed sail):** on the owner's rig `python` is `/c/Python312/python` - Windows CPython 3.12.4, whose `sys.stdout` writes a redirected file in the **locale codepage (cp1252)**. The sea prints em dashes; byte `0x97` is not valid UTF-8; and my checker opened that `.txt` with `encoding="utf-8"` and died with `UnicodeDecodeError` at position 390 - AFTER `sail done : rc=0, paper written`. The evidence was on disk and the verdict was lost to a codec assumption. Rule: read foreign text through a ladder (`utf-8-sig, utf-8, cp1252, latin-1` + a replace fallback), which cannot fail loudly on a file that exists, and never let a decode error masquerade as a missing fact. If you must guess an encoding, guess a SEQUENCE.
@@ -4048,6 +4048,8 @@ word-bound the patterns (`api[_-]?token`, `access[_-]?token`, `(?i)password\b`, 
 73. **WHEN A FIX TURNS A WRONG PICK INTO NO PICK, IT IS NOT A FIX - an identity test may not borrow a completeness test (`2026-11-17`, my v4 over-correction, one sail later than the bug it cured):** v3 picked `belt_a.json` because I ranked candidates by "widest `cycle_grid.ticks`". v4 was meant to stop that, so I required an owning paper to have `day` + the three sea counters + a `window_start_utc` + an `every_s`. The last two are DIALS, not identity - and the day's REAL paper, `gates_2026-11-06.json`, was written by `.2` before the grid was complete, so it failed my test too. Result: `old paper : none found`, the belt line vanished, and my "fix" had traded a wrong answer for no answer. v5 splits the questions: IDENTITY is `day` + `cycles` + `tickets` + `fails` (prefer the name carrying the day, then a `gates.replay` stamp), COMPLETENESS only decides which DIALS are read, and the receipt says `of the four dials, 0 came from the paper and 4 from the signed recipe` so a silent fallback is never mistaken for a measured one.
 
 74. **A READER'S FIELD NAMES COME FROM THE WRITER'S SOURCE, NEVER FROM A FIXTURE I BUILT MYSELF (`2026-11-17`, the key that has never existed):** v4 and v5 both asked a sea paper for `cycle_grid` - v4 as a qualification, v5 as the dial source. `grep -c cycle_grid tools/gates_replay.py` is **0** at `f70728d` (the published `.3` sea) and **0** at `99b3cc8` (the `.2` sea): the writer has never put that key on the paper, so my test could not have passed on ANY file the sea ever wrote - `candidates : 0 qualified` was arithmetic, not luck. `window_start_utc`, `window_end_utc`, `every_s` and prewarm are PARAMETERS of `replay_day(day_str, every_s, window, prewarm_min, ...)` and are NOT recorded on the paper either; what the paper DOES carry is `day`, the counters (`cycles`, `tickets`, `fails`, `allowed`, `errors`, `lines`, `prints`), the source facts (`src`, `depth`, `tape_scope`, `fed_by`, `cap_min`, `mirror`, `day_order`), the band (`rung_band`, `levels_seen`, `levels_kept`, `band_empty`), `skip_kinds`, and the stamp `printed_by`. A fixture I wrote proves my reader agrees with MYSELF; only the writer's source proves it agrees with the file. So: open the writer, copy the key names out of it, and if a key is absent say so in the receipt instead of printing a silent fallback.
+
+75. **A RATIO MUST NAME THE BRANCH IT CAME FROM (`2026-11-18`, `100.0 %` of a band that may never have been measured):** the row-4 reader printed `coverage measured: 1401 of 1401 level-lines stand inside the band (100.0 %)` and every check said `[OK  ]` - and the number is still not proof that the ±80 law is harmless, because `band_levels()` begins `if not band or band <= 0 or price <= 0: return rows, rows`. A function that returns `x, x` makes kept/seen exactly 100 % for a second reason than the one the reader believes. So print the branch you are in, or print an abstention: `I cannot tell 'the band trimmed nothing' from 'there was no price to measure from'` costs four lines and buys the difference between a measurement and a story.
 **The Book merge was rehearsed first, then EXECUTED - the real numbers are in section 3.5w.** `git merge-file -p mine base theirs` with base =
 `807ac51:HOLY_BOOK.md` (3,113 L), mine = my copy (4,399 L), theirs = base + the owner\'s `+224 -1`:
 (1) with their side equal to the base, the merge returned MY file **byte-identical**, 0 conflicts;
@@ -4196,7 +4198,663 @@ which is the same equation the doorman measured on their live data (`gates_2026-
 
 **Row 4 got cheaper, for free.** Because `rung_band`, `levels_seen`, `levels_kept` and `band_empty` are already on every day's paper, the plus/minus-80 USD band audit and the `errors 84` question need NO new code in the sea - only a reader. The dial the mapper law is written on is already in the file.
 
+**PUBLISHED, AND READ BACK (`2026-11-18` 23:49:54Z).** The owner pushed the three pages: **`d0586d547f3df3de502fedfa7369c7b3e64306a9`** on `origin/strategy-v2`, parent `dc280b0` - a true fast-forward, no force, no merge. His commit printed `3 files changed, 144 insertions(+), 9 deletions(-)` with per-file `HOLY_BOOK 107/1`, `FACTORY2_MAP 35/6`, `FACTORY2_TODO 2/2` - **exactly the numbers I predicted from my own `git diff --numstat` before he ran it**, which is the first time a predicted receipt and a measured one have agreed line for line. Then I fetched it back through a throwaway remote (removed after; my notebook has `0` remotes) and hashed what GitHub serves: Book **4609 L / 936026 B / `e6d80eaa181dfcdf`**, map **594 L / 52110 B / `e2d0a953d32631d1`**, to-do **140 L / 16132 B / `3573f931be2238a1`** - all three equal to my written bytes, and `git diff --name-only f70728d..d0586d5` returns ONLY `.md` files, so neither paper push moved a line of code (`tools/gates_replay.py` still 1,510 lines).
+
+**A trap I nearly set for the next reader.** `git diff d0586d5 a25dadd` in this repo prints 9 code files as *deleted* and 12 operator blocks as *added*. That is my notebook's scope, not a regression: the shadow branch tracks the three pages plus my blocks and deliberately never held the sea's code, and it carries one 0-byte junk file of mine (`rewritten`) that exists in no published tree. Never compare a records branch to a published tree by whole-tree diff - compare the BLOBS you care about, by hash.
+
 **State of Room A after this:** rows 0, 1, 2, 3, 3b, 3c, 3d are CLOSED with receipts. `data/` now also holds the block's own outputs for that day (`gates_2026-11-06_tally2.json` / `.jsonl` / `.sea.txt` / `.paper.txt` / `.old.txt`) and the receipt `tally2_20261117.txt`; the owner's papers and diaries were never touched. Row 3 is finished as a PROCESS claim and nothing more: the counting is honest, and no number in this section says a single refusal was a correct market call.
+### 3.5aa ROW 4 IS OPEN, AND IT OPENED WITHOUT A LINE OF NEW SEA CODE (`2026-11-18`)
+
+**The finding first, because it changes what row 4 is.** I came to measure what the owner's ±80 USD mapper law
+costs, and the sea turns out to have been recording it all along: `rung_band`, `levels_seen`, `levels_kept`,
+`band_empty` and `skip_kinds` are written on the day paper by BOTH generations - `99b3cc8` (the `.2` sea) at its
+lines 838-841 / 1139 / 1148, and `d0586d5` (the `.3` sea) at 858-861 / 1198 / 1207. The comment on the writer's
+own line says why: *"the owner's law is only useful if the paper says how often it binds"*. So row 4 is a READER,
+not a patch - and the reader's field names were copied out of `git show <rev>:tools/gates_replay.py`, which is
+law 74 applied the first time after I wrote it.
+
+**What the writer actually counts, in its own words.** `_skip(reason)` bumps TWO things: `res["errors"] += 1` and
+`res["skips"][reason]`, under the comment *"One counter per CAUSE. `errors` stays the total (it is in the diary,
+the json and the old tests), but a night must never again say '38 skipped' without saying WHY"*. The aggregate
+then folds the per-day `skips` into the paper's `skip_kinds`. That makes `errors == sum(skip_kinds)` an
+IDENTITY on any single-day paper - and identity is testable, which is why `errors 84` stopped being a rumour the
+moment I read those three lines instead of inferring them. And `band_empty` is incremented only when
+`_seen and not _kept`: a cycle whose ENTIRE map stood outside the band still walks (it is deliberately not a
+skip, because skipping there would starve `RungState`'s memory and fake a clean look at history) - it is named in
+the cycle's own note as `band:0/N(nothing near)`.
+
+**The vocabulary is not stable across generations, and a reader must not pretend otherwise.** The `.2` papers'
+`skip_kinds` carries `stale`; the `.3` papers carry `pre-first-print` and `post-last-row` instead. A tool that
+printed "stale 0" for a `.3` day would be inventing a zero for a cause the writer removed - the same family as
+law 72 and the `(allowed)` bug. So the reader prints only the keys the file itself carries.
+
+**The block: `nov18_row4_band_block.sh` - 219 L / 11627 B / sha256 `3cac5fd88522bbca`.** Read-only by construction: one `open()`
+mode (`"rb"`), no `--json-out`, no `--diary-out`, nothing sailed, and the tape is never opened. Per day it prints
+the picked paper and WHY it was picked (tier 0 = named for the day and stamped `gates.replay`; law 71), the
+encoding the ladder needed (law 72), the counters, the named causes with their sum, the band with kept/seen and
+the empty-map count, and the feed facts (`src`, `depth`, `fed_by`, `tape_scope`) that decide whether the band
+could bind at all. Then four checks in the house voice: `errors == sum(skip_kinds)`, the band is the law's 80,
+`kept <= seen` with the coverage percentage, and `band_empty <= cycles`.
+
+**Proven on a fixture, and labelled as one.** Ten synthetic papers built from the writer's key list, each
+constructed to hit a different branch: a complete `.3` day (all OK), a `.2` day with no `allowed` key and `stale`
+in its vocabulary (prints *"allowed not on this paper"*, never zero), a day where `errors 85` against causes that
+sum to 84 (**`[FAIL] 1 skip(s) were counted without a cause`** - the block CAN see a broken sea), a day sailed
+with the band OFF (`[--  ]` abstention, not a pass), a day with `levels_seen 0` (abstention: the band had nothing
+to bind), a paper encoded in cp1252 (the ladder's `utf-8-sig` attempt provably fails on byte 0x92/0x97 first),
+and three decoys - `belt_a.json` carrying the same `day` and counters, a `.days.json` mirror, and a `_tally2`
+output - none of which was picked. `bash -n` exit 0. **No number in that paragraph describes the owner's data.**
+The first measurement of their six days is their run of it.
+
+**What is NOT concluded here.** The band's cost is not a bug and not a proposal: a cycle that skipped because the
+map was empty is the law working. Nothing in this section may be read as "widen the band"; `--rung-band 0` is a
+diagnostic that shows what the whole market WOULD have said, never a verdict on what the strategy should have
+done, and one week does not get two dials. The next measured step after the run is the diary's own
+`band:0/N(nothing near)` notes, which carry the per-cycle `N` - the number of lines the band threw away - and are
+the only place that number exists.
+
+### 3.5ab ROW 4, FIRST REAL NUMBERS: THE ±$80 BAND DID NOT COST THIS DAY ANYTHING (`2026-11-17` 23:55:44Z, the owner's keyboard, v1 of the block)
+
+**The run, verbatim where it matters** (`== ROW 4 / BAND AUDIT 2026-11-17T23:55:44Z ==`, `interpreter : python ->
+C:\Python312\python.exe | Python 3.12.4`, `data folder : /a/gitHub/Gold-BookMap/data (171 *.json files)`, exit 0,
+`checks: 8 OK, 0 FAIL, 8 abstain | days with a usable table: 2 of 6`):
+
+> **[ `2026-11-18`, one hour later ]** two numbers in this paragraph are superseded: the reach
+> became **4 of 6** (3.5ac), and "171 *.json" is the count of JSON files **on the top level only** -
+> the drawer itself is **1,717 files / 7.7 GB** down to depth 3 (3.5ad). The v1 measurements below are
+> still the measurements; the coverage claim is not.
+
+
+    day 2026-11-05   gates_d05.json          printed_by gates.replay.2026-11-14.0   cycles 240 | tickets 23 | errors 22
+                     named causes: warm-up 20 | stale 2 (sum 22)   [OK  ] errors == sum(skip_kinds)
+                     band +/-80 | kept 2739 of seen 2739 (100.0 %) | map-empty 0 of 240 cycles (0.0 %)
+    day 2026-11-06   gates_2026-11-06.json   printed_by gates.replay.2026-11-14.0   cycles 124 | tickets 8 | errors 84
+                     named causes: stale 65 | warm-up 19 (sum 84)  [OK  ] errors == sum(skip_kinds)
+                     band +/-80 | kept 1401 of seen 1401 (100.0 %) | map-empty 0 of 124 cycles (0.0 %)
+    day 2026-11-12   gates_sea_20261113_2026-11-12.json  (no stamp)  cycles 99 | tickets 2 | errors 20
+    day 2026-11-13   gates_sea_20261113_2026-11-13.json  (no stamp)  cycles 78 | tickets 1 | errors 20
+                     both: `skip_kinds` absent, `rung_band` absent, `levels_seen/kept` absent -> 3 x [--  ] each
+    day 2026-11-14 / 2026-11-17   paper : NONE - 1 and 2 files name the day but carry none of cycles/fails/tickets
+
+**What that answers, in one sentence each.** (1) **`errors 84` was never about the band:** on 2026-11-06 those 84
+skips are `stale 65 + warm-up 19`, and they add up - the identity `errors == sum(skip_kinds)` holds on both days that
+recorded causes. (2) **And `stale 65` is NOT "the tape went quiet" - I wrote that sentence, checked it against the writer, and it
+was wrong.** `stale` is the BORROWED LABEL the EYES-2d paper split in two: (a) rows exist but not one print yet
+(`pre-first-print`, a depth-only stretch before the auction) and (b) the day's file ENDED and the grid walked on to
+`cells_end` (`post-last-row`). The Book's own measurement closes the silence theory: *"their longest print-gap that
+day was 56 SECONDS against a 240-second rule"*. So a pre-split paper can tell me a cause count but not which of
+two states it was - and that is the first thing v2's run settles, because the fresh `.3` paper of the same day
+(`gates_2026-11-06_tally2.json`, stamped `gates.replay.2026-11-17.3`) names both counters separately. (3) **The ±80 law trimmed nothing at all** on the two days that measured it:
+`kept == seen` (2739/2739, 1401/1401) and `band_empty 0` of 240 and of 124 cycles. (4) Two of six days have no
+single-day paper with counters, and two more have a paper from a schema that predates `skip_kinds` and the band -
+so row 4's honest reach is 2 days, not 6, and the block says so instead of averaging what it could not see.
+
+**The correction I had to make to my own sentence.** I wrote in §3.5aa that the reader reports "level-lines kept of
+seen". Read the writer (`tools/gates_replay.py` at `d0586d5`, `def band_levels(snap, price, band)`): it trims
+`snap["signal_map"]["targets"]` and `["memory_doors"]` - the BORROWED BRAIN's rows, not the L2 book - and its own
+docstring says the brain's learner rungs (FVG from bars, AVWAP) are "near by construction", which is exactly why
+100 % is expected and not a verdict about the radius. It also opens with a trivial-yes branch, `if not band or
+band <= 0 or price <= 0: return rows, rows`, so `kept == seen` has two possible causes and the paper cannot tell
+them apart. That is law 75, and the reader now prints the caveat instead of the confidence. The tie-breaker is the
+diary, where each band-empty cycle carries `band:0/N(nothing near)` - row 4's next read, not this one.
+
+**And v1 of the block had a defect worth naming, because it is the same one twice.** It looked for the day's paper
+by NAME (`gates_<day>.json`), so `2026-11-05` came from `gates_d05.json` under a `tier 2 - WARNING: WEAK SELECTION`
+line, and 11-14/11-17 printed `NONE`. Worse, their `data/` can hold SEVERAL single-day papers for one day from
+different sail eras - a `gates.replay.2026-11-14.0` file saying 240 cycles for 2026-11-05 while the doorman's sweep
+of the same day reads 542 from another file - and a reader that silently picks one is a guess with a filename on it.
+So **v2 (`nov18_row4_band_block.sh` - 303 L / 16,870 B / sha256 `3e1ce7c9c12c87f2`) lists EVERY paper that carries the day** *(v3 317 L / 17,742 B / `b43d71d81cc98b61` later that night: same selection, same ranking, one type guard added - see 3.5ad; every table printed by v2 stands as printed, proved by a differential run).*, with
+stamp, counters, causes, band, kept/seen, map-empty, days-span and size; marks a `day_count`>1 aggregate
+`MULTI-DAY, do not read as this day` and never grades from it; prints `[!!  ]` when the day's own papers DISAGREE on
+cycles; notes when a newer stamped single-day paper exists and how to grade it (`PAPER=data/<file>`, which refuses
+loudly if the named file lacks `day+cycles+tickets+fails`); and reports files the ladder could not decode as
+UNREADABLE rather than absent. The day is not a number we choose; it is a set of papers we enumerate.
+
+**Proven, on a fixture, labelled as one:** the 11-06 case above was rebuilt with BOTH papers (the 11-14.0 one named
+for the day and a `_tally2` one stamped `gates.replay.2026-11-17.3`) plus a multi-day aggregate, and v2 printed the
+table, the `124 vs 240` disagreement, the note pointing at the newer stamp, and the 100 % caveat. A run with no
+usable day prints `NO day carried both `band_empty` and `cycles`, so there is no ratio to print` - which is a bug v2
+found in itself (`ZeroDivisionError`, caught by exactly that branch's fixture before it reached you).
+
+### 3.5ac ROW 4, FOUR DAYS AND ONE TRIMMED LINE: THE ±$80 BAND COSTS 0.015 % (`2026-11-18` 00:07:32Z, the owner's keyboard, v2 of the block)
+
+**v2 ran on the same folder twelve minutes later and the reach went from 2 days to 4, because v2 lists papers
+instead of naming one**: `checks: 15 OK, 0 FAIL, 7 abstain | days with a usable table: 4 of 6`, exit 0,
+`interpreter : python -> C:\Python312\python.exe | Python 3.12.4`, `data folder : /a/gitHub/Gold-BookMap/data (171 *.json files)`.
+> **[ `2026-11-18` 00:55, after the owner ran v3 on 2026-11-04 ]** that `7 abstain` did not match the
+> 5 `[--  ]` lines printed above it, and the reason is MY block, not their data: the four-line coverage
+> `[OK  ]` verdict carried a stray `; abstain += 1` on its last continuation line, so every day that graded
+> coverage invented one extra abstain (4 phantoms + 3 real = 7). **Every per-day verdict printed was right;
+> only that total was inflated.** Read 3.5ag for the reconciliation and for the fix, which is a mechanism.
+
+    day 2026-11-05  gates_d05.json                      .11-14.0  cycles 240 tickets 23  errors 22 = warm-up 20 + stale 2
+                                                            band 80.0  kept 2739 / seen 2739 (100.0 %)  map-empty 0 of 240
+    day 2026-11-06  gates_2026-11-06.json               .11-14.0  cycles 124 tickets 8   errors 84 = stale 65 + warm-up 19
+                                                            band 80.0  kept 1401 / seen 1401 (100.0 %)  map-empty 0 of 124
+    day 2026-11-12  gates_thu.json                      .11-13.9  cycles 138 tickets 7   errors 92 = stale 72 + warm-up 20
+                                                            band 80.0  kept 1614 / seen 1615 ( 99.9 %)  map-empty 0 of 138
+    day 2026-11-13  gates_sea_20261114_2026-11-13.json  no stamp  cycles  78 tickets 11  errors 20 (no skip_kinds -> [--  ])
+                                                            band 80.0  kept  932 / seen  932 (100.0 %)  map-empty 0 of  78
+    across the four: 580 cycles sailed, 0 of them (0.0 %) with a map that sat ENTIRELY outside the band
+
+**So the number row 4 was after is now here, and it is tiny: 6,687 map rows were measured, 1 was trimmed.** That
+single trim is on 2026-11-12 (`1614 of 1615`), a day sailed by `gates.replay.2026-11-13.9` - and `band_empty` is 0
+on all four days, i.e. no cycle ever walked with no map at all. On gold at ~4,000, a ±80 USD radius around the last
+print contains everything the borrowed brain proposes, because its `targets` and `memory_doors` are built from
+recent bars (the writer says so: "near by construction"). The law is therefore **satisfied almost vacuously in
+replay** - which is a fact about the radius relative to the brain's own horizon, and still not a proposal: the
+only way to turn this into "the band is wrong" would be to widen it, and widening is what the house forbids
+(`never loosen thresholds to force trades`).
+
+**The five-papers-one-day result, which is worth more than the band number.** For 2026-11-06 v2 found SEVEN files
+and FIVE sea papers, written by four different code eras, and all five agree exactly:
+
+    gates_2026-11-06.json  .2026-11-14.0  124 8 84 84 80.0 1401/1401 0   gates_2026-11-06_tally2.json .2026-11-17.3  same
+    gates_eyes2d.json      .2026-11-17.2  124 8 84 84 80.0 1401/1401 0   belt_a.json / belt_b.json    .2026-11-14.0  same
+
+Five re-sails of one day, five identical counters, sizes within 23 bytes of each other - and the `.3` one is the
+paper row 3 was closed on. `gates_20261106_metrics.json` and `prices_20261106.json` carry the day but no counters,
+which is precisely why those two days printed `other: day` in the inventory and `paper : NONE` in the audit. Two
+days still cannot be graded by band at all: 2026-11-14 and 2026-11-17 have no top-level paper with counters, and
+the owner's note - *the loop was running yesterday and before yesterday* - says the live loop wrote something, so
+the question is WHERE, not WHETHER. `gates_sea_20261114.json` is stamped `2026-11-14.0`, carries `177 | 17 | 40`
+and `2080/2081`, and its `day` is `2026-11-12..2026-11-13`: **a multi-day aggregate whose own counters are a
+span** - which is exactly why v2 refuses to read a `day_count > 1` file as a day.
+
+**And the correction I have to make about my own law 71** is in the law itself now, so the rule and the retracted
+example travel together: `belt_a.json` never won on a "wider grid" (no paper has that key) - it won on
+`sorted()` order behind a dead tie-break. The rule survives it; the rule gets stronger, because a preference field
+that does not exist does not fall back to nothing, it falls back to the alphabet.
+
+**The new tool, because an audit must know the size of its own drawer:** `nov18_data_inventory_block.sh` -
+179 L / 7,966 B / sha256 `8044a5c2d19ab7b9` - **which then CRASHED on their real folder; superseded by 299 L / 15,002 B / `00638747cf27e1d0`, and the reason is in 3.5ad below**. Read-only, recursive to `maxdepth 3` (v2 only saw the top level), parse cap 1,500
+files with the remainder counted as `capped-out`, and it classifies every JSON **by the keys it carries, never by
+its name**: folder census, kind census, one line per day any readable file claims (with the papers that disagree
+shouted as `a day is a SET of sails, not a number`), and the newest 14 files of any kind, which is the direct
+answer to "the loop was running - do we have data". A file over 8 MB and a file the ladder cannot decode are both
+reported as UNREADABLE with a reason. Tested on a fixture with papers hidden in `reports/`, a 9 MB JSON, a
+half-written JSON, a `.jsonl` diary and a tape `.gz`: it found the sub-folder papers, printed `427 vs 512`, and
+named both unreadables. Fixture numbers, again - not theirs.
+
+### 3.5ad THE DRAWER IS 7.7 GB AND THE KEY `days` IS TWO DIFFERENT THINGS: THEIR DATA FOUND THE BUG IN MY READER (`2026-11-18`, 00:16:01Z)
+
+The owner ran the inventory block and it printed eleven useful lines and then died:
+
+    -- 1. the drawer, by folder (files | MB | newest) --
+       (top level)                     968 files   5416.5 MB   2026-11-18 00:18
+       archive                         246 files   2314.2 MB   2026-11-17 18:05
+       power_v2_memory                  25 files     78.0 MB   2026-11-17 22:30
+       backtest_20260918_094302          6 files      0.0 MB   2026-09-18 11:43
+       wf_tmp_ticks_20260917_164753.csv  6 files     0.0 MB   2026-09-21 16:14   (x9 of these)
+       folders seen 192 | files 1717 | walked 1717
+    Traceback (most recent call last):
+      File "<stdin>", line 79, in <module>
+    TypeError: 'int' object is not iterable
+
+**Line 79 was mine, and it is a schema claim I never earned:** `for x in (j.get("days") or [])`. In this house the
+key `days` is used **two ways by two writers**: a LIST of dates in a sea paper (`["2026-11-12", "2026-11-13"]`) and
+an INTEGER COUNT in a metrics file (`days: 11`). `11 or []` is `11`, and `for x in 11` is a `TypeError`. Law 74 says
+a reader's FIELD NAMES come from the writer's source; this is the next step down - a field's **TYPE** comes from
+the writer too, and the same name can carry two of them. So the reader now says `isinstance(dv, list)` before it
+iterates, and `int(dv) > 1` is read as what it means: a MULTI-DAY aggregate, never a day.
+
+**And the same line was inside the audit block, one call away from destroying the table I just booked.**
+`nov18_row4_band_block.sh` v2 line 110: `ds = [str(x) for x in (j.get("days") or [])]`. Reproduced on a fixture,
+top level, no `PAPER=`:
+
+    BEFORE  -- day 2026-11-17 --
+            Traceback ... line 38, in day_papers
+            TypeError: 'int' object is not iterable          == ROW 4 / BAND AUDIT done: exit 1 ==
+    AFTER   -- day 2026-11-17 --
+              selection   : NONE: 1 file(s) name the day but carry none of fails+tickets -
+                            reports and metrics, not papers
+              every paper that carries this day:
+                 day_metrics_2026-11-17.json  (no stamp)  cycles 488  band absent   <-- SEEN, not crashed
+              [--  ] nothing was graded on this day - absent is reported as absent, never as zero
+
+**No booked number moved, and that is a measurement, not a promise.** I rebuilt v2 of the audit block from v3 with
+only that line swapped back, ran both over the same folder and the same three days, and diffed the whole
+transcript: the only differing line was the folder path in the header (each copy had its own). `cmp` on the
+extracted table rows: **identical**. The type guard changed no grade, no count, no verdict - it only turned a crash
+into an abstain with a name on it.
+
+**I then over-corrected, and law 73 caught me before the owner could.** My first guard was
+`if isinstance(dv, int): continue` - which silently throws away a file that DOES declare `day: "2026-11-17"` just
+because it also carries a day count. A fix that turns a usable file into no file is the same regression v4 of the
+row-3 block committed. The shipped guard keeps the file, drops only a true aggregate (`int(dv) > 1` AND no single
+`day`), and the fixture output above is the proof it still sees it.
+
+**Sealing the sections - the part of v1 that worked is now structural.** Every section of the inventory block runs
+inside `seal(name, fn)`: one section raising prints `!! section N failed: ...`, records it in `SEEDED FAILURES: n`,
+and the report continues. The crash run is exactly the argument for it - the folder census it printed was the most
+valuable output of the night, and it was one exception away from being lost entirely. A tool that dies at the end
+of a two-minute walk over 7.7 GB tells you nothing, including what it already knew.
+
+**What the census said, since that is what the owner asked for:**
+
+| folder | files | MB | newest | what it means for row 4 |
+|---|---|---|---|---|
+| `(top level)` | **968** | **5,416.5** | **2026-11-18 00:18** | the live loop is writing NOW, and my 171 was only the `.json` subset |
+| `archive/` | 246 | 2,314.2 | 2026-11-17 18:05 | **the 11-16 / 11-17 papers are most likely in here** - untested, section 3 will name them |
+| `power_v2_memory/` | 25 | 78.0 | 2026-11-17 22:30 | the loop's own memory, written the night the owner says it ran |
+| 9 x `wf_tmp_ticks_*.csv` | 6 each | ~0 | Sept | a TEMP folder that grew a directory per run; the `.csv` in the name is part of the directory NAME |
+
+`folders seen 192 | files 1717 | walked 1717`. **So my `171 *.json` line was true and useless in the same way**: 171
+is the JSON count on one level of a 1,717-file, 192-folder, 7.7 GB drawer. Every claim I have made about "what is
+in `data/`" was a claim about its top shelf, and the audit's `paper : NONE` for 11-14 and 11-17 meant "not on the
+top shelf", not "not measured". LAW: a reader must state the DEPTH it searched next to the count it prints.
+
+The last two numbers are the honest cost of the tool, printed in its own footer, because a reader that reads a
+7.7 GB folder is a load on a machine that is also sailing live tape (N1): v2 lists every file (a `stat` per file,
+no reads), opens at most `PARSE_CAP` (default 500) JSON files **newest first**, never opens one over 8 MB in full,
+and prints `parsed 9 small JSON (0.0 MB read)` so the owner can see the budget being respected. Newest-first is
+the whole point: the loop's output is in the budget, September's backtests are not.
+
+> **[ `2026-11-18` 00:24, their run ]** that ceiling had a bug of mine inside it: v1..v3 read only
+> the first 5 MB of any file, so a `.json` between 5 and 8 MB was TRUNCATED BY THE READER and then
+> reported as "no encoding produced JSON". The honest split of their 260 "unreadable" is **128 over the
+> 8 MB ceiling + 132 that would not decode** - and those 132 are a MIX, not a verdict on their files: some
+> are my 5 MB truncation of a 5-8 MB `.json`, and some are small `.jsonl` that are legitimately NOT one
+> JSON document. **Their next run settled which of the two it was, and it was not my ceiling:**
+> `0 of the files read were between 5 and 8 MB.` The subtraction says 132 - 8 = **124 of them were `.jsonl`**
+> misfiled as `.json` - v2 filed their 30-48 MB DIARIES under "JSON over 8 MB", which they are not: NDJSON is
+> one object per line by design. And 8 files are STILL undecoded `.json` under v4 - half-written, or not one
+> object - each named in its own section 6 instead of swept under a total: an honest remainder, not a closed
+> case. So my v4 ceiling fix was right in principle and a NO-OP on this folder; that it was THE cause was my
+> guess, and this paragraph is where it dies. The kind filter was the real defect, and it also stole parse
+> budget: v3 read 375 files to v2's 368 on the same 500 cap. 3.5ad's arithmetic is unaffected; its count of
+> what could not be read is. See 3.5ae and 3.5af.
+
+
+**Still not said by any of this**: no band has been proposed; the four-day 1614/1615 result stands; the 11-14 and
+11-17 days are STILL ungradeable (the inventory found the drawer, not yet the paper); and `power_v2_memory` being
+newest at 22:30 on 11-17 is evidence the loop ran, not evidence that anything in there can grade a band.
+
+### 3.5ae THE DRAWER MAPPED, AND IT ANSWERED THE QUESTION YOU ASKED: 11-16 AND 11-17 HAVE 48 MB AND 35 MB OF DIARY, NO PAPER (`2026-11-18` 00:24:34Z, the owner's keyboard, v2 of the inventory block)
+
+    folders 192 | files LISTED 1717 of 1717 found | 7873.6 MB listed | PARSED 500 budget -> 368 read
+    kind census    : OTHER x343 (gradeable 12) | SEA PAPER x19 (gradeable 19) | DAY METRICS x5 (gradeable 0)
+    days a paper can grade : 2026-11-04, 2026-11-05, 2026-11-06, 2026-11-12, 2026-11-13
+    newest 14      : my OWN row-3 output, 2026-11-17 23:18:36-39Z, plus gates_sandbox/ and a rotated twin
+
+**"The loop was running yesterday and before yesterday - perhaps we have data there." Yes. Not as papers, as
+diaries.** `diary_20261116.jsonl` weighs **47,886,978 B** and `diary_20261117.jsonl` **34,841,154 B** - the two
+days the audit called `NONE` have the two biggest day-files in the drawer, alongside 11-09 to 11-13 at 30 to 45 MB
+each. They are `.jsonl` (one JSON object per cycle, appended), so v2's JSON-only, 8 MB-capped parse could not open
+them and printed them under UNREADABLE - which is what that section is FOR: **my** limit, named, not their absence.
+
+**So a fifth day appeared, and it is one I never had: `2026-11-04`, 3 files, 1 gradeable paper, cycles 208, all
+four band fields present.** Row 4's measurement can go from 4 days to 5 as soon as the paper is named and audited -
+and v4 of the block now prints the paste-ready line per day (`PAPER=data/<file> [stamp | bytes | cycles]`), because
+"day 2026-11-04 has a paper" was not actionable while it was anonymous. Two days still have no paper read: 11-14
+and 11-16/11-17 - with 132 files that v3 could not parse (my ceiling above) that list is provisional.
+
+**The disagreement notes fired exactly as designed.** 2026-11-12 printed `cycles 138 | 177 | 99` and 2026-11-13
+printed `177 | 78`, and the same run named the reason two lines below: `gates_sea_20261113.json,
+gates_20261114.json carry 'days' as a COUNT (2) ... a MULTI-DAY aggregate, never to be read as one day`. That is
+the int-list field from 3.5ad doing useful work: the 177 that kept reappearing is not a rival sail of one day, it
+is **two days in one file** - which is very likely what an older sweep mistook for `542`-style counts. A
+hypothesis, flagged, and the aggregate's own fields are the only thing that can settle it.
+
+**19 gradeable files that declare NO day in any field** - the `day_metrics_YYYY-MM-DD.json` family (kind census
+says `SEA PAPER x19`, newest 2026-11-12 00:31Z). Their date is in the FILENAME and nowhere else. Law 71 says a
+name is not ownership, so this block refuses to bind one to a day and instead lists them for the owner to say
+which day each is. That is the correct shape of "I can see it but I will not guess it".
+
+**And the sentence I wrote last turn about their clock is dead - the bug was mine.** v1 of the block printed the
+folder table's mtimes with local-time `fromtimestamp()` under a header stamped UTC, so a file written at
+2026-11-17T23:18:39Z displayed as "2026-11-18 00:18", one hour in the future of the run's own 00:16:01Z header.
+v2/v3/v4 print UTC everywhere and the same file now reads `23:18:39`. So: no clock skew on the HP-240, and "the
+live loop is writing in `data/` RIGHT NOW" was wrong too - the report's own footer says the newest file in the
+drawer is **65 minutes old**, and those newest files are **my row-3 artifacts** (`tally2_20261117.txt` 4,101 B,
+`gates_2026-11-06_tally2.json` 5,854 B, its `.days.json` 6,131 B and 206,018 B `.jsonl`), all nine of them inside
+four seconds of each other at 23:18:36-39Z. One batch: the row-3 run that closed the row, writing into `data/`.
+
+**Two things that folder layout just told me, which I record rather than judge.** (a) `data/` contains
+`gates_sandbox/` AND `gates_sandbox_prev_20261118T001633/` - a sandbox and its rotated predecessor, and the
+rotation's NAME is in local time (`00:16:33`) while its files' mtimes are `23:06:40Z`: the same local/UTC split I
+just shot down in my own block is living in their folder names. (b) `session_levels.json` exists at **252 B**
+inside `gates_sandbox/` and at **369 B** on the top level - so my open question from last turn ("is the 369-byte
+file the live mirror or a stub?") now has a candidate answer: the live mirror is the sandbox one, and the top-level
+one is a leftover. Unverified: no hash of either was taken by this block, and the 395a4f4c14506479 mirror I have
+been hash-checking is a third thing.
+
+**Why section 4 counts a NOTE and not ROWS - read this before quoting any diary number.** The question I had to
+answer first was whether a diary could substitute for a paper on 11-16/11-17. It cannot, and the writer says why:
+
+    gates_replay.py:274-276   def band_levels(snap, price, band):
+                              '''Trim the borrowed brain's level map to the band, IN PLACE''' ...
+    :986                      res["levels_seen"] += _seen ; res["levels_kept"] += _kept
+    :996                      d.setdefault("notes", []).append(f"band:0/{_seen}(nothing near)")
+
+`band_levels` mutates the snapshot BEFORE the cycle's diary line is serialized. So a reader that counts
+`targets` + `memory_doors` rows in a diary is counting **the cut list** and would print "0 rows outside the band"
+as a measurement on every day in the folder - the exact unfalsifiable 100 % that law 75 was written to catch. What
+the diary DOES carry, and only the diary can carry for a day with no paper, is the writer's own note:
+`band:0/<n>(nothing near)` is appended when and only when `_seen and not _kept` - a cycle that walked with a map
+and had the WHOLE of it outside the band. So v3+ streams bytes in 1 MB chunks and counts that needle: lines =
+cycles, `hits` = full-cut events, `max(n)` = the biggest map that got cut, `notes` key present = proof the note
+layer survived serialization. Row-count coverage stays the paper's job. That is **law 77**.
+
+**The needle has not been run on their data yet.** v2 has no section 4; the numbers above are the census, not the
+needle. And the needle's own honesty rule: the byte budget (`JSONL_CAP_MB`, default 400 MB) is spent newest-first,
+a file it cannot finish is printed `PARTIAL` and its counts are labelled a LOWER BOUND, so a zero can never be
+read as "no full-cut events that day" unless every scanned file was read whole - the block says which of the two
+it is, in its own words.
+
+**Not said by any of this**: no band proposal (a 100 % coverage day and a 48 MB diary are both reasons to leave
+**Not said by any of this**: no band proposal (a 100 % coverage day and a 48 MB diary are both reasons
+to leave ±80 alone, not to touch it); `map-empty 0` remains measured on four days, not assumed on five; and
+row 3's closed numbers - the 1614/1615 trim and the five-paper agreement - are untouched by anything in
+this run.
+
+### 3.5af THE NEEDLE SAID ZERO ACROSS 103 FILES AND ONLY TWO OF THEM COULD HAVE CARRIED A NOTE (`2026-11-18` 00:34:38Z, the owner's keyboard, v4 of the inventory block)
+
+    read 375 small .json | over the 8 MB ceiling 16 | undecoded 8 | PARSE CAP NEVER BOUND
+    days a PAPER can grade: 2026-11-04, 2026-11-05, 2026-11-06, 2026-11-12, 2026-11-13   (five)
+    needle: 103 *.jsonl, 400.0 MB read of the 416.9 MB they weigh, 27,884 lines, 0 `band:0/` notes
+    ACROSS those 103 files: 133 MORE .jsonl were not scanned (budget)
+
+**1. My headline was false, and the tool printed the proof in the same screen.** v4 wrote
+`=> the band never left a cycle without a map IN ANY DIARY SCANNED`. Look at the per-file lines it sat on top of:
+`notes key present: False` on 12 of the 14 files shown - `market_quality_evidence.jsonl` (95.6 MB, 13,192 lines),
+every `power_v2_memory/power_*.jsonl`, every `gates_replay_*.jsonl`. A file with **no `notes` field cannot contain
+a note**, so its zero is silence, not evidence, and my sentence quietly converted 103 files of counting into one
+measurement. Two files on that screen DID carry the field: `diary_20261117.jsonl` (33.2 MB, **737 lines, notes
+present, 0 hits**) and `snapshots_history.jsonl` (878 lines, notes present, 0 hits). v5 therefore prints the split
+instead of a verdict - `NOTES-CAPABLE n files | X lines | Y hits <== evidence` versus `NO NOTES FIELD m files |
+Z lines | no information, EITHER way` - and if no scanned file can carry the mark it says `THE NEEDLE IS BLIND ON
+THIS RUN ... Do not read a zero here`. **Law 78: an absence is only evidence where the mark could appear.** The
+irony is mine to keep: I wrote law 75 ("a ratio must name the branch it came from") four hours earlier, and then
+published a count that did not name which of its files were even capable of holding the thing it counted.
+
+**2. What is genuinely earned for the two days we came for.** `diary_20261117.jsonl` is notes-capable, was read
+whole (no PARTIAL flag on it), 737 lines, **0 full-cut events**. That is a *measured* zero on a day with no paper
+- the first coverage statement for 2026-11-17, and it is one file and one day. `diary_20261116.jsonl` was scanned
+(its cross-reference line printed) but its `notes` capability is not visible in the 14 lines shown, so **11-16 is
+still not established**. v6 prints capable/blind per file, so the next run answers it in one line.
+
+**3. The drawer question is CLOSED for `.json`, and that is new.** `parse cap left 0 small JSON unread` means the
+500-file budget was never reached: **every `.json` under 8 MB at depth <= 3 in that folder has now been read** -
+375 parsed, 8 undecoded, 16 over the ceiling. So `2026-11-14 papers 0`, `2026-11-16 papers 0`,
+`2026-11-17 papers 0` is no longer "my glob missed it" and not "my cap cut it off": **those days have no paper
+JSON in `data/` to depth 3, full stop.** What the ceiling skipped is now shown by size, and it is one family:
+`tfrobot_plan_2026-10-30.json` **265.3 MB**, `_10-29` 140.1, `_10-28` 144.5, `_10-27` 143.8, `_10-26` 122.9,
+`_10-23` 161.6, `_10-19` 128.2, `_10-16` 87.8 - eight of them, ~1.1 GB, all October, all old-factory plans.
+Their existence explains the top level's 5.4 GB and none of them is a replay paper.
+
+**4. Five days, NAMED, paste-ready - which was the point of the last fix.** `2026-11-04 → data/gates_2026-11-04.json`
+(13,900 B, 208 cycles, `11-14 04:10`), `2026-11-05 → data/gates_d05.json` (14,552 B, 240), 11-12 → four papers,
+11-13 → three. And for 2026-11-06 the list came out **ordered by mtime with the owner's real paper first**:
+
+    PAPER=data/gates_2026-11-06_tally2.json  [11-17 23:18 | 5854 B | cycles 124]   <- the .3 paper row 3 closed on
+    PAPER=data/gates_eyes2d.json             [11-17 02:05 | 5843 B | cycles 124]
+    PAPER=data/belt_b.json                   [11-14 04:58 | 5866 B | cycles 124]
+    PAPER=data/belt_a.json                   [11-14 04:58 | 5866 B | cycles 124]   <- what v2 of the AUDIT crowned
+
+**That is law 71's correction, verified on their filesystem rather than in my arithmetic**: `belt_a.json` and
+`belt_b.json` are 11-14 scratch copies, 39 hours older than the `.11-17.3` tally2 paper, and the only reason the
+audit ever preferred them was a dead tie-break key resolving to alphabetical order. The numbers never moved (all
+four print 124 cycles and 1401/1401) - the *provenance* did, and provenance is what a paper is made of.
+
+**5. `day_metrics_*` is a different clock, and the 176 vs 124 gap must not be reconciled by me.** 19 gradeable
+files carry no `day` in any field (only a date in the filename, which law 71 forbids me to treat as ownership),
+newest `2026-11-11`. Their counters are `day_metrics_2026-11-05.json cycles 1042`, `_11-04 801`, `_11-06 176`,
+`_11-10 911`, `_11-11 932`. The replay papers for the same days print 240 and 124. And a third file for 11-06 -
+`gates_sandbox/power_v2_memory/power_2026-11-06.jsonl` - has **124 lines**, matching the replay exactly. So for
+one day the drawer holds 176 (live day_metrics), 124 (replay paper) and 124 (sandbox memory). 176/124 = **1.419**,
+which is NOT 3.0 (a 60 s vs 180 s grid ratio), so the standing house rule - never unify the two clocks - is
+honoured by leaving it as a gap with a number on it. v6 prints each file's `levels_seen / levels_kept /
+band_empty` (or `NO band fields - cannot grade a band`) precisely so this question can be answered from fields
+instead of from my inference; whether those live-side counters can grade the ±80 law is the next thing to look at,
+not a conclusion.
+
+**6. Two housekeeping facts, recorded, nothing touched.** (a) `data/` is accumulating a folder PER RUN -
+`gates_sandbox_prev_20261117T030218`, `...T030222`, `...T030235` (17 seconds apart), `20261118T000439`,
+`20261118T001633` - which is most of the 192 folders and part of the 7.7 GB, and it is why a folder count means
+nothing without a run count. (b) `tally2_20261117.txt` in their `data/` is 4,101 B, byte-for-byte the size of my
+row-3 receipt, alongside `gates_2026-11-06_tally2.old.txt` (2,748 B): my own papers are sitting inside their data
+folder, and LAW #13 says a superseded paper gets deleted - by them, into the attic, never by me.
+
+
+### 3.5ag THE FIFTH DAY IS MEASURED, AND ROW 4'S TALLY BUG GETS ITS TRUE DIAGNOSIS (`2026-11-18` 00:46:16Z, the owner's keyboard, audit v3 + `PAPER=`)
+
+    day 2026-11-04   gates_2026-11-04.json   gates.replay.2026-11-14.0   13,900 B
+      cycles 208 | tickets 22 | errors 47 = stale 27 + warm-up 20 (sum 47, every skip named)
+      band 80.0   |   kept 2182 of seen 2182 (100.0 %)   |   map-empty 0 of 208 (0.0 %)
+      refusal-words 208, no `allowed` key (a .2-era writer)   |   read utf-8-sig
+      the day's other file, `prices_20261104.json` (15,108 B, no stamp), is listed as a NON-paper:
+        it carries no cycles/tickets/fails, so it can grade nothing - and the block said so in words
+      selection : OVERRIDE - "graded gates_2026-11-04.json because you named it with PAPER="
+
+**Row 4 step 1 now rests on five days, and the pooled number is this:** 2739 + 1401 + 1615 + 932 + 2182 =
+**8,869 level-lines measured, of which exactly ONE was trimmed** (the single `1614 of 1615` on 2026-11-12) =
+**0.011 %**. Cycles: 240 + 124 + 138 + 78 + 208 = **788 sailed, 0 with a map that sat entirely outside ±80**.
+Each of those five numbers is a re-read of a stamped paper named in its own `USED` line - not an aggregate
+anyone chose for me.
+
+**What 11-04 adds that the other four could not:** `errors 47 == sum(skip_kinds) 47` on a SECOND day of the
+`2026-11-14.0` era, with a different split (`stale 27 + warm-up 20`, against 11-05's `stale 2 + warm-up 20`
+and 11-06's `stale 65 + warm-up 19`). The named-cause invariant - no skip counted without a reason - now holds
+on five days out of five that carry `skip_kinds`, and `stale` remains un-splittable on any paper from that era.
+
+**The reconciliation, which is the part worth keeping.** Their v2 sweep printed `15 OK, 0 FAIL, 7 abstain` over
+six days. Under the phantom-abstain bug: the four days that graded coverage (11-05, 11-06, 11-12, 11-13) each
+invented one abstain = 4; the real abstains were 11-13's missing `skip_kinds` plus 11-14 and 11-17 having no
+paper = 3. **4 + 3 = 7, exactly.** And the OKs: 4 checks x 3 clean days + 3 on 11-13 = **15, exactly**. So the
+bug was never an under-count of OK - I said that an hour ago and it was wrong, which is the third time today the
+direction of a drift surprised me - and every number quoted from a per-day table stands.
+
+**The second bug, found because I chose to FIX the first rather than patch it.** My first repair counted the
+markers printed on the screen and got `11 OK / 0 FAIL / 6 abstain` against `13 / 0 / 2` tallied by hand - the
+screen was right and my hand counters were wrong in two further places: band-OFF `[--  ]` and band-mismatch
+`[FAIL]` incremented NOTHING at all. And a third finding: `[--  ]` was doing double duty, marking both an
+abstained CHECK and a narrative CAVEAT (`those files were skipped, not absent`), so counting that marker cannot
+tell you how many checks abstained. A marker that means two things cannot be summed.
+
+**Law 79, and the shape of the fix.** A summary must be a count of its own lines. Audit v4 has no hand-written
+counters: every verdict leaves through `ck(tag, text)`, which prints and tallies as ONE operation, and caveats
+get their own `note :` line that never enters the sum. A `print` wrapper still counts markers off the screen, so
+if anyone prints `[OK  ]` outside `ck()`, the run ends with `[FAIL!] the screen and the tally DISAGREE` and
+`verdict: THIS RUN'S OWN TALLY IS BROKEN - nothing above is quotable`. I proved the guard by **breaking it on
+purpose** - a copy with one bare `print("  [OK  ] ...")` that skips `ck()` - and it caught itself: `3 verdict(s)
+issued by ck() | the screen shows 4 marker line(s)`. A guard I do not demonstrate is decoration. On the fixture
+v4 and v3 print **the same 11 `[OK  ]` verdicts**; only the abstain total changes (5 lines -> 2 checks), and v4's
+tally now equals its own `[--  ]` check lines exactly.
+
+**Provenance kept honest.** The file that produced every number booked from the last five runs - v3,
+`17,742 B / b43d71d81cc98b61` - is copied in my workspace as
+`REFERENCE-v3-of-the-audit-2026-11-18_b43d71d81cc98b61.sh`, because my `/tmp` fixtures are ephemeral and a
+receipt you cannot re-hash next week is not a receipt. v4 is `20,511 B / bda042b34ff65897` (372 L) and it changes NO measured
+number: it changes only what the summary line is allowed to claim about its own lines.
+
+**Your `00:58:03Z` receipt closed it, and closed one more thing I had not found.** `4 OK, 0 FAIL, 0 abstain`
+with `4 verdict(s) issued by ck() | the screen shows 4 marker line(s)` - the summary now counts its own lines, and
+every field matches your v3 run to the character: `208 | 22 | 47 = stale 27 + warm-up 20 | 2182/2182 | map-empty 0`,
+`prices_20261104.json` still listed as a NON-paper, `2182 of 2182 (100.0 %)`. So the phantom abstain is gone and
+nothing measured moved. **What your paste also caught is a line of my own prose**: v4 still printed
+`v3 ... printed five OK lines and reported 4 OK + 1 abstain` - left over from the wrong diagnosis I had already
+corrected, and therefore **false the moment it was delivered**. A tool's explanation of itself is a claim, so it
+needs the same treatment as its numbers. v5 moves that sentence into one list beside the machinery (`LAW79_NOTE`),
+prints the truth - the stray counter rode the LAST line of a four-line `[OK  ]` and invented an abstain beside a
+correct OK - and I re-tested all of it on a fixture rebuilt from YOUR paper's values: your day prints
+`3 OK / 0 FAIL / 1 abstain` (that paper's `skip_kinds` sits where my fixture does not point the reader, and the
+block abstained instead of guessing, which is the honest outcome), a day with no paper prints exactly **one**
+abstain and no phantoms, and breaking v5 so a marker skips `ck()` still ends the run with `[FAIL!]` +
+`nothing above is quotable`. Proof that v5 changed no arithmetic: I ran v4 and v5 over the same three-day fixture
+and diffed every verdict and number line - **0 differences**, both summaries `9 OK, 0 FAIL, 3 abstain`.
+v5 is `21,910 B / 170f764b55fa4336`; v4's named copy is deleted from my workspace as superseded, and v3 stays as
+`REFERENCE-v3-of-the-audit-2026-11-18_b43d71d81cc98b61.sh`. One housekeeping truth from this run: the sandbox
+wiped `/tmp`, so my old fixtures are gone - which is why the reference copy of v3 now lives in the durable
+workspace rather than in a temp folder.
+
+**Not said here**: no band proposal - a fifth day at 100.0 % coverage is one more reason to leave ±80 alone; the
+per-diary `band:0/N` read for 2026-11-16 is still outstanding and belongs to inventory v6 `4db0d72da42b29d1`,
+not to this block; `map-empty 0` on five days is measured, not assumed, and stays branch-caveated because
+`band_levels` returns `rows, rows` untouched when `price <= 0`; and 11-14, 11-16 and 11-17 remain ungraded by
+paper, which is a fact about the drawer.
+
+### 3.5ah YOUR v6 INVENTORY RUN: THE NEEDLE'S ZERO GETS STRONGER, THE DAY STAYS UNANSWERED, AND MY OWN READER TURNED OUT TO BE BLIND (`2026-11-18` 01:04:56Z, your keyboard, `JSONL_CAP_MB=900`)
+
+    ACROSS 127 file(s): 900.0 MB READ (they weigh 913.6 MB) -> 0 `band:0/` note(s) in 41,686 lines read
+      NOTES-CAPABLE   22 file(s) | 16,943 lines read (21 read WHOLE) | 0 hit(s) <== evidence
+      NO NOTES FIELD 105 file(s) | 24,743 lines               | no information, EITHER way
+      the byte budget TRUNCATED 1 of 127 files ... the 1 NOT read whole: tfrobot_M3_2026-10-29.jsonl
+      109 *.jsonl NOT scanned (budget): newest unread tfrobot_M1_2026-10-29.jsonl
+    drawer: 192 folders | 1717 of 1717 files | 7,873.6 MB | 375 small .json read | parse cap NEVER bound
+    days a PAPER can grade: 2026-11-04, -05, -06, -12, -13      (unchanged from your v4 run: the drawer moved 0 files)
+
+**1. What the run establishes.** The needle's zero is now 16,943 notes-capable lines instead of the 27,884 mixed
+ones I first quoted: 21 of 22 capable files read WHOLE, 0 hits. That is a measured zero with one named caveat -
+`tfrobot_M3_2026-10-29.jsonl` was cut by the budget, and it is an October M3 file, not a day diary - and 109
+`.jsonl` still unscanned, all of them named as a limit rather than smoothed over. The drawer itself is unchanged
+from your 00:34 run to the byte, which is a second measurement of the same folder by two different programs.
+
+**2. What it does NOT establish: 2026-11-16.** Your paste says `2026-11-16 has NO PAPER, but diary_20261116.jsonl
+was scanned: 0 note(s)` - and nothing about whether that diary could carry a note at all. The capable/blind split
+was printed only as a GLOBAL count, and the per-file line that does carry ``notes` key present` was listed for
+the 14 biggest files only, which did not include it. So v6 cannot answer the very question I raised `JSONL_CAP_MB`
+to answer. **That is a flaw in my tool's output design, and v7 closes it**: every day without a paper now prints
+its diary's verdict directly - `-> CAPABLE of a measured zero (it has a notes field, read WHOLE)` or
+`-> BLIND: no notes field, so its 0 is SILENCE, not evidence`.
+
+**3. And the run caught a real defect in my reader, one law 74 had already forbidden.** Every day in section 3
+printed `band None`, and every paper printed `stamp (none)` - while the audit block read `band 80.0` and
+`printed_by gates.replay.2026-11-14.0` from those same files, one run apart. Two of my tools disagreed about
+your data, which is only possible if one of them is blind. Reading the writer: `gates_replay.py` emits
+`"rung_band"` (`:1198`, `:1229`) and `"printed_by"` (`:1206`); my inventory looked for **`rung_band_usd`** and
+**`schema_version`**, names that occur **ZERO times** in the writer's source. I invented them, they always miss,
+and `dict.get(key, fallback)` returns the fallback - so `None` and `(none)` were properties of my code, never of
+your papers. Worse, that false `band None` is what I had cited as the reason the day_metrics files "cannot grade
+a band". v7 reads the writer's spellings (with my old names demoted to fallbacks) and now prints, on a fixture
+rebuilt from your exact values, `2026-11-04 files 1 | papers 1 | cycles 208 | band 80.0 | stamp
+gates.replay.2026-11-14.0` - the two tools agree, which is the test that was missing.
+
+**4. How my own verification missed it, which is the part I keep.** When I patched v7 I "checked" the embedded
+python by parsing everything between the heredoc opener and a line containing `PY`. My split stopped at the WRONG
+`PY` and validated only a PREFIX of the shipped script, so a broken `print()` three lines further down passed as
+clean - the file's `bash -n` also passed, because bash never reads inside a heredoc. I found it only by RUNNING
+the block. A check that reads part of what it ships is not a check: v7 is now verified by parsing the region
+between the exact opener and the exact closing delimiter, and the first honest parse passed with 0 repairs.
+
+**5. Laws 80 and 81, both mirrors of laws I already had.** 80: a check that inspects only part of what it
+delivers is no check - it is how a syntax-clean, self-contradictory file reached you twice today. 81: **a field
+my reader cannot find is a defect of my reader, not a fact about the data** - law 74's mirror, and the same
+mistake as accusing 132 files of being mis-typed because my ceiling was 5 MB. If two tools print different values
+for one file, the disagreement is the finding; do not pick the convenient one.
+
+**6. Your own `data/`, one observation, nothing touched.** Section 5's "newest files" list is led by
+`2026-11-17 23:18:39  4,101 B  tally2_20261117.txt` plus six more `gates_2026-11-06_tally2.*` files - all of
+them MY row-3 paperwork, sitting in your data folder. So a claim like "the loop was running at 23:18" would be
+reading MY timestamps. They are yours to attic (law 13), and the October pile decision already covers them; I
+have not moved anything.
+
+**Not said here**: no band proposal, and a fifth day of 100 % coverage plus a 900 MB diary scan that found nothing
+is two more reasons to leave ±80 alone; 11-14/11-16/11-17 remain ungraded by paper; `papers 0` for those days is
+a closed question about the drawer, since the parse cap never bound; and 11-16 is still open, needing ONE v7 run
+for the capable/blind line - after which "the band never left a cycle without a map" is quotable only over the
+files that could have said otherwise.
+
+### 3.5ai NOTE FROM THE OWNER: "IT SEEMS WE ARE IN A CIRCLE, RUNNING AROUND OURSELVES" (`2026-11-18`, asked before the next run - booked as a finding, because it is one)
+
+**The owner is right, and the circle is countable.** Measured from the shadow's own log, this morning:
+
+| what I can count from `git log --since=2026-11-18T00:00` | number |
+|---|---|
+| commits I made today | 27 |
+| files they touched, all of them | `FACTORY2_MAP.md`, `FACTORY2_TODO.md`, `HOLY_BOOK.md` - **zero code, zero data** |
+| subjects that are a defect in MY reader | 14 |
+| subjects that are a repair to MY OWN WRITING (a stutter, a swallowed line, a broken hash across rows) | 8 |
+| subjects that carry a MEASURED number from your data | 6 |
+
+**Four times in twenty-seven, something about your data was learned. Everything else was me repairing my
+instruments - and then repairing the way I wrote about the repair.** The number that matters most is the second
+line: 27 commits today, three files, all three papers. Not one byte of your code or your data was touched, and
+none of my commits could be, because pushing is yours. So the activity was real and the factory never moved.
+
+**What did get settled, and it is worth keeping.** Row 4's answer is measured and closed on the merits: across
+five days - 2026-11-04, -05, -06, -12, -13 - **8,869 level-lines were inside the +/-80 band and exactly ONE was
+trimmed (0.011 %), 788 cycles sailed, 0 of them with a map wholly outside the band**. On a fixture rebuilt from
+your 11-04 values, the inventory and the audit block now print the same `band 80.0` and the same
+`printed_by gates.replay.2026-11-14.0` from the same file. That was a real bug: my inventory had been asking for
+`rung_band_usd` and `schema_version`, names that occur ZERO times in `gates_replay.py`, and printing `band None`
+as though your papers lacked it.
+
+**Why the circle spins, three sentences.** (1) Row 4 is a READ-ONLY audit of paperwork, so its only possible
+output is a verdict about my own tool - every defect found is in me, and every fix re-reads the same 171 files.
+(2) Laws 75 to 81 were all born today, i.e. I shipped blocks and then discovered holes in them downstream
+instead of testing keys against the writer and checks against the whole shipped region up front. (3) I kept
+offering ANOTHER RUN as the way out. A run that re-reads the same folder is not progress; it is the circle with
+a new number in it.
+
+**So where the real edge is, per the map and the to-do.** Rows 5, 6, 7, 8, 9 are `queued` and untouched; row 10
+is the final one; row 12b is a DECISION the owner owes himself (and I owe the question); Room E 11-14 waits on
+the owner's signature, with `TP FROZEN`; and the October pile plus my own row-3 receipts sitting in `data/` wait
+on an attic order. Row 4 has exactly ONE item left that is not a reader repair - the 2026-11-16 diary capability
+line - worth ONE more run, because until it is read, "the band never left a cycle without a map" is quotable only
+over the files that could have said otherwise. After that run row 4 closes with its caveat attached and stops
+generating tools, and the next step is row 6 (`LEDGER / committee`) or the 12b question.
+
+**The rule the owner's question produced, and I am writing it here so I cannot quietly drop it**: a fix to my
+tool is allowed between runs only if it would CHANGE A CLAIM WE HAVE MADE. Otherwise it is shelved, I say so in
+one line, and we go to the next ROW. That is the third time today I needed it, and the second time the owner
+noticed before I did.
+
+### 3.5aj THE OWNER'S RULE, BOOKED: "CHECK HOW THE OLD FACTORY WORKS, THEN UPDATE PART BY PART" (`2026-11-18`)
+
+**The instruction, in the owner's words**: *we should fix if there is a problem, but go further smartly, not
+messing around our own code. You keep checking how the old factory works... our new factory2 is going to be an
+updated version, but we still can check our old factory and learn how the process works in general, and we only
+should update part by part on it.*
+
+**Measured against tonight, this is exactly what went wrong.** Our own replay tool already contains the tested,
+documented day-finder and tape-finder: `available_days()` (`tools/gates_replay.py:109`) and `discover_tape()`
+(`:64`), with a docstring that reads like a post-mortem - *`scoped=True`... A named folder is a CONTRACT, not a
+hint (Law #12)* - and they are called, for real, at `:640`, `:644` and `:1385`. My inventory block never imported
+them. Instead it grew **4** of its own day-guessing sites (`DAY_RE`, a filename-slice "day from name" fallback
+that has to print `UNVERIFIED` about itself). Every one of today's reader bugs is a bug in that re-typed copy:
+the `days`-as-int crash, the dead tie-break key, the invented `rung_band_usd` field name, and the "11-16 has no
+paper" reading. **The organ already knew all four.** So the fix I kept doing (write a better reader) was the
+problem; the fix the owner is naming (read the writer, replace one part at a time with its answer) was never tried.
+
+**What the Book already said, and I ignored.** The factory's own inheritance law, from `3.3` STEP 1: in the old
+factory *"every one of those says: take my TWIN, not me - the twin is free, you just ask nice"* - i.e. import the
+behaviour, do not copy a second implementation of it. Law N1 keeps the old factory untouched, which is not the
+same as keeping it unread: **reading it is the cheapest oracle we have and the only one with years of its owner's
+own data behind it.** Law 74 (field names come from the writer's source) was this same rule narrowed to key names;
+the owner has just widened it back to the whole process.
+
+**Law 82, in one line:** when a reader trips, do not improve the reader - go to the organ that WROTE the data,
+read how it does the job, and replace exactly that one part of mine with its answer. A second implementation of
+something the factory already has is not redundancy, it is a second chance to be wrong.
+
+**The concrete part-by-part list this produces for row 4 and row 12b** (each line is ONE part, and I do them in
+this order, one per message, with the old factory consulted first and my code second):
+1. the day set a day can be graded over -> use the writer's OWN `day`/`days` fields as `gates_replay.py` reads
+   them; delete my `DAY_RE` guessing, and where the writer itself has no day, say `NO DAY FIELD` and stop, as
+   `:1385` does rather than inventing one.
+2. "which files belong to this day" -> read `discover_tape()`'s three places (`data/`, repo root,
+   `Workspace/data`) and its `scoped` contract, instead of my `rglob` + ceiling; my ceiling is what accused 132
+   files of being unreadable.
+3. row 12b, DISCOVERY PARITY - the decision I have owed since `2026-11-17`: borrow the old factory's three
+   discovery functions or keep my re-typed globbing. **The owner's rule settles the direction: borrow.** I am
+   ASKING him to confirm it as a decision rather than assuming his words decided it, because it is the kind of
+   thing I must not sign for him; if he says yes, the code step is small and additive (import, no copy, N1 holds).
+4. only after 1-3: re-run the one open 11-16 question, once. If v7 says `BLIND`, the day is ungradeable by diary,
+   row 4 closes with that caveat, and **I stop writing readers.**
+
+**A correction to MYSELF, same turn, because it is exactly the kind of memory that misleads.** I have written
+for days that the shadow folder holds "papers only - no code files live here", and it is FALSE: the owner's
+pushed tip `807ac51` itself tracks the old factory - `git ls-tree --name-only 807ac51 -- main.py audit_day.py
+tools/raw_replay.py` returns all three. The old factory's discovery code has been readable in my workspace the
+whole time (`tools/raw_replay.py:165 _discover_raw_files`, `audit_day.py:322 all_ticks_files`), and I re-typed
+those jobs anyway. The correction is the strongest possible argument for the owner's rule: **the oracle was not
+upstream, it was next door, and I did not read it.** It also means a "borrow" step needs no new access and no copy -
+the functions are already in the same tree, importable, and law N1 still forbids editing them.
+
+**Not said here**: no band proposal; row 4's measured result is unchanged by this rule (8,869 lines, ONE trim,
+788 cycles, 0 empty maps) - the rule changes how I fix, not what the papers say; and nothing of the old factory
+is edited, moved or restarted (N1, N3), including tonight.
 
 ## 3.6 THE FACTORY 2 MAP — THE WORKING PAGE
 (`2026-11-14`, owner: *"please add this explanation and Factory2-map in the holy book, it's really nice and we should follow this map one by one"*)
@@ -4431,6 +5089,48 @@ DIFFERS** → the walk itself holds something neither of us has read, and that o
 > stick walks the **same steps the robot walks**, so it can only be wrong in ways I can see.
 
 ---
+
+### 🧭 WHERE TO LOOK FIRST — the owner's standing note for Factory 2 (`2026-11-18`, so that a problem in this area has a DOOR instead of a search)
+
+**Why this page exists.** Twenty-seven commits went by today before the rule was said out loud: *check how the old
+factory already does it, then update part by part.* Nearly every "bug" we met was a re-typed job with a hole in
+it, and the right answer was already sitting in a file we both own. So when something in this area misbehaves, do
+NOT start by improving my reader. Start here:
+
+| the symptom you can see | go FIRST to this exact place | law |
+|---|---|---|
+| a paper says `None`, `(none)`, "not on this paper" | the WRITER's key names: `gates_replay.py:1198` writes `rung_band`, `:1206` writes `printed_by`. Grep the writer before blaming the data | 74, 81 |
+| "this day has no paper" | the writer's day fields - `days` is a LIST in a sea paper and an INT COUNT in a metrics file; then check MY ceilings | 76, 73 |
+| "a file is too big / unreadable" | the READER's ceiling, never the file's fault. My 5 MB cap accused 132 good files | 73 |
+| one day holds several papers and one must be graded | the owner's paper wins on PROVENANCE, not preference. A dead tie-break key falls back to the ALPHABET and still claims it won | 71 |
+| a diary says nothing about the band | the diary line is the ALREADY-CUT list (`gates_replay.py:274-276`); coverage is measured on the PAPER, and silence is not evidence | 77, 78 |
+| my summary line does not match my printed lines | one call must print AND count; a marker that means two things cannot be summed | 79 |
+| the block is "verified" but broke on your box | I read only PART of what I shipped. Parse the whole heredoc body, then RUN it | 80, 56 |
+| a receipt, or "did my edit land?" | the BLOB, not the filename, not `git status`: `git ls-tree` / `ls-remote`. "dirty 0" is not "current" | 67, 69, 59 |
+| a file will not decode | the LADDER (utf-8-sig → cp1252 → …). rc=0 is not enough to keep a verdict | 72 |
+| which days / which tapes exist at all | **ours: `gates_replay.py:64 discover_tape()`, `:109 available_days()`**; above them the old factory: `audit_day.py:322 all_ticks_files`, `tools/raw_replay.py:165 _discover_raw_files` | 82 |
+| I am about to re-type something the factory has | STOP. Read the organ that WROTE it, change ONE part of mine | 82 |
+| is reading a minute SAFE at all? (Room A 0-3) | the room below: four steps, four owner receipts, and the freeze stamp `2026-11-13 22:24:10` in every one | N1, N2 |
+
+**Three facts this note rests on, so nobody has to trust my prose** (all measured now, at the owner's published
+tip `d0586d5`, counted with `git show d0586d5:<f> | wc -l`): the old factory's code is **inside our own repo** -
+`main.py` 3,857 lines, `audit_day.py` 6,484 lines, `tools/raw_replay.py` 4,998 lines (1,510 in our own twin,
+`tools/gates_replay.py`); `raw_replay.py` matches the 4,998-line engine the Book already names. All three are
+already imports it: `gates_replay.py:126` does `import audit_day as ad` to borrow `all_ticks_files`. So "borrow"
+is this factory's EXISTING mechanism, not a new dependency - and law N1 means **never edit it, read it freely**.
+
+**Row 12b, DECIDED by the owner (`2026-11-18`, the word was: "Borrow").** My audit readers call those discovery
+functions instead of re-typing globbing; nothing is copied, nothing in the old factory is touched. Part by part,
+one per message, and I do not open part 2 before part 1 is measured: **(1)** delete my `DAY_RE` day-guessing,
+use the writer's `day`/`days`; **(2)** replace my `rglob` + byte ceiling with `discover_tape()`'s three places and
+its `scoped` contract; **(3)** row 12 (`--from-raw-tail`, plumbing only, "no new parser, ever") now has a finder
+it may lean on; **(4)** ONE v7 run for 2026-11-16, then row 4 closes with its caveat and **I stop writing
+readers**.
+
+**Why it is a law and not a taste**: every number we chased today was already measured somewhere - on the paper,
+in the diary, in the writer's source, or in the old factory's finder. The circle we were running in was me
+GENERATING measurements instead of READING them. If you ever feel that circle again, say the sentence, and I come
+back to this table.
 
 ## 🅱️ ROOM B — THE JUDGE *(steps 4-7 — the engine we started from)*
 

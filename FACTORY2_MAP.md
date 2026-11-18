@@ -19,24 +19,33 @@ back from GitHub (`f70728d` code, `dc280b0` paper).  ← YOU ARE HERE.
 WHERE WE ARE GOING — one step per message, in THIS order (the number is the TODO row; `[you]` = you run a block,
 `[me]` = I cut it). Nothing in rows 3-9 changes what the factory DECIDES; they make it impossible to misread what
 it DID.
-  ▸NOW   row 4                    Room A is CLOSED: rows 0,1,2,3,3b,3c,3d all have receipts. Row 3's
-                                  close is `§3.5z`: `ROW 3 ASSERTED on fresh paper`, PASS, on `git=dc280b0`,
-                                  7 gates OK, the belt card abstaining in words, 124 = 116 + 8 on live `.3`
-                                  paper that reproduces the `.2` counts exactly. NEXT: row 4, the ±$80 rung
-                                  band (start by reading `errors 84` - two thirds of that day was SKIPPED for
-                                  a cause, which is a MAP problem, not a counting one). Row 4 needs no new code in the sea: `rung_band`, `levels_seen`, `levels_kept`,
-                                  `band_empty`, `skip_kinds` and the stamp `printed_by` are ALREADY on
-                                  every day's paper - only a reader is needed. window/every/prewarm are
-                                  NOT on the paper (never were), which is law 74 and why my dials line
-                                  will honestly say 1 of 4.
-        block               : v5 = 399 L / 23005 B / `51ad7761f84656b3` fixes my v4 over-correction
-                                  (law 73: identity test ≠ completeness test). The 6-day sweep on it will also
-                                  print each day's old-paper confession line.
-        row 3d PAGES              PUBLISHED ✅ `dc280b0` on `origin/strategy-v2` (parent `f70728d`),
-                                  Book 4,503 L `173d420bbe7eb891` · map `d74331a071e51317` ·
-                                  to-do `d38745ea618fb61d`, all three hashed off the PUBLISHED blobs.
-                                  (This row first said 4,490 L - a prediction, not a measurement; fixed,
-                                  and the lesson is in the Book §3.5w.)
+  ▸NOW   row 4 step 2: v7 IS                          YOUR v6 run landed (01:04:56Z, 900 MB read). The needle's
+      THE RUN THAT CAN ANSWER                         zero is now 16,943 NOTES-CAPABLE lines, 21 of 22 files
+      11-16, NOT v6.                                  read WHOLE, 0 hits <== evidence; 105 files are BLIND
+                                                      silence, not data. But 11-16 is STILL open: v6 only
+                                                      printed the capable/blind split GLOBALLY, so the line
+                                                      you needed for that day does not exist in your paste.
+                                                      v7 `790a9f6e76026479` prints per day: `-> CAPABLE of a measured
+                                                      zero` / `-> BLIND: no notes field`. Proved BOTH ways on
+                                                      a fixture, and a planted `band:0/7` hit WAS found (0
+                                                      hits is only evidence if the reader can see one).
+                                                      v6 also caught my reader inventing key names: `band
+                                                      None` / `stamp (none)` on every row came from looking
+                                                      for `rung_band_usd`/`schema_version` - ZERO hits in the
+                                                      writer, which spells them `rung_band`/`printed_by`. The
+                                                      audit read 80.0 from the SAME file: laws 80 (a check
+                                                      must read ALL it ships - my syntax check parsed a prefix
+                                                      and passed a broken line) and 81 (a field my reader
+                                                      cannot find is my defect). NEXT: run v7 on 11-16.
+        row 3d PAGES              PUBLISHED x2 on `origin/strategy-v2`: `dc280b0` (code `f70728d` + the
+                                  first paper) then **`d0586d5`** `2026-11-18` 00:47:33, parent `dc280b0`,
+                                  `3 files changed, 144 insertions(+), 9 deletions(-)`.
+                                  Book 4,609 L `e6d80eaa181dfcdf` · map 594 L `e2d0a953d32631d1` ·
+                                  to-do 140 L `3573f931be2238a1` - all three hashed off the PUBLISHED
+                                  blobs, not off a disk. (Read-back + the records-branch trap: §3.5z.)
+                                  (This row first said 4,490 L - a prediction, not a measurement; the
+                                  lesson stays in §3.5w, and the same trap is why row 3d's tail of
+                                  `2026-11-17` said "what remains is 3c only" for eleven hours.)
         row 3b TALLY-2, the one patch DONE by you: applied + `56 passed in 142.60s`
   DONE   row 3d PUBLISHED            ✅ code: `f70728d` on `origin/strategy-v2`, parent `807ac51`, 8 files
                                        byte-identical to my measured tree (Book §3.5v has the 8 sha256s); the
@@ -62,9 +71,13 @@ it DID.
         row 8  STAMPS / PROVENANCE    [me] one stamp per file per run; an unknown stamp ⇒ WARN, never a silent trust
         row 9  REFUSALS ARE LOUD      [me] no silent skip anywhere: unknown flag, missing folder, thin tape
         row 10 THE FACTORY RUNS        [you] a fresh raw day end-to-end; NO new code — the whole list proves itself
-   side  row 12b DISCOVERY PARITY      [me, DECISION DUE] its own note said "decide after step 2" and step 2
-                                       closed 2026-11-17 → I owe you ONE question (borrow the old factory's three
-                                       discovery functions or keep our re-typed globbing), and no code until you answer
+   DONE   row 12b DISCOVERY PARITY      ✅ DECIDED by the owner `2026-11-18`, one word: BORROW. My
+                                      readers call discover_tape() :64 / available_days() :109 (and
+                                      above them audit_day.all_ticks_files, already imported at :126)
+                                      instead of re-typing globbing. Nothing copied; N1 holds. PARTS,
+                                      one per message: (1) delete my DAY_RE day-guess, (2) retire my
+                                      rglob+ceiling for its `scoped` contract, (3) row 12 may lean on
+                                      it, (4) ONE v7 run for 11-16, then row 4 CLOSES, readers stop.
    side  row 12  ROOM A LIVE PANE     [me] `--from-raw-tail` plumbing only, AFTER 12b — no new parser, ever
    side  row 13 WAKE THE LAW IN LIVE? [you] your signature; the hall stays `--hall-off` until you give it
    last  ROOM E 11-14 (order → open → manage → close)    [you FIRST] a decision before any code (law #1: TP frozen)
@@ -137,18 +150,67 @@ PATTERNS IN FORCE ON THIS PAGE — the laws, and the reason each one exists (ful
   70  an interpreter must be PROBED, not named.       `python3` = the Store stub (rc 49, empty stdout):
                                       one dead name, two lies - a loud sail failure and a
                                       silent "no old paper".
-  71  an OWNERSHIP test before any preference ties    `belt_a.json` - a BELT-1 artifact carrying `day` and a
-      a break.                                         wider grid - beat the day's own paper on 'widest
-                                                       grid wins' (3.5y)
+  71  an OWNERSHIP test before any preference ties    a DEAD tie-break key does not fall back to
+      a break - and a dead key falls back to the      nothing, it falls back to the ALPHABET: v2's
+      ALPHABET.                                       `cycle_grid.ticks` never existed, so all
+                                                      tied at 0 and `belt_a.json` won on 'b' <
+                                                      'g' while reporting 'widest grid wins' (3.5ac)
   72  decode foreign files with a LADDER, not an       the sea's own em dash (0x97, cp1252) killed a
       assumption.                                      finished sail: rc=0 earned, verdict lost
   73  a fix that turns a WRONG PICK into NO PICK        v4 demanded a full `cycle_grid` to recognise the
       is not a fix: identity is not completeness.       day's own paper, and so lost it. `none found` was a
                                                         regression wearing a safety belt (3.5z)
-  74  a reader's FIELD NAMES come from the WRITER,        `cycle_grid` / `window_start_utc` / `every_s`
-      not from a fixture I built myself.                   are not paper keys at all (`grep -c` = 0 at
-                                                           f70728d and 99b3cc8): `0 qualified` was
-                                                           arithmetic, not bad luck (3.5z, law 74)
+  74  a reader's FIELD NAMES come from the WRITER,    `cycle_grid` / `window_start_utc` / `every_s`
+      not from a fixture I built myself.              are not paper keys at all (`grep -c` = 0 at
+                                                      f70728d and 99b3cc8): `0 qualified` was
+                                                      arithmetic, not bad luck (3.5z, law 74)
+  75  a RATIO must name the BRANCH it came from.      `band_levels` returns rows,rows when price<=0
+                                                      or band<=0 - 100 % can mean 'nothing to trim'
+                                                      or 'nothing to measure from' (3.5ab)
+  76  a key's TYPE is the WRITER's business too.      `days` is a list of dates in a sea paper and an
+                                                      int COUNT in a metrics file; iterating either
+                                                      without isinstance() died on THEIR folder. And
+                                                      seal each section - a tool that crashes at the end
+                                                      of a 7.7 GB walk loses the census it already won
+  77  an OUTPUT FILE CAN ALREADY HOLD THE TRIM.       `band_levels` cuts the snapshot IN PLACE before
+                                                      the diary line is serialized (w.py:274-276): rows
+                                                      counted in a diary are the CUT list, so '0 outside
+                                                      the band' would read as measured when it is
+                                                      tautological. Coverage = the paper; a diary owes
+                                                      you only the band:0/N(nothing near) NOTE (3.5ae)
+  78  an ABSENCE is evidence only where the MARK      v4 counted 0 `band:0/` notes across 103 jsonl and
+      COULD APPEAR.                                   printed a verdict; 101 of those files had no `notes`
+                                                      field to hold one. Ask 'could this file have said
+                                                      no?' BEFORE 'did it say no?' - a silent witness is
+                                                      not an agreeing one (the needle's own fix, 3.5af)
+  79  a SUMMARY must be a COUNT of its OWN LINES.     v3's coverage verdict printed four lines and the
+                                                      last carried a stray `abstain += 1`, inventing a
+                                                      check that never ran - and `[--  ]` marked both a
+                                                      refused check and a caveat, so the marker could
+                                                      not be summed either. Verdict and tally are now
+                                                      ONE call, ck(); caveats get `note :`; a wrapper
+                                                      recounts the screen, and a mismatch is `[FAIL!]`.
+                                                      A claim the tool PRINTS ABOUT ITSELF is a claim too:
+                                                      v4's stale "five OK lines" line was false on arrival.
+  80  a CHECK that reads only PART of what it ships   I parsed the embedded python up to the wrong `PY` and
+      is no check.                                    so a `print()` with an unclosed paren - three lines
+                                                      past what I read - passed as clean and shipped.
+                                                      `bash -n` is innocent too: it never opens a
+                                                      heredoc. Only RUNNING the block found it (3.5ah)
+  81  a field my READER can't find is a defect of     the inventory asked for `rung_band_usd` and
+      MY READER, not a fact about the data.           `schema_version`: ZERO hits in `gates_replay.py`, which
+                                                      writes `rung_band` (:1198/:1229) and `printed_by`
+                                                      (:1206). So it printed `band None` while the audit
+                                                      read 80.0 from the same file - law 74's mirror.
+  82  do not IMPROVE a reader: read the organ         my inventory re-typed day-finding (4 `DAY_RE` sites
+      THAT WROTE THE DATA, then change ONE part.      + a filename slice) while `gates_replay.py` already
+                                                      ships `available_days()` :109 and `discover_tape()` :64,
+                                                      called at :640/:644/:1385. Every bug today was a bug
+                                                      in my copy, not in the data. The old factory is the
+                                                      cheapest oracle we have; N1 means NEVER EDIT IT, not
+                                                      never READ it. A second implementation is a second
+                                                      chance to be wrong. Owner's rule, 3.5aj.
+
 
   standing, and unchanged: process verification only - no signal, no trading · your repo is never committed or
   pushed by me · the old factory is untouched (N1) · hall `--hall-off` · the ±80 USD mapper law · the live loop
@@ -170,7 +232,10 @@ ROOM A  THE EARS      how a minute gets inside, safely
   [x] 3  THE BELT + TALLY  Q1 PASS (84/84, 8/8, 8<=124) · Q2 CLOSED by belt1b: changed lines=2 (mirror
                           only), cmp exit 0, md5 of both json EQUAL, 55 passed in 159.17s, pytest-exit 0
                           · live mirror frozen 2026-11-17_00:58:04 before AND after  ← YOUR RECEIPT
-  ── ROOM A VERDICT: every step SIGNED, so the room WORKS and no part of it is waiting on me.
+  ── ROOM A VERDICT: FINISHED - four steps, four owner receipts, no part waiting on me.
+     The two open drawers are now: 12b CLOSED by the owner's word (BORROW, `2026-11-18`), and
+     12 unblocked by it (not started). 🧭 a problem in this area? the symptom->organ table is in
+     the Book, at the end of ROOM A, before ROOM B.
                           What is still open is named, not hidden: TODO 3 (this room's tally, measuring now),
                           TODO 12 + 12b (the live pane and the discovery parity, deferred on purpose).
 ROOM B  THE JUDGE     the engine we started from
