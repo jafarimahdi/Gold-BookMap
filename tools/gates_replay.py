@@ -593,7 +593,8 @@ def replay_day(day_str: str, every_s: int, window: str, prewarm_min: int,
                max_cycles: int, quiet: bool,
                json_out: Optional[Path] = None, depth: str = "auto",
                a_max_minutes: int = 0, min_prints: int = 600,
-               scoped: bool = False, rung_band: float = RUNG_BAND_USD) -> Dict[str, Any]:
+               scoped: bool = False, rung_band: float = RUNG_BAND_USD,
+               hands_shadow: bool = False) -> Dict[str, Any]:
     """One day of tape -> cycles -> committee -> diary. Returns tallies."""
     import factory2_gates as f2
     h0, m0 = (int(x) for x in window.split("-")[0].split(":"))
@@ -879,6 +880,14 @@ def replay_day(day_str: str, every_s: int, window: str, prewarm_min: int,
     last_ep = 0.0
     toll_hist: List[float] = []
     ledger_obj = __import__("committee").TicketLedger()
+    # ROOM E, TODO 12c: the hands ride in on a dict the SAIL owns, and the sail supplies the
+    # function. I first wrote `import factory2_hands` inside factory2_gates.py and it would have
+    # been the dead code this file's own comment at :1002 warns about (cv_from_snapshot_dict
+    # dropped a key I set) - the hall does not know where tools/ is on sys.path, the replay does.
+    shadow = None
+    if hands_shadow:                      # a real PARAMETER, not `args`: replay_day never had one
+        _hands = __import__("tools.factory2_hands", fromlist=["cycle_hands"])
+        shadow = {"cycle_hands": _hands.cycle_hands, "pos": None}
     for ci, tc in enumerate(grid):
         rung = ""
         # last print at/below tc - cheap: the grid is ascending, so a moving pointer
@@ -1004,7 +1013,7 @@ def replay_day(day_str: str, every_s: int, window: str, prewarm_min: int,
         # returns a fixed whitelist and dropped it (measured). A live snapshot carries the
         # broker symbol, never "REPLAY/", so the law cannot leak into the old factory.
         out = f2.run_cycle(cv, state, pen, "replay:tapes", now_ts=float(tc),
-                           ledger=ledger_obj)
+                           ledger=ledger_obj, shadow=shadow)
         res["cycles"] += 1
         m_t = re.search(r"EXCESS=c(\d+)/h(\d+)m", str(out.get("g3") or ""))
         if m_t:
@@ -1071,6 +1080,9 @@ def replay_day(day_str: str, every_s: int, window: str, prewarm_min: int,
             tally = {k: v for k, v in res.items()
                      if k not in ("episodes",) and isinstance(v, (int, float, str))}
             tally["mode"] = "replay:summary"
+            tally["line_kind"] = "day"      # law 105: the footer is a THIRD class of line - a
+                                            # diary of 103 lines holds 102 cycles + 1 day. Name it
+                                            # and the count closes as an equation, not a filter.
             tally["toll_max_closes"] = int(max(toll_hist) if toll_hist else 0)
             pen(tally)
         except Exception:
@@ -1330,6 +1342,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--diary-out", default=None,
                     help="write the sea's diary to this exact path (night-test hook)")
     ap.add_argument("--no-diary", action="store_true", help="diary to stdout only")
+    ap.add_argument("--hands-shadow", action="store_true",
+                    help="ROOM E after the judge: a PAPER position per GO, written into the same "
+                         "diary line. Off by default; it can never send (HALL_ARMED=False, Law #1 TP frozen)")
     ap.add_argument("--out", default=None, help="report txt path")
     ap.add_argument("--json-out", default=None,
                     help="full results (episodes included) for gates_report")
@@ -1435,7 +1450,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                          pen, state, a.synthetic, a.max_cycles, a.quiet, json_out=jo,
                          depth=a.depth, a_max_minutes=a.max_minutes,
                          min_prints=a.min_prints, scoped=scoped,
-                         rung_band=max(0.0, float(a.rung_band)))
+                         rung_band=max(0.0, float(a.rung_band)),
+                         hands_shadow=bool(a.hands_shadow))
         txt = render_text(res)
         print(txt)
         all_res.append(res)

@@ -2060,3 +2060,268 @@ def test_the_same_tape_sailed_twice_is_the_same_paper():
         doc = json.loads(a.decode("utf-8"))
         assert int(doc.get("cycles") or 0) > 0, (day, "cycles=0 - both sails abstained")
         assert doc.get("ok"), (day, "ok is not true on both legs")
+
+
+def test_the_diary_says_what_kind_of_line_it_is_and_when_the_tape_said_it():
+    """14e (laws 105 + 106). Two fields, both load-bearing:
+
+    `line_kind`  - a diary holds cycle rows AND the committee's verdict rows. Counting LINES mixes
+                   them: the owner's `allowed 7 of 75` measured as 14 with a line-wide grep, which is
+                   how I lost a bet to my own model. Not named `kind`: this house already uses `kind`
+                   for rung/level kinds, and two meanings in one file is how a grep finds the wrong one.
+    `t_tape`     - `t` is `datetime.now` in BOTH modes, so in a replay it is a near-constant (his first
+                   five rows: :45 :45 :46 :46 :47). The tape's own time comes from `cv["ts"]`.
+                   It must be read from `cv`, NOT `cyc` - `build_cyc()` copies key by key and drops
+                   `ts`, which would make the field permanently empty. That is the v8f `shadow_law`
+                   trap in a new costume, so this test pins the VALUE, not just the key's presence.
+    """
+    import tempfile
+    from pathlib import Path
+    with tempfile.TemporaryDirectory() as tmp:
+        dd = Path(tmp)
+        pen = F2.Pen(str(dd / "d.jsonl"))
+        state = H.RungState(str(dd / "s.json"))
+        import committee as C
+        ledger = C.TicketLedger()
+        cv = {"cycle_id": 1, "price": 4000.0, "atr": 5.0, "ts": 1_700_000_000.0,
+              "signal_map": {"targets": [{"price": 4001.0, "kind": "vwap", "sources": ["vwap"],
+                                          "cycles_seen": 2, "size": 0.0}]},
+              "power": {}, "vp": {}, "judges": [], "notes": [], "bars": [], "data_quality": {}}
+        F2.run_cycle(cv, state, pen, "replay:tapes", now_ts=1_700_000_000.0, ledger=ledger)
+        rows = [json.loads(l) for l in (dd / "d.jsonl").read_text(encoding="utf-8").splitlines()]
+        assert len(rows) == 1, rows
+        r = rows[0]
+        assert r["line_kind"] == "cycle", r
+        assert r["t_tape"] == "2023-11-14T22:13:20+00:00", r["t_tape"]   # that epoch, exactly
+        assert r["t"] != r["t_tape"], "in a replay these differ; equal would mean t_tape is dead code"
+
+
+def test_a_cycle_without_a_tape_clock_says_so_and_not_zero():
+    """`""` means "I have no tape clock". `1970-01-01` would be a LIE, and 0.0 is a real ts some
+    caller might legitimately carry - so an empty/zero ts must read as absence, not as the epoch."""
+    import tempfile
+    from pathlib import Path
+    with tempfile.TemporaryDirectory() as tmp:
+        dd = Path(tmp)
+        pen = F2.Pen(str(dd / "d.jsonl"))
+        state = H.RungState(str(dd / "s.json"))
+        import committee as C
+        cv = {"cycle_id": 7, "price": 4000.0, "atr": 5.0, "ts": 0.0, "signal_map": {},
+              "power": {}, "vp": {}, "judges": [], "notes": [], "bars": [], "data_quality": {}}
+        F2.run_cycle(cv, state, pen, "replay:jar", now_ts=1000.0, ledger=C.TicketLedger())
+        r = json.loads((dd / "d.jsonl").read_text(encoding="utf-8").splitlines()[0])
+        assert r["t_tape"] == "", r["t_tape"]
+        assert "1970" not in json.dumps(r), "a missing clock must never print as the epoch"
+
+
+def test_diary_line_size_still_respects_the_one_kb_law():
+    """The ~1KB law (this file's own test). 14e adds ~60 bytes, and a diary line that grows quietly
+    is how a JSONL cap turns into a truncation (law 92: the cap is GLOBAL)."""
+    import tempfile
+    from pathlib import Path
+    with tempfile.TemporaryDirectory() as tmp:
+        dd = Path(tmp)
+        pen = F2.Pen(str(dd / "d.jsonl"))
+        state = H.RungState(str(dd / "s.json"))
+        import committee as C
+        cv = {"cycle_id": 1, "price": 4000.0, "atr": 5.0, "ts": 1_700_000_000.0,
+              "signal_map": {"targets": [{"price": 4001.0, "kind": "vwap", "sources": ["vwap"],
+                                          "cycles_seen": 2, "size": 0.0}]},
+              "power": {}, "vp": {}, "judges": [], "notes": [], "bars": [], "data_quality": {}}
+        F2.run_cycle(cv, state, pen, "replay:tapes", now_ts=1_700_000_000.0, ledger=C.TicketLedger())
+        r = json.loads((dd / "d.jsonl").read_text(encoding="utf-8").splitlines()[0])
+        n = len(json.dumps(r))
+        assert n < 1100, f"the hall's own line grew to {n} bytes - say so, don't slip it past the law"
+        print(f"           hall line with 14e: {n} B")
+
+
+def test_a_whole_diary_is_named_and_the_names_close_as_an_equation_14f():
+    """14e tagged the cycle rows; 14f finishes the job. The sea ALSO writes a FOOTER line (the
+    day's own tally) and the hall writes an ERROR line when a card fails to build, so a real
+    diary of N lines is a MIX: a grep for one word answers the wrong question (law 105 - name
+    the unit a count counts). Here the whole sea runs on a synthetic tape, and the partition is
+    asserted as an EQUATION, not a filter: lines == cycle + day + error. The second half is the
+    two-instruments check: the old key test (`"cycle" in r`, what gates_report uses today) must
+    agree with the new tag, or one of the two is measuring a rumour."""
+    import gzip
+    import subprocess
+    with tempfile.TemporaryDirectory() as tmp:
+        dd = Path(tmp) / "data"
+        arch = dd / "archive"
+        arch.mkdir(parents=True)
+        t0 = _sea_fixture_day(1)
+        dayc = t0.strftime("%Y%m%d")
+        tick = ["time,event,price,size,level,operation,instrument\n"]
+        px = 3900.0
+        for i in range(400):                      # ~2.2 h of tape -> tens of cycles, seconds to run
+            px += 0.7 if i % 3 else -0.9
+            iso = (t0 + timedelta(seconds=20 * i)).isoformat()
+            tick.append(f"{iso},Last,{px:.4f},10.0000,-,buy,GCZ6.COMEX@RITHMIC\n")
+        with gzip.open(arch / f"ticks_{dayc}_120000.csv.gz", "wt",
+                       encoding="utf-8", newline="\n") as fh:
+            fh.write("".join(tick))
+        diary = Path(tmp) / "diary.jsonl"
+        jp = Path(tmp) / "sea.json"
+        day = f"{t0.year:04d}-{t0.month:02d}-{t0.day:02d}"
+        r = subprocess.run(
+            [sys.executable, str(HERE / "tools" / "gates_replay.py"),
+             "--date", day, "--data-dir", str(dd), "--window", "04:00-06:20",
+             "--every", "180", "--prewarm", "0", "--min-prints", "20", "--quiet",
+             "--json-out", str(jp), "--diary-out", str(diary)],
+            capture_output=True, text=True, timeout=900, cwd=str(HERE))
+        assert r.returncode == 0, r.stdout[-500:] + r.stderr[-500:]
+        lines = [x for x in diary.read_text(encoding="utf-8").splitlines() if x.strip()]
+        recs = [json.loads(x) for x in lines]
+        kinds = [str(x.get("line_kind") or "") for x in recs]
+        assert not [k for k in kinds if k not in ("cycle", "day", "error", "verdict")], \
+            f"an unnamed or invented class in the diary: {sorted(set(kinds))}"
+        n_cyc = kinds.count("cycle")
+        assert n_cyc > 0, f"the sea wrote no cycles at all: {lines[:1]}"
+        assert kinds.count("day") == 1, f"the day footer must be exactly one line: {kinds}"
+        assert lines, "empty diary"
+        assert len(lines) == n_cyc + kinds.count("day") + kinds.count("error"), \
+            f"the partition does not close: {len(lines)} lines vs {kinds.count('cycle')}+" \
+            f"{kinds.count('day')}+{kinds.count('error')}"
+        foot = [x for x in recs if x.get("line_kind") == "day"][0]
+        assert foot.get("mode") == "replay:summary", foot.get("mode")
+        assert int(foot.get("cycles") or 0) == n_cyc, \
+            f"the footer says {foot.get('cycles')} cycles, the file holds {n_cyc}"
+        # two instruments, one number: the tag AND the old key test must agree
+        assert len([x for x in recs if "cycle" in x]) == n_cyc, \
+            "gates_report's own selector and the new tag disagree - one of them is wrong"
+        agg = json.loads(jp.read_text(encoding="utf-8"))
+        assert int(agg.get("cycles") or 0) == n_cyc, f"the json says {agg.get('cycles')}, the diary says {n_cyc}"
+
+
+def test_an_error_line_names_itself_too_14f():
+    """The house law is "one line, never a dead loop": when a card cannot be built, the hall writes
+    a short error line and keeps breathing. 14e left THAT line unnamed - which is the worst place
+    to leave a blank, because a reader who counts lines to know how many cycles ran counts the
+    failures as cycles. This drives the real except-branch by making the pen raise on its FIRST
+    call only: the cycle card dies at the write, the handler writes again, and the file must hold
+    one line that says what it is."""
+    import tempfile
+    from pathlib import Path
+
+    class _OnceThenOk:
+        def __init__(self, inner):
+            self.inner, self.calls = inner, 0
+
+        def __call__(self, rec):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("first write dies on purpose")
+            return self.inner(rec)
+
+        def callable_ok(self):
+            return True
+
+    with tempfile.TemporaryDirectory() as tmp:
+        dd = Path(tmp)
+        pen = _OnceThenOk(F2.Pen(str(dd / "d.jsonl")))
+        state = H.RungState(str(dd / "s.json"))
+        import committee as C
+        cv = {"cycle_id": 3, "price": 4000.0, "atr": 5.0, "ts": 1_700_000_000.0,
+              "signal_map": {}, "power": {}, "vp": {}, "judges": [], "notes": [],
+              "bars": [], "data_quality": {}}
+        F2.run_cycle(cv, state, pen, "live", now_ts=1_700_000_000.0, ledger=C.TicketLedger())
+        assert pen.calls == 2, f"the except-branch never fired (calls={pen.calls}) - not a test"
+        got = [json.loads(x) for x in (dd / "d.jsonl").read_text(encoding="utf-8").splitlines()
+               if x.strip()]
+        assert len(got) == 1, f"expected the single error line, got {len(got)}"
+        assert got[0].get("line_kind") == "error", got[0]
+        assert "RuntimeError" in str(got[0].get("error")), got[0]
+
+
+def test_the_teacher_measures_the_heartbeat_not_the_whole_file_14f():
+    """The ~1KB law is a law about CARDS. 14f gives the teacher a way to know which class a line
+    is, so a fat day-footer can never fail the hall's law - and, just as important, a trimmed
+    footer can never HIDE a fat card. A fat cycle must still WARN even when the footer is small.
+    The second half is the old paper: no tags at all. Then the teacher falls back to measuring
+    everything, but it must SAY it is doing that - a silent change of instrument is how a green
+    report starts meaning something else."""
+    import subprocess
+    def run(diary: Path, expect: int = 0) -> str:
+        out = diary.with_suffix(".txt")
+        r = subprocess.run(
+            [sys.executable, str(HERE / "tools" / "gates_report.py"), "--diary", str(diary),
+             "--hall-off", "--out", str(out)],
+            capture_output=True, text=True, timeout=300, cwd=str(HERE))
+        # the teacher exits NONZERO the moment a row says FAIL - that is the grade, not a crash.
+        # A test that only accepts rc=0 would have to look away from the very row it proves.
+        if expect is not None:
+            assert r.returncode == expect, r.stdout[-400:] + r.stderr[-400:]
+        return out.read_text(encoding="utf-8")
+
+    def cyc(cycle_id: int, pad: int, **kw) -> str:
+        d = {"line_kind": "cycle", "t": "2026-11-13T07:00:00+00:00",
+             "cycle": {"id": cycle_id}, "atr": 5.0, "mode": "replay:tapes"}
+        d.update(kw)
+        s = json.dumps(d)
+        if pad > len(s):
+            s = s[:-1] + f',"pad":"{"x" * (pad - len(s) - 11)}"}}'
+        return s
+
+    with tempfile.TemporaryDirectory() as tmp:
+        p = Path(tmp) / "new.jsonl"
+        fat_foot = json.dumps({"line_kind": "day", "mode": "replay:summary",
+                               "day": "2026-11-13", "cycles": 2,
+                               "pad": "y" * 2200})
+        p.write_text(cyc(1, 700) + "\n" + cyc(2, 700) + "\n" + fat_foot + "\n",
+                     encoding="utf-8")
+        body = run(p)
+        blk = body[body.index("LINE SIZE LAW"):body.index("LINE SIZE LAW") + 700]
+        assert "[PASS]  LINE SIZE LAW" in body, "a fat FOOTER failed the heartbeat law:\n" + blk
+        assert "other classes" in blk and "NOT counted against the heartbeat law" in blk, blk
+        assert "partition closes: 3 == 3" in body, body[body.index("SECTION A"):][:900]
+
+        p2 = Path(tmp) / "fatcard.jsonl"
+        p2.write_text(cyc(1, 1400) + "\n" + cyc(2, 700) + "\n"
+                      + json.dumps({"line_kind": "day", "mode": "replay:summary",
+                                    "cycles": 2}) + "\n", encoding="utf-8")
+        b2 = run(p2)
+        i = b2.index("LINE SIZE LAW")
+        assert "[WARN]  LINE SIZE LAW" in b2, "a FAT CARD slipped past while the footer was clean"
+
+        p3 = Path(tmp) / "old.jsonl"                      # a pre-14f paper: no names at all
+        old = [json.loads(x) for x in (tmp and p.read_text(encoding="utf-8").splitlines())]
+        p3.write_text("\n".join(json.dumps({k: v for k, v in d.items() if k != "line_kind"})
+                                for d in old) + "\n", encoding="utf-8")
+        b3 = run(p3)
+        i3 = b3.index("LINE SIZE LAW")
+        assert "ALL lines - this paper carries no `line_kind`" in b3[i3:i3 + 700], \
+            "an old paper was measured by the new instrument without saying so"
+
+        # and the two instruments must AGREE. One line shaped like a card but named `day` is
+        # exactly what a half-finished tagging job leaves behind, and a report that reads the
+        # name only would count it as a footer while the old reader counts it as a cycle.
+        p4 = Path(tmp) / "split.jsonl"
+        liar = json.dumps({"line_kind": "day", "mode": "replay:summary", "cycles": 1,
+                           "cycle": {"id": 9}, "atr": 5.0})
+        p4.write_text(cyc(1, 700) + "\n" + cyc(2, 700) + "\n" + liar + "\n", encoding="utf-8")
+        b4 = run(p4, expect=1)
+        assert "[FAIL]  SELECTORS AGREE" in b4, \
+            "a diary whose NAME and SHAPE disagree was graded as if nothing was wrong"
+        assert "named cycles: 2" in b4 and "shape cycles: 3" in b4, b4[b4.index("SELECTORS"):][:320]
+
+
+def test_the_committee_verdict_line_names_itself_14f():
+    """The fifth class of diary line is not written by the hall at all: when a verdict earns a
+    ticket, `committee.attempt_fire` writes the ticket line through the SAME pen
+    (`committee.py:434`). So a day with 75 cycles and 7 tickets holds 82+ lines, and a reader who
+    counts lines to count cycles is off by every ticket he ever approved - the worse for being
+    right about the good news. This drives the REAL fire-law path (a verdict that passes all seven
+    laws) and reads back what the pen was handed."""
+    import committee as C
+    got = []
+    pre = {"age_s": 1.0, "bar_closed": True, "sensors_ok": True, "spread_pct": 0.001,
+           "news_blackout": False, "position_count": 0, "max_positions": 2,
+           "daily_loss_ok": True, "kill_switch": False, "symbol": "XAUUSD", "cycle_id": 41,
+           "diary": got.append}
+    rung = C.Rung(name="wallA", price=4000.0, kind="walls")
+    v = {"verdict": "BREAK", "card": "RUNG=wallA | L3Q=ok | VERDICT=BREAK"}
+    f = C.attempt_fire(v, rung, pre, C.TicketLedger())
+    assert f["allow"], f"the fixture must EARN a ticket or the write never happens: {f['fails']}"
+    assert len(got) == 1, f"expected exactly one ticket line, got {len(got)}"
+    assert got[0].get("line_kind") == "verdict", got[0]
+    assert got[0].get("ticket") == f["ticket"], "the named line must carry the ticket it names"

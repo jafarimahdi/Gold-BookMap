@@ -19,34 +19,32 @@ back from GitHub (`f70728d` code, `dc280b0` paper).  ← YOU ARE HERE.
 WHERE WE ARE GOING — one step per message, in THIS order (the number is the TODO row; `[you]` = you run a block,
 `[me]` = I cut it). Nothing in rows 3-9 changes what the factory DECIDES; they make it impossible to misread what
 it DID.
-  ▸NOW   row 4 step 2: v7 IS                          YOUR v6 run landed (01:04:56Z, 900 MB read). The needle's
-      THE RUN THAT CAN ANSWER                         zero is now 16,943 NOTES-CAPABLE lines, 21 of 22 files
-      11-16, NOT v6.                                  read WHOLE, 0 hits <== evidence; 105 files are BLIND
-                                                      silence, not data. But 11-16 is STILL open: v6 only
-                                                      printed the capable/blind split GLOBALLY, so the line
-                                                      you needed for that day does not exist in your paste.
-                                                      v7 `790a9f6e76026479` prints per day: `-> CAPABLE of a measured
-                                                      zero` / `-> BLIND: no notes field`. Proved BOTH ways on
-                                                      a fixture, and a planted `band:0/7` hit WAS found (0
-                                                      hits is only evidence if the reader can see one).
-                                                      v6 also caught my reader inventing key names: `band
-                                                      None` / `stamp (none)` on every row came from looking
-                                                      for `rung_band_usd`/`schema_version` - ZERO hits in the
-                                                      writer, which spells them `rung_band`/`printed_by`. The
-                                                      audit read 80.0 from the SAME file: laws 80 (a check
-                                                      must read ALL it ships - my syntax check parsed a prefix
-                                                      and passed a broken line) and 81 (a field my reader
-                                                      cannot find is my defect). NEXT: run v7 on 11-16.
-        row 3d PAGES              PUBLISHED x2 on `origin/strategy-v2`: `dc280b0` (code `f70728d` + the
-                                  first paper) then **`d0586d5`** `2026-11-18` 00:47:33, parent `dc280b0`,
-                                  `3 files changed, 144 insertions(+), 9 deletions(-)`.
-                                  Book 4,609 L `e6d80eaa181dfcdf` · map 594 L `e2d0a953d32631d1` ·
-                                  to-do 140 L `3573f931be2238a1` - all three hashed off the PUBLISHED
-                                  blobs, not off a disk. (Read-back + the records-branch trap: §3.5z.)
-                                  (This row first said 4,490 L - a prediction, not a measurement; the
-                                  lesson stays in §3.5w, and the same trap is why row 3d's tail of
-                                  `2026-11-17` said "what remains is 3c only" for eleven hours.)
-        row 3b TALLY-2, the one patch DONE by you: applied + `56 passed in 142.60s`
+  ▸NOW   FIRST LIVE DAY DONE, SAVING TO GITHUB: the day happened. Tab 1 ran the hall `--live`
+                                   all morning; 12 real cycles reached `data/gates_sandbox/
+                                   gates_shadow_20261125.jsonl` and his own teacher graded them
+                                   `9 PASS / 2 WARN / 0 FAIL`, `partition closes: 12 == 12`,
+                                   `verdicts: 3, tickets allowed: 0` - shadow-only, as built.
+                                   `NO-VERDICT=9 + spread=3 = 12 fed` (LAW 104, live). Booked:
+                                   the hall's OWN papers ride the sandbox (LAW 110) and tonight's
+                                   report runs WITHOUT `--hall-off` (it lied about today, :715).
+                                   NOW = the owner's order: push the 5 proven files + 3 papers +
+                                   kindcheck to `origin/strategy-v2`, repo stays PUBLIC by his
+                                   word ("we don't care of the word"). Proof chain: his disk
+                                   hashes matched my artifact BEFORE staging; then I re-fetch all
+                                   NINE files at the new SHA and re-hash. THEN: sail 11-25 +
+                                   report -> first earnable `THE NEW FACTORY IS HEALTHY`; then
+                                   row 15's whole ledger (OI=BLIND, settings walk, USD mapper,
+                                   the two swallowed writes, the dead `--record-shot`, the
+                                   MAX_SPREAD_PCT split). Lever stays his, last.
+  ▸HOW   A HAND-OVER IS ONE SMALL PASTE  law 102: two SILENT failed installs. A downloaded file can
+      AND IT NAMES ITS OWN BUILD         stay OLD while its output still reads right. Tools ship now
+                                         as one `cat > f <<'PYEOF'` block AND print their build on
+                                         line 1 (`tpcheck v4s | positions: N`). No download = no doubt.
+  ▸THEN  THE LADDER, rung by rung, `--dry` first: `--demo --once` (rehearsed HERE: exit 0 in 1.7 s,
+      g1/g2/g3 + one diary line `NO-VERDICT`) -> `--once` on REAL live eyes -> `--live` ONLY
+      with `--dry` (there is NO `--hall-off` flag - law 97: safety is STRUCTURAL, `--dry` +
+      a copy of `data/`, never a switch) -> `--hands-shadow` -> `report_evening_gates.sh`.
+      THEN manager checkup + settings, slowly. LIVE LEVER stays the owner's. Row 11 CLOSED AS PROVED.
   DONE   row 3d PUBLISHED            ✅ code: `f70728d` on `origin/strategy-v2`, parent `807ac51`, 8 files
                                        byte-identical to my measured tree (Book §3.5v has the 8 sha256s); the
                                        attic/jar/bmw stayed out, the §.3 stamps and the row-3 gate read off the
@@ -78,8 +76,10 @@ it DID.
                                       one per message: (1) delete my DAY_RE day-guess, (2) retire my
                                       rglob+ceiling for its `scoped` contract, (3) row 12 may lean on
                                       it, (4) ONE v7 run for 11-16, then row 4 CLOSES, readers stop.
-   side  row 12  ROOM A LIVE PANE     [me] `--from-raw-tail` plumbing only, AFTER 12b — no new parser, ever
-   side  row 13 WAKE THE LAW IN LIVE? [you] your signature; the hall stays `--hall-off` until you give it
+   DONE-ISH row 12 ROOM A LIVE PANE  [me] 12b CLOSED by the owner (BORROW), so the finder it
+                                      must lean on exists; `--from-raw-tail` plumbing only,
+                                      'no new parser, ever'. NOT STARTED - awaiting the owner's go.
+   side  row 13 WAKE THE LAW IN LIVE? [you] your signature; the hall stays `--hall-off`  (no such flag, law 97)
    last  ROOM E 11-14 (order → open → manage → close)    [you FIRST] a decision before any code (law #1: TP frozen)
 
 PATTERNS IN FORCE ON THIS PAGE — the laws, and the reason each one exists (full text: HOLY_BOOK.md §3.5n-3.5q)
@@ -213,7 +213,7 @@ PATTERNS IN FORCE ON THIS PAGE — the laws, and the reason each one exists (ful
 
 
   standing, and unchanged: process verification only - no signal, no trading · your repo is never committed or
-  pushed by me · the old factory is untouched (N1) · hall `--hall-off` · the ±80 USD mapper law · the live loop
+  pushed by me · the old factory is untouched (N1) · hall `--hall-off`  (no such flag, law 97)
   is never stopped · a 🧒 explanation before EVERY handover · one step per message · group, never delete ·
   superseded papers deleted (13) · no new file without a stated reason (14) · every finding lands on these
   pages in the SAME turn it was measured
@@ -238,19 +238,46 @@ ROOM A  THE EARS      how a minute gets inside, safely
      the Book, at the end of ROOM A, before ROOM B.
                           What is still open is named, not hidden: TODO 3 (this room's tally, measuring now),
                           TODO 12 + 12b (the live pane and the discovery parity, deferred on purpose).
+
+  ── ROOM E VERDICT (`2026-11-18`): SHADOW CODE BUILT, UNWIRED. What exists: `tools/factory2_hands.py`
+     (346 L) + `test_factory2_hands.py` (343 L, 22 tests) + `mutate_hands.py` (112 L, the law-52
+     harness) — commits `ee747a4` + `dfa1ca3` + `b5f9e94`, patch `room_e_shadow_b5f9e94.patch`
+     (838 L / 43,585 B / sha `f5c34bf8df8e0e74`, 3 files, +820/-0, `SAFE TO APPLY` on `c8dda38`, all
+     three blobs byte-IDENTICAL after applying, 22 passed in the applied tree). The three hard parts are
+     BORROWED, not re-typed: `position_manager.compute_structural_stops:379` (brackets),
+     `paper_entry_simulator.simulate_entry:83` (fills), `step4_mt5_execution.MT5Executor.compute_lot_size
+     :421` (size). N1 HELD — the old factory was read, never edited; 95 passed with his suites.
+     What does NOT exist: a send. `HALL_ARMED = False` and there is no line in the file that sets it;
+     `place_real_order` exists only to refuse. What is WAITING on him: (1) apply the patch, (2) the
+     wiring after Room B in `factory2_gates.py`/`tools/gates_replay.py` — one small block, his go,
+     (3) re-grade TP-FROZEN on a real sail before any of it is trusted.
+     PROBED `2026-11-23` on the owner's box (windows 1, read-only): `HEAD == c8dda38`, `remote tip == c8dda38`, the
+     3 paths absent, `11 dirty / 10 untracked` with **zero overlap** with these 3 paths, `python 3.12.4` present,
+     `data/` 981 files 8.1G and `archive/` 271 files 2.5G - and `22 passed in 1.62s` + `mutations that did NOT flinch: 0 []`
+     from bash TAB 2 at 18:4x UTC while the loop ran in tab 1, so ROOM E IS PROVED ON HIS BOX. There is ONE machine
+     (the owner's word, `2026-11-23`): v7 can only run here, and 'windows 2' sentences are withdrawn - LAW 87.
+     RE-CUT `2026-11-23` after the owner's run caught `mutate_hands.py:11` carrying MY sandbox path (`SRC = pathlib.Path("/home/user/f2_build")`) - Book `3.5am` + LAW 85; his 22 tests are byte-identical and unaffected, the harness fix ships alone as `room_e_harness_fix.patch`. `NEW FILE JUSTIFIED: tools/factory2_hands.py` because an executing hand cannot live in `factory2_gates.py` (the
+     `:340` wall, imported by the running loop) - `test_factory2_hands.py` because the house keeps ~45 per-stage test
+     files and `test_factory2.py` is 2,062 L - `mutate_hands.py` because it is the law-52 harness, not a report, and
+     booked against it: `3.5e` calls operator blocks paper, not product. Owner chose to continue as shipped;
+     full declaration in Book `3.5am`. Law #14's line was MISSING from the handover itself - that is the defect.
 ROOM B  THE JUDGE     the engine we started from
   [x] 4  G1 awake?         mood card on EVERY cycle, refused ones included
   [x] 5  G2 which line     rungs + the owner's +-80 USD Mapper law · no rung = "waiting is the answer"
   [x] 6  G3 the toll       closed beyond AND retested · v8f flip armed on the REPLAY/ mark only
   [x] 7  THE DOORMAN       7 fire-laws + L3 quality + ONE JUMP · every refusal named
-ROOM C  THE BOOK      the only output
-  [x] 8  TICKET + DIARY    ~1KB append-only line · law 6 "no diary, no ticket" · ★ the chain ENDS here
-ROOM D  THE READER    decides whether B is worth anything
+ROOM E  THE HANDS     BUILT `2026-11-18`, IN SHADOW - and MOVED HERE, after the JUDGE, on the
+                          owner's word: "when all 3 gates are confirmed and passed, the position will
+                          be executed". ORDER/OPEN/MANAGE/CLOSE are `[x]` AS SHADOW CODE (tools/
+                          factory2_hands.py, 22 tests, 13 mutations 0 survivors). What is NOT done:
+                          the WIRING after B (his go), re-grading TP-frozen on a real sail, and the
+                          live lever, which has no ON switch in the file. See § ROOM E VERDICT.
+ROOM C  THE BOOK      the only output - NOW AFTER THE HANDS
+  [x] 8  TICKET + DIARY    ~1KB append-only line · law 6 "no diary, no ticket" · ★ the book still
+                          closes the chain: hands write into it, they do not replace it
+ROOM D  THE READER    decides whether B (and, after the wiring, E) is worth anything
   [x] 9  NIGHT TEACHER     12 gates incl. THE BELT COUNTS ITSELF · 7 PASS / 0 WARN / 0 FAIL
   [x] 10 MONEY RULER       read-only · 3 days, 53 cards, -0.19/oz → nothing pays at +9 min, either way
-ROOM E  THE HANDS     NOT BUILT, ON PURPOSE
-  [ ] 11 ORDER   [ ] 12 POSITION   [ ] 13 MANAGE   [ ] 14 CLOSE  ← the owner's "last step"
-  [-] the shape is already legislated: entry=3 gates · stop=boat geometry · TP=FROZEN (Law #1) · hands off
 ──────────────────────────────────────────────────────────────────────────────
 OPEN WORK THIS PAGE ADDED (= FACTORY2_TODO.md rows 11-13, one number for both pages)
   [!] TODO 12  ROOM A LIVE PANE  `--from-raw-tail`: tail TODAY's growing ticks.csv in the sea. NO new parser
@@ -259,10 +286,16 @@ OPEN WORK THIS PAGE ADDED (= FACTORY2_TODO.md rows 11-13, one number for both pa
   [!] TODO 12b DISCOVERY PARITY   our sea re-types globbing (:67-:116) while the old factory owns
                                  `_discover_raw_files`/`discover_available_days`/`_iter_filtered_csv_events` —
                                  one copy we did not have to keep; decide after step 2, not during
+  [!] TODO 12c ROOM E WIRING     [me, HIS GO] the hands now exist as shadow code. The wiring is ONE
+                                 block: after `committee_evaluate` returns an ALLOWED verdict, call
+                                 `factory2_hands.plan_from_fire/stage_order/open_shadow`, then
+                                 `manage_shadow/close_shadow` per cycle — and it writes into the SAME
+                                 diary. Not applied: it changes what the hall does on a live minute,
+                                 which is exactly the kind of edit the owner signs first.
   [!] TODO 13  WAKE THE LAW?      v8f's flip sleeps in live (only gates_replay.py:973 writes REPLAY/) → your sign
   [!] TODO 11  ROOM E             + the boat's open STEP 2g hatch, for the day the hands are built
 ──────────────────────────────────────────────────────────────────────────────
-SILENCERS still fitted: --hall-off · --keep-mirror · --rung-band 80 · the REPLAY/ mark · nothing trades
+SILENCERS still fitted: --keep-mirror · --rung-band 80 · the REPLAY/ mark · nothing trades  (NO --hall-off: phantom flag, law 97 - safety is --dry + an isolated data dir)
 ```
 
 **This is the page we work from.** Keep it open while we walk the steps; it is re-drawn from the code,
@@ -285,10 +318,11 @@ glue "what goes in" to "what we decide", and when a number looked wrong we would
 | room | swallows | one line |
 |---|---|---|
 | **A. THE EARS** | steps 0 · 1 · 2 · 3 | how a minute gets inside, safely |
+| **E. THE HANDS** | steps 11 · 12 · 13 · 14 | **MOVED UP after B, `2026-11-18`** — order → open → manage → close, in shadow |
 | **B. THE JUDGE** | steps 4 · 5 · 6 · 7 | the 3-gate engine + the doorman — *the starting point of the whole design* |
 | **C. THE BOOK** | step 8 | the only thing the factory produces: a line of paper |
 | **D. THE READER** | steps 9 · 10 | the night teacher + the money ruler — decides whether B is worth anything |
-| *(E. THE HANDS)* | steps 11-14 | **not built, on purpose** — order → position → manage → close |
+| **E. THE HANDS** | steps 11-14 | **BUILT `2026-11-18` in SHADOW, and MOVED UP after B** - order → open → manage → close |
 
 ---
 
@@ -534,7 +568,12 @@ count against the teacher (`right n/N` at `--friction 0` must equal the teacher'
 
 ---
 
-# 🫥 ROOM E — THE HANDS *(steps 11-14: NOT BUILT, ON PURPOSE)*
+# 🫥 ROOM E — THE HANDS *(steps 11-14: built `2026-11-18` IN SHADOW, not wired)*
+
+**THE ORDER, as the owner set it on `2026-11-18`:** `A (0-3) → B (4-7) → E (11-14) → C (8) → D (9-10)` —
+*"when all 3 gates are confirmed and passed, the position will be executed."* The BOOK still ends the
+chain: the hands write into it, they do not replace it. The wiring is NOT applied yet — it is his go.
+
 
 ```
 8 (ticket) ──✗──> 11 ORDER ──> 12 POSITION OPEN ──> 13 MANAGE (SL / TP / time) ──> 14 CLOSE = profit or loss
@@ -585,7 +624,7 @@ tapes the day Room E exists.
   paper AND on your old one; then prints per day: the sea's own tally, the absence of the fake word,
   **paper columns == diary counts**, this-sail vs file record counts, the teacher's `[OK  ]` row, the old
   paper's `[n/a ]` abstention, and whether the re-sail reproduced the cycle count (comparability, law 51b).
-  Live mirror hashed before and after; hall stays `--hall-off`; nothing of yours is overwritten. Rehearsed on
+  Live mirror hashed before and after; hall stays `--hall-off`; (no such flag, law 97)
   a rebuilt tree with a real 261-cycle sail: PASS verdict, idempotent across 7 sails in one diary, and made
   to flinch on four mutations — N1 diary-only lie, N2 a SELF-consistent lying paper (only the cross-check
   caught it, which is why the cross-check exists), N3 no tape -> NOT MEASURED, N4 stamps `.2` -> abort rc 4.
@@ -606,7 +645,7 @@ tapes the day Room E exists.
   now sit beside the brain. The law that made them (keep, never delete) is right for *one* run and wrong for a
   habit. To look first, read-only: `ls -d data/gates_sandbox_prev_* | wc -l; du -sh data | tail -1`.
   Nothing deletes anything unless you say so.
-- Hall `--hall-off`. Nothing trades. `factory2_gates.py` still `??` (untracked — NOT "unchanged").
+- Hall `--hall-off`. (no such flag, law 97)
 
 ---
 
@@ -653,7 +692,17 @@ Proof, one line: `run_cycle()` is defined ONCE at `factory2_gates.py:337` and **
 
 ## HOW TO SEE IT WITHOUT RISKING ANYTHING (the ladder, already built)
 
-`--demo` → one synthetic heartbeat, proves the corridor exists end-to-end · `--once` → ONE real live heartbeat,
-through eyes → brain → judge → diary, and stops · `--live` → the loop, still writing only a diary, still no
-orders, hall `--hall-off` → then `report_evening_gates.sh` grades the morning after, same as it grades a tape.
+`--demo --once --dry` -> one made-up heartbeat (DONE on his box: `exit 0`, `data/` 1241 -> 1241) ·
+`--live --once --dry` -> ONE heartbeat on the source his config names · `--live --dry` -> the loop,
+diary only. Every command must be LEGAL for the parser first: `:550` is a mutually exclusive group
+REQUIRING one of `--replay-jar | --replay-file | --demo | --live`, so a bare `--once` is refused with
+`exit 2` BEFORE the market is reached (measured on his box and reproduced here, same exit, same line).
+**`--hall-off` IS NOT A FLAG OF THIS FACTORY** - `grep -c "hall-off"` -> 0 in `factory2_gates.py` AND in
+`tools/gates_replay.py`; the only hit is a HELP STRING in `gates_replay.py:1344`. It is an OLD-FACTORY
+runner silencer (LAW 12 vocabulary) and the map used it as a noun for "the lever is off" in 21 places.
+Honest replacement: **Factory 2 has no send path to disable** - `order_send` / `MetaTrader5` / `mt5.`
+appear 0 times in `factory2_gates.py`, so the paper IS the whole output; `HALL_ARMED` is a constant my
+Room E hands code never calls. One measured note for the `ls -1 data` guard: a run creates
+`data/gates_sandbox/` (the borrowed-writers drawer itself), so count FILES and expect
+`gates_sandbox`/`gates_sandbox_prev_*` to move - the live `session_levels.json` is untouched by design.
 **Every rung of that ladder produces paper and nothing else.**

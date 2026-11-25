@@ -431,7 +431,11 @@ def attempt_fire(verdict: Dict[str, Any], rung: Optional[Rung], pre: Dict[str, A
         fails.append("ONE-JUMP")                                 # law 2
     if ticket is not None:
         try:
-            pre["diary"]({"ticket": ticket, "verdict": verdict["verdict"],
+            pre["diary"]({"line_kind": "verdict",   # law 105: the committee writes its OWN diary line, so
+                                          #   "75 cycles" and "83 lines" are both true and only the name
+                                          #   on the line can tell them apart. Also: see the `except: pass`
+                                          #   below - a verdict that could not be written is uncountable.
+                          "ticket": ticket, "verdict": verdict["verdict"],
                           "rung": rung.name if rung else "", "card": verdict["card"]})
         except Exception:
             pass

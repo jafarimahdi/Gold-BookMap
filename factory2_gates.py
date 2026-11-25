@@ -113,6 +113,21 @@ def git_stamp() -> str:
 
 
 # ---------------------------------------------------------------- level adapter
+
+def _iso_ts(v: Any) -> str:
+    """A tape timestamp as ISO text - or "" when the cycle has no tape clock. Never the wall clock.
+
+    14e (law 106): the diary's `t` is `datetime.now` in live AND replay, so in a replay it cannot
+    order a day. This field carries whatever time the CYCLE believes it is. Empty string on purpose:
+    "I have no tape clock" must read differently from a guessed one.
+    """
+    try:
+        f = float(v or 0.0)
+    except (TypeError, ValueError):
+        return ""
+    return datetime.fromtimestamp(f, timezone.utc).isoformat(timespec="seconds") if f > 0 else ""
+
+
 def levels_from_view(cv: Dict[str, Any]) -> List[Dict[str, Any]]:
     """signal_map rows -> committee level dicts with the ENTRY-5 kind map,
     plus the learner rungs (FVG from bars, AVWAP accumulator, va_prior day-2)."""
@@ -309,6 +324,11 @@ class Pen:
 
     def __init__(self, path: Optional[str], dry: bool = False):
         self.dry = bool(dry)
+        # LAW 88: str() on a callable is a FILENAME, not a mistake nobody notices. My own tests
+        # passed Pen(lines.append) and created 23 diary files named after list.append, in the repo
+        # root, on a machine that also holds the owner's data. Fail LOUDLY at construction instead.
+        if path is not None and not isinstance(path, (str, os.PathLike)):
+            raise TypeError(f"Pen wants a path or None, got {type(path).__name__}")
         self.path = str(path) if path else None
 
     def __call__(self, rec: Dict[str, Any]) -> None:
@@ -336,7 +356,8 @@ class Pen:
 
 def run_cycle(cv: Dict[str, Any], state: Any, pen: Optional[Pen], mode: str,
               now_ts: Optional[float] = None,
-              ledger: Optional[Any] = None) -> Dict[str, Any]:
+              ledger: Optional[Any] = None,
+              shadow: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     import committee
     now_ts = time.time() if now_ts is None else float(now_ts)
     ledger = ledger if ledger is not None else committee.TicketLedger()
@@ -351,6 +372,23 @@ def run_cycle(cv: Dict[str, Any], state: Any, pen: Optional[Pen], mode: str,
             "cycle": cyc["cycle_id"], "price": cyc["price"],
             "atr": round(cyc["atr"], 3), "mode": mode,
             "ver": FACTORY2_VERSION, "git": git_stamp(),
+            "line_kind": "cycle",   # law 105: THIS line is a cycle row. A diary ALSO holds the
+                                    # committee's verdict rows (`"card": ...`, 7 of them in the
+                                    # owner's r13.txt), and counting LINES mixes them: I predicted
+                                    # 7 allowed and measured 14 for exactly that reason. The field
+                                    # is NOT named `kind` - this house already uses `kind` for rung
+                                    # and level kinds, and two meanings in one diary is how a grep
+                                    # finds the wrong one.
+            "t_tape": _iso_ts(cv.get("ts")),   # the TAPE's clock, next to the machine's. `t` is
+                                    # `datetime.now` in BOTH modes (law 106), so a replay's rows all
+                                    # say the second it ran: his first five read :45 :45 :46 :46 :47.
+                                    # Replay `ts` = the grid slot (gates_replay.py:1009); LIVE `ts` =
+                                    # the snapshot's own timestamp (cv_from_snapshot_dict) - which is
+                                    # also the staleness gap your row-2 law cares about, in ONE line.
+                                    # Read from `cv`, NOT `cyc`: build_cyc() rebuilds the dict key by
+                                    # key and drops `ts` - the same trap the v8f comment above warns
+                                    # about (`cv["shadow_law"]` was DEAD CODE). A field that is always
+                                    # empty is worse than no field: it reads as "no tape time today".
             "g1": out.get("g1"), "g2": out.get("g2"), "g3": out.get("g3"),
             "final": out.get("final"), "error": out.get("error", ""),
             "stamps": pre.get("stamps") or [],
@@ -360,11 +398,22 @@ def run_cycle(cv: Dict[str, Any], state: Any, pen: Optional[Pen], mode: str,
                      ("closes_beyond", "holds_minutes", "volume_building")}
                      if isinstance(toll := (cyc.get("toll") or {}), dict) else {},
         }
+        if shadow is not None:                    # ROOM E, TODO 12c. Default-OFF: the live
+            try:                                    # loop passes no shadow dict, so it cannot
+                fn = shadow.get("cycle_hands")      # reach this line at all. The CALLER hands us
+                if not callable(fn):                # the function - the hall never imports
+                    raise LookupError(              # `tools/factory2_hands.py` by name, because
+                        "shadow dict carries no callable 'cycle_hands'")   # sys.path is the
+                rec["hands"] = fn(shadow, cyc, out, pen, now_ts=now_ts)     # caller's business.
+            except Exception as exc:                # law 8 AND law 83: never kill a heartbeat,
+                rec["hands"] = {"status": "ERROR",  # never swallow quietly.
+                                "err": f"{type(exc).__name__}: {exc}"[:140]}
         if pen is not None:
             pen(rec)
     except Exception as exc:                      # law 8: one line, never a dead loop
         if pen is not None:
-            pen({"t": time.strftime("%Y-%m-%dT%H:%M:%SZ"), "mode": mode,
+            pen({"line_kind": "error",     # law 105: name EVERY line, not just the good ones.
+                 "t": time.strftime("%Y-%m-%dT%H:%M:%SZ"), "mode": mode,
                  "error": f"factory2-rec:{type(exc).__name__}: {exc}"})
     if state is not None:
         try:
@@ -594,7 +643,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             print("[factory2] g2:", str(out.get("g2"))[:100])
             print("[factory2] g3:", str(out.get("g3"))[:120])
         except Exception as exc:
-            pen({"t": time.strftime("%Y-%m-%dT%H:%M:%SZ"), "mode": "live",
+            pen({"line_kind": "error",     # a diary that names only its good lines is a lie:
+                 "t": time.strftime("%Y-%m-%dT%H:%M:%SZ"), "mode": "live",      #   the reader counts what it can see
                  "error": f"factory2:{type(exc).__name__}: {exc}"})
         if a.once:
             return 0

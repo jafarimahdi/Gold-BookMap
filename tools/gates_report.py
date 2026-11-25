@@ -127,8 +127,17 @@ def _f(x: Any, d: float = 0.0) -> float:
 def sec_health(T: Teacher, rows: List[Dict[str, Any]], bad: int,
                buf: Optional[List[str]], hall_off: bool = False) -> Dict[str, Any]:
     cycles = [r for r in rows if "cycle" in r]
-    sizes = [int(r.get("_bytes") or 0) for r in rows]
     errs = [r for r in rows if r.get("error")]
+    # 14f + law 105: a diary is a MIX of classes - cycles, one day footer per sail, and an
+    # error line whenever a card dies. The ~1KB law speaks about HEARTBEATS, so once the lines
+    # carry their own name it must measure heartbeats: a fat footer must not be blamed on the
+    # hall, and a trimmed footer must not hide a fat card. A pre-14f paper has no names, so it
+    # is measured the old way AND the report says which way it looked - never silently.
+    named = bool(rows) and all(str(r.get("line_kind") or "") for r in rows)
+    cyc_rows = [r for r in rows if r.get("line_kind") == "cycle"] if named else cycles
+    oth_rows = [r for r in rows if r.get("line_kind") != "cycle"] if named else []
+    sizes = [int(r.get("_bytes") or 0) for r in cyc_rows] or [0]
+    oth_sizes = [int(r.get("_bytes") or 0) for r in oth_rows]
     unknown_stamps = sorted({str(x) for r in rows for x in (r.get("stamps") or [])
                              if str(x) not in STAMPS_ALLOWED})
     if not cycles:
@@ -150,11 +159,27 @@ def sec_health(T: Teacher, rows: List[Dict[str, Any]], bad: int,
           [f"{len(rows)} lines read from {len(set(_ := [r.get('mode', '?') for r in rows]))} mode(s)",
            f"unparseable lines: {bad}"] if ok else [f"{bad} unparseable lines"], buf)
     over = [s for s in sizes if s > MAX_LINE_BYTES]
+    _det = [f"max {max(sizes)} B, mean {int(sum(sizes) / max(1, len(sizes)))} B"
+            + ("" if named else "  (ALL lines - this paper carries no `line_kind`)"),
+            (f"{len(over)} fat line(s) - trim the card, not the law" if over
+             else "the budget holds for every line")]
+    if named and oth_sizes:
+        _det.append("other classes: " + ", ".join(
+            f"{k}={v}" for k, v in sorted(Counter(
+                str(r.get("line_kind")) for r in oth_rows).items()))
+            + f"  (max {max(oth_sizes)} B - NOT counted against the heartbeat law)")
     T.add("PASS" if not over else "WARN", "LINE SIZE LAW",
-          f"one heartbeat <= {MAX_LINE_BYTES} bytes (~1KB budget)",
-          [f"max {max(sizes)} B, mean {int(sum(sizes) / max(1, len(sizes)))} B",
-           (f"{len(over)} fat line(s) - trim the card, not the law" if over
-            else "the budget holds for every line")], buf)
+          f"one heartbeat <= {MAX_LINE_BYTES} bytes (~1KB budget)", _det, buf)
+    if named:
+        # two instruments over one file, like `errors == sum(skips)`: the NAME of a line and
+        # the SHAPE of a line must agree, or the paper and the diary are telling different days.
+        if len(cyc_rows) != len(cycles):
+            T.add("FAIL", "SELECTORS AGREE", "line_kind=cycle vs a line that HAS a cycle block",
+                  [f"named cycles: {len(cyc_rows)}   shape cycles: {len(cycles)}",
+                   "one of the two is wrong - do not grade anything until they match"], buf)
+        _k = Counter(str(r.get("line_kind")) for r in rows)
+        say("        line_kind: " + ", ".join(f"{k}={v}" for k, v in sorted(_k.items()))
+            + f"   (partition closes: {sum(_k.values())} == {len(rows)})", buf)
     atr_bad = [r for r in cycles if not (_f(r.get("atr")) > 0)]
     T.add("PASS" if not atr_bad else "WARN", "ATR IS ALIVE",
           "every cycle carries a real candle-stick yard (ATR > 0)",

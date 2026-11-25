@@ -4879,7 +4879,10 @@ ROOM A  THE EARS      how a minute gets inside, safely
   [x] 1  THE GLASS CASE    quarantine copy · original only stat'ed (2026-11-13 22:24:10 in every receipt)
                           · RE-PROVED under load: live mirror frozen 2026-11-17_00:58:04 before AND after
                             a patch + 55 tests + two full re-sails
-  ── ROOM A VERDICT: 6 of 6 SIGNED. Nothing more is needed for the room to WORK; step 2 fixes a LABEL, not a part.
+  ── ROOM A VERDICT (`2026-11-18`, PUBLISHED in `c8dda38`): FINISHED - four steps, four owner
+                          receipts (0 window · 1 glass case · 2 eyes `data/eyes2d_20261117.txt` ·
+                          3 belt `belt1b`), no part waiting on me. Open drawers: 12b CLOSED by the
+                          owner's word (BORROW), 12 unblocked and not started.
   [?] 2  EYES + FRESHNESS  TWO laws found (15s doorman / 240s tape); `stale`=tape-quiet not feed-late
                           measure first: nov14_step2_block.sh (read-only, rehearsed) ← YOU ARE HERE
   [x] 3  THE BELT + TALLY  Q1 PASS (84/84, 8/8, 8<=124) · Q2 CLOSED by belt1b: changed lines=2 (mirror
@@ -5110,6 +5113,9 @@ NOT start by improving my reader. Start here:
 | a file will not decode | the LADDER (utf-8-sig → cp1252 → …). rc=0 is not enough to keep a verdict | 72 |
 | which days / which tapes exist at all | **ours: `gates_replay.py:64 discover_tape()`, `:109 available_days()`**; above them the old factory: `audit_day.py:322 all_ticks_files`, `tools/raw_replay.py:165 _discover_raw_files` | 82 |
 | I am about to re-type something the factory has | STOP. Read the organ that WROTE it, change ONE part of mine | 82 |
+| a shadow ticket reads 0 P&L, or the brackets look invented | `tools/factory2_hands.py hands_status()` -> the
+  `borrowed` dict and `import_error`: a BLIND bridge must REFUSE, never print a quiet zero (mutation M10), and an
+  unmarked symbol must come back `SHADOW/`-prefixed | 82, 78 |
 | is reading a minute SAFE at all? (Room A 0-3) | the room below: four steps, four owner receipts, and the freeze stamp `2026-11-13 22:24:10` in every one | N1, N2 |
 
 **Three facts this note rests on, so nobody has to trust my prose** (all measured now, at the owner's published
@@ -5131,6 +5137,1278 @@ readers**.
 in the diary, in the writer's source, or in the old factory's finder. The circle we were running in was me
 GENERATING measurements instead of READING them. If you ever feel that circle again, say the sentence, and I come
 back to this table.
+
+### 3.5ak THE PAGES ARE PUBLISHED - READ BACK FROM GITHUB - AND ONE MORE SENTENCE OF MINE WAS WRONG (`2026-11-18`)
+
+**What happened, in order.** The owner saved `factory2_pages_7caeb76.patch` (`103,754 B`, sha256
+`4af5a6efbd326027`), REHEARSED it (`git apply --check` -> `SAFE TO APPLY`; `--stat` -> exactly 3 `.md`,
++798/-33), and only then applied, committed and pushed. New tip on `origin/strategy-v2`: **`c8dda38`**, parent
+`d0586d5`, `3 files changed, 798 insertions(+), 33 deletions(-)`.
+
+**Read back, not believed.** From my side: `git ls-remote` printed `c8dda38d7eeba793...`, and a `git fetch` of
+that ref into my shadow returned three blobs - Book 5,309 L `26b8e2e5143130cc`, map 659 L `cf51438832535f6d`,
+to-do 140 L `c7615a24f24f2811` - each EQUAL to my copy's `git hash-object`. The 🧭 WHERE TO LOOK FIRST note is in
+GitHub's Book at line 5093; the published map's Room A verdict reads `FINISHED`; `row 12b DISCOVERY PARITY`
+reads `DONE ... BORROW`. `git diff --name-only d0586d5 c8dda38` lists only the three `.md` files, so **no `.py`
+on the branch moved** and law N1 held through the publication.
+
+**The correction, booked in the same breath as the good news.** After comparing the three pages I said *"the
+trees are identical, only the history differs"* - and wrote a parenthetical claiming a check for it, without
+running one. Measured: `git diff --stat HEAD c8dda38` prints **22 files, +6,255 / -1,437**, because my `x3`
+branch also carries the old factory (`main.py`, `audit_day.py`, `tools/raw_replay.py`) and a stray
+`v8f_sail_recipe.txt` that the published branch does not. So the true statement is **three PAGES identical,
+whole trees NOT**, and `7caeb76` and `c8dda38` are SIBLINGS - same page content, different parents. That is not
+a defect to repair: the shadow is a pages vault, GitHub is the authority (law 59's whole point: "these files
+match" is not "this branch matches"), and I will not rebase, reset or force anything.
+
+**Two facts from the owner's paste, pointed at, not touched.** (1) `M Workspace/26,09,16-23.20.bmw` was already
+dirty before the patch and stayed uncommitted - correct, and it has been recorded as "never committed" since
+October. (2) The nine `??` entries are the October pile (six old `.patch` files, `_attic_2026-10-17/`, a `.jar`,
+`daily_audit_1111.txt`) - the attic decision the owner still owns; and if a copy of my patch landed in the repo
+root, it may now be a tenth `??`, which the owner can delete since the pages it carried are committed.
+
+**What this unlocks.** Nothing was waiting on the publication but my own bookkeeping, so row 4's remaining work
+is unencumbered: part 1 (drop my `DAY_RE` day-guess, use the writer's `day`/`days`), part 2 (retire `rglob` +
+ceiling for `discover_tape()`'s scoped contract), then the ONE v7 run for 2026-11-16 and row 4 closes.
+
+### 3.5al ROOM E, THE HANDS - BUILT IN SHADOW, AND MOVED UP AFTER THE JUDGE (`2026-11-18`)
+
+**What the owner asked.** *"check the old factory and build now the whole Room E for our new factory 2 …
+After you finish with Room E, I would like us to put this Room E after Room B … when all 3 gates are
+confirmed and passed, the position will be executed."* Two instructions, both obeyed: the room was BUILT
+(as shadow code), and the ORDER was rewritten on these pages (`A -> B -> E -> C -> D`) while the BOOK stays
+the end of the chain, because the hands WRITE into it rather than replacing it.
+
+**How it was built - the old factory as the model, law 82 held.** Nothing here is my second implementation
+of an organ that exists. `tools/factory2_hands.py` imports and calls:
+
+| the hard part | the organ borrowed | why not my own |
+|---|---|---|
+| the brackets (SL / TP) | `position_manager.compute_structural_stops` :379 | its hunt/round-number and zone logic took my hand-typed 2035 and returned **2040** - the test asserts the organ's answer, not my arithmetic |
+| the fill | `paper_entry_simulator.simulate_entry` :83 | analysis-only by design: it REFUSES a plan that is not `PLAN_ONLY`, so my module physically cannot ask it for a live order |
+| the size | `step4_mt5_execution.MT5Executor.compute_lot_size` :421 | the executor class is instantiated with `__new__`, exactly the house pattern the sea already uses for `_BridgeTail` |
+
+**The law that makes this room safe.** `HALL_ARMED = False`, and no line in the file sets it True - a test
+reads the source and flinches if someone adds one. There is no `order_send`, no `MetaTrader5`, no broker id
+anywhere in the module; `place_real_order()` exists only to raise `HandsRefused`. **TP is FROZEN by test**
+(Law #1): the manage step may move the STOP to break-even and never the target, and mutation M7 (unfreezing
+it) is caught. Symbols that arrive unmarked are forced into a `SHADOW/` prefix, so a shadow ticket can never
+look like a broker ticket.
+
+**Law 52 was obeyed, and it paid twice.** A separate harness (`mutate_hands.py`) disarms each guard one at a
+time and REQUIRES a named test to fail: 13 mutations, **0 survivors**. Two of the 13 exist only because the
+first run exposed my own weakness - M10 (a blind bridge becomes a quiet zero) and M14 (the borrowed organ
+accepting a non-`PLAN_ONLY` plan) did NOT flinch, because my test patched `_borrow` itself (a fixture that
+replaces the thing under test proves nothing) and because I was testing my guard rather than the organ's.
+Both were rewritten in the mutation-proof form: break the IMPORT, and call the ORGAN.
+
+**Two findings from my own cosmetic pass, booked because they are the kind we keep meeting.** (1) I shortened
+a long line by writing `" ".join(A "concatenated" B)` and shipped it - implicit string concatenation makes
+ONE string, so join walked its characters and the safety message printed `H A L L - O F F`. The guard
+BEHAVED correctly and SPOKE wrongly: only printing the exception found it, no test did. (2) In the same pass I
+deleted M1 from the harness by treating it as "a note", quietly weakening law 52 coverage while believing I was
+tidying; the count of mutations (12 vs 13) is what made me look. The lesson is law 80 again: a check that
+reads only part of what it ships is no check - and a pass that edits prose and code in one sweep reads neither.
+
+**Receipts, all measured, not narrated.** `22 passed` (Room E alone) · `95 passed` with his `test_factory2.py`
++ `test_committee.py` in the same run, so nothing of his broke · patch `room_e_shadow_b5f9e94.patch`
+(819 L / 41,955 B / sha256 `b94e3716737f9573`), 3 files, **`+801 / -0` - additions only, no existing line
+touched** · `git apply --check` → `SAFE TO APPLY` on `c8dda38` · after applying in a clean worktree at his tip,
+all three blobs are byte-IDENTICAL and the 22 tests pass THERE. Commits: `ee747a4` (the build), `dfa1ca3`
+(house line-length, measured against his own style: he allows 0.9-2.7 % of lines over 100, I went from 57 to 5),
+`b5f9e94` (the two fixes above).
+
+**What is NOT finished, said plainly.** (1) The room is UNWIRED: no call to it exists in `factory2_gates.py`
+or `tools/gates_replay.py`, because executing on a live minute is exactly the edit the owner signs first.
+(2) `manage_shadow` implements only the two exits a recorded minute can PROVE (`TIME_STOP`, `HARD_STOP`) -
+the five borrowed-and-unrun names (`SESSION_FLATTEN`, `NEWS_FLATTEN`, `FLIP_EXIT`, `DIVERGENCE_EXIT`,
+`MOMENTUM_EXIT`) are LISTED in `hands_status()` as known-and-unimplemented rather than faked, per law 78. Counted
+from the shipped file, not from my prose: `EXIT_RULES_BORROWED` carries SIX (the five plus `TIME_STOP`) and
+`EXIT_RULES_BORROWED carries SIX` and `RULES_THIS_SHADOW_RUNS` carries TWO (`TIME_STOP`, `HARD_STOP`); so `TIME_STOP` is legitimately in both - borrowed
+AND run - and my sentence said four where the list it quoted held five (corrected in `3.5am`, law 83 applies to a
+BOOK sentence exactly as it applies to a guard's message).
+(3) TP-frozen still needs re-grading on a real sail, which the Book has demanded since the ROPE chapter: that
+is his call, not mine.
+
+**LAW 83 (for the map).** *A message a guard prints is part of the guard.* Test what a refusal SAYS, not only
+that it refuses - and never let a formatting pass delete a mutation, a check, or a word.
+
+### 3.5am ROOM E PASSES THE PROBE, AND THE BOOK FINDS FIVE OF ITS OWN SENTENCES TO RE-QUOTE (`2026-11-23`, the
+**owner's return day** - read-only probe receipt + the four corrections + the LAWS #14 declaration)
+
+**What the owner did.** He ran `nov23_windows2_probe.sh` (107 L / 5,279 B / sha `4c939d16806a3907` - the name is a
+misnomer now, see the topology note below) and pasted the output. It was run **on the one box we have**: `pwd /a/gitHub/Gold-BookMap`, `branch strategy-v2`,
+`HEAD == c8dda38`, `remote tip == c8dda38`, `data: 981 file(s), 8.1G`, `archive: 271 file(s), 2.5G`, `newest live
+file is 0 minute(s) old`, `PY=python -> 3.12.4` (no Store stub, so pytest will run), `git 2.56.0.windows.1`, and
+**the 3 Room E files absent**. I read that as "the second machine has no clone" and wrote it down that way - which was
+only half a correction: **there is no second machine at all**, one HP-240 with two bash tabs. What survives from the
+wrong reading is the useful part - `data/` is git-ignored, so no other clone anywhere could run v7, and the v7 11-16
+run is a job on THIS box. My earlier 'windows 2 if it has data' stays withdrawn. The
+probe was read-only: it wrote nothing. One thing it could not answer: `data/factory2_snapshots` is **ABSENT** on his
+box, though I wrote receipts into that folder before `c8dda38` - the loop is alive via `data/session_levels.json`,
+so nothing is broken, but WHERE the hall lands its receipts is a question I am asking, not assuming.
+
+**LAWS #14, declared here because the patch handover forgot it.** `FACTORY2_TODO.md:6` and `3.5e`'s standing
+consequence (`:3437`) require the line `NEW FILE JUSTIFIED: <file> because <no-home reason>` in any receipt that
+adds a file; `grep -c "NEW FILE JUSTIFIED" room_e_shadow_b5f9e94.patch` returned **0**, so the declaration is made
+HERE, in the Book, which is where the consequence says it must also be repeated:
+- `NEW FILE JUSTIFIED: tools/factory2_hands.py because` an executing hand cannot live in `factory2_gates.py` - that
+  file is the wall we agreed not to cross (`:340`), and the live loop imports it every cycle; a shadow hand must be
+  importable, testable and removable on its own.
+- `NEW FILE JUSTIFIED: test_factory2_hands.py because` the house already keeps per-stage test files (`~45 of them:
+  `test_nov09_stage_d1_doorman_hardening.py` ... `test_nov11_stage_l1c_journal_tail.py`), and `test_factory2.py` is
+  2,062 L - appending 343 L to it while a loop runs makes the owner's own suite the blast radius.
+- `NEW FILE JUSTIFIED: mutate_hands.py because` it is the law-52 harness, not a report; **and booked against it**:
+  `3.5e` says operator blocks are 'pasted, never stored in the repo (it is paper, not product)', so this is the
+  weakest of the three. The owner chose to CONTINUE with all three as shipped (`2026-11-23`), so it stands as an
+  owner's decision, recorded rather than argued. Folding it later is a 1-file patch, not a redesign.
+
+**Correction 1 (mine, from the last turn, now fixed on these pages): `mutate_hands.py` is 112 lines, not 113** -
+`wc -l` on the shipped file. The map's ROOM E VERDICT said 113 L; it now says 112 L.
+
+**Correction 2 (a claim that was FALSE, found while re-reading, not while re-running).** `FACTORY2_TODO.md` row 11
+carried a tail from before the build - *"Steps 11-14 ... UNBUILT by design ... verified: `grep -ci
+"stop_loss\|take_profit\|SL\|TP\|chandelier\|trail"` = 0 in all four factory files"* - and that `0` was never true
+of the pattern as written. Measured on a clean `c8dda38` tree: `factory2_gates.py` **8**, `committee.py` **20**, `tools/gates_replay.py` **13**, `tools/gates_report.py` **10** = the false-as-written **8/20/13/10**. The reason is the pattern, not the repo: `SL|TP`
+with `-i` matches inside **STEP** and **STOP**, so the grep counted its own words. The TRUE claims, measured the same
+night with a word boundary and a question that can be answered: `(stop_loss|take_profit|chandelier|trail)` = **0**
+in all four of his files (**1** in my new hands file - the one line naming the `position_manager.py:1710-1721` trail
+hatch we deliberately did NOT port), and `order_send|import MetaTrader5|ORDER_TYPE_BUY` = **0 in all five**, his four
+and mine. That is the sentence that actually means 'no door to the broker', and it is the one now booked. The stale
+tail ("UNBUILT by design", "the chain currently ENDS at the ticket") is deleted, since `3.5al` built the tail.
+
+**Correction 3, 4: the two counts above** - row 6's `55 tests` -> `56 tests collected in 0.36s` measured at
+`c8dda38` (`+test_committee.py` = 73; `+Room E` = 95; whole repo = 833), with the Book's own `55 passed in 46.86s`
+named as where the 55 came from; and my "other four borrowed names" -> five, as quoted above.
+
+**What this turn did NOT do, so nobody has to guess.** No code was edited, no repo was pushed, no command was run on
+his box by me, `data/` was not read, `HALL_ARMED` is still False (grep: the word appears at `:40`, `:73`, `:336` and
+no line assigns True), and the patch is unchanged - still `b94e3716737f9573` / 819 L / `+801 -0` - because a
+correction to a SENTENCE must not smuggle in a change to a FILE. Re-proved after the edits by applying the same
+unchanged patch to a clean `c8dda38` tree: `22 passed`, `mutations that did NOT flinch: 0`.
+
+
+**THE HANDOVER BUG HIS RUN CAUGHT, AND THE LAW IT BECOMES (`2026-11-23`, 17:5x UTC).** His apply worked - `APPLIED` + **`22 passed in 1.55s`** - and the SECOND command in the same block died: `FileNotFoundError: [WinError 3] ... '\\home\\user\\f2_build'`. `mutate_hands.py:11` read `SRC = pathlib.Path("/home/user/f2_build")`: **the author's sandbox path, baked into shipped code.** It could only ever pass on my box. Three flaws, all found by re-running his exact failure mode here, one at a time: (1) the absolute SRC -> now derived from `__file__`, overridable by `SRC=` or one argv; (2) `build()` armed the scratch tree with `symlink_to` alone - on a box without the symlink privilege (Windows, dev mode off) every one raises `WinError 1314`, so it now falls back to copying the top-level `.py` it actually needs, and NEVER arms `data/` (a symlinked `data/` would have let a test read his tapes); (3) with no symlinks at all `dst` did not exist - a dotfile copy then hit `FileNotFoundError`, so `build()` makes its own dirs first. Reproved all four ways at `c8dda38` in a clean tree: `SAFE TO APPLY` · `22 passed` · `95 passed in 46.42s` with his suites · harness **`mutations that did NOT flinch: 0 []`** run FROM OUTSIDE the repo (cwd `/home/user`, no `SRC` set) - and the no-symlink box simulated: scratch built, `entries 186`, `tools/*.py 24`, `data armed: False`, `22 passed` inside it. The handover is therefore **re-cut** (twice - see the next paragraph): `room_e_shadow_c54db07.patch` (838 L / 43,585 B / sha `f5c34bf8df8e0e74`), superseding `b5f9e94` / `b94e3716737f9573`, whose file I deleted so a wrong sha cannot be sent by accident; the 22 tests he already applied are UNCHANGED (byte-identical), and for the harness alone there is a 1-file fix `room_e_harness_fix.patch`, verified to apply with rc 0 to the copy ON HIS BOX and to produce my fixed file exactly. `tools/factory2_hands.py` and `test_factory2_hands.py` needed no change - `grep -c /home/user` = 0 in both.
+
+**LAW 85 (for the map).** *Ship the box, not the author.* Handover code must not know where I live: no absolute path of my sandbox anywhere (test it: `grep -c "$HOME" <file>` = 0), and it must be run ONCE with my advantages taken away - another cwd, no env, no symlink privilege, a fresh clone at the recipient's tip. The 22 passing tests proved the ROOM; it was the failing harness that proved the HANDOVER, and it could only fail on his machine, so I had to reproduce his machine here, from his error text. A safety net is only tested where it can fail.
+
+**AND THE SAME BOX CAUGHT IT TWICE (`2026-11-23`, 18:2x UTC).** After the SRC fix his run printed `HARNESS FIXED` +
+**`22 passed in 0.38s`** and then died in the CODEC: `UnicodeEncodeError: 'charmap' codec can't encode character '\u2713'`.
+My `FLINCH ✓ / NO FLINCH ✗` marks are unprintable on a Windows console on the default code page - the guard worked, the
+**printing** died, and my proof-run had passed only because my box is UTF-8. Reproduced here deliberately
+(`PYTHONIOENCODING=cp1252`): the old line gives `rc=1` with the owner's exact message, the fixed line gives
+`mutations that did NOT flinch: 0 []`. Audited the whole handover rather than the crash site: the ONLY non-ASCII glyphs
+in shipped STRINGS anywhere were those two; `tools/factory2_hands.py` carries `…` x1 and `·` x5 but an AST walk shows
+every one inside a docstring or comment (`REAL code (returned/printable): NONE`), and `test_factory2_hands.py` is clean.
+Fixed two ways: ASCII-only verdicts, plus a `stream.reconfigure(encoding="utf-8", errors="replace")` belt.
+
+**LAW 86 (for the map).** *A verdict that cannot be printed is not a verdict.* Whatever a tool says out loud must be
+encodable on the RECIPIENT's console - ASCII glyphs or an explicit `reconfigure` - and a handover is not proven until
+it has been run once with `PYTHONIOENCODING=cp1252`. LAW 85 and 86 are the same lesson twice in one hour: I had
+tested the ROOM on my box and called the HANDOVER proven.
+
+**Handover re-cut again: `room_e_shadow_c54db07.patch`** (838 L / 43,585 B / sha `f5c34bf8df8e0e74`, +820/-0;
+`mutate_hands.py` 112 -> 131 lines, the other two files byte-IDENTICAL so his applied `22 passed` still stands). The
+1-file console fix for the copy he now holds is `room_e_harness_fix.patch` (30 L / 1,570 B / sha `1fac9bd39f825fd8`) -
+and note how it was made: my first two attempts cut it with `git diff <old-ish>..HEAD` and it FAILED to apply
+(`patch does not apply`, twice) because I assumed which base his box had; the shipped patch was built from the TWO
+BLOBS with `difflib` and verified to apply `rc=0` to a file made from `1765c5e` and to yield mine byte-identical.
+Re-proved in a clean tree at `c8dda38` with the re-cut patch applied: `22 passed` · harness on a cp1252 console
+`0 []` · `95 passed in 50.87s` with his suites. Stale files deleted from the workspace so a wrong sha cannot be sent:
+`room_e_shadow_1765c5e.patch` is gone; `5000270031197601` (the first fix patch) is superseded by `1fac9bd39f825fd8`.
+
+**ROOM E IS CLOSED AS PROVED SHADOW CODE, ON THE OWNER'S OWN MACHINE (`2026-11-23`, 18:4x UTC, bash tab 2).**
+The three receipts, in order, from his paste: `HARNESS FIXED` · **`22 passed in 1.62s`** · **`mutations that did NOT
+flinch: 0 []`**. Before today the 0-survivors proof existed ONLY on my box, which is exactly the gap LAW 85 was
+written about; it is closed. Nothing of his was modified to get it: the two commands were (1) a strip of the two
+unprintable glyphs from `mutate_hands.py`, MY file, and (2) the harness, which writes only into a
+`TemporaryDirectory` and never arms `data/` (grep, measured: `data/` referenced **0** times in the module and **0**
+times in the tests). His live loop kept running in tab 1 throughout.
+
+**The topology, corrected at the owner's word - and it is my error, not his.** I had carried 'Windows 1 = trading,
+Windows 2 = the quiet one for my commands' from earlier in the day, and when his probe output looked like a second
+box I invented a reason for it ('windows 2 has no clone') instead of asking. He has now said it plainly: **one
+computer, two bash tabs** (`nov23_windows2_probe.sh` is mis-named, and so is every 'windows 1 / windows 2' sentence
+in my messages). The `FACTORY2_TODO.md` header line 'the noisy house (Windows 1) is never touched' is therefore
+rewritten as the rule that actually protects him: **do not write a file the loop imports, do not edit his tracked
+files, do not touch `data/` - and a second tab is then safe**, because the constraint was never the machine, it was
+the write. LAW 87, from the wrong-machine story: **ask what the box IS before deciding what is safe on it**; I read
+'the loop is running in windows 1' as a fact about hardware when it was a fact about a tab, and built two pages of
+sequencing on it. A mis-named file survived into the papers, which is LAW 83 wearing a different hat.
+
+
+**LAW 88 (for the hands, and against myself).** *A diary pen must never `str()` what it is handed.*
+My own tests wrote `Pen(lines.append)`. `Pen.__init__` did `str(path)`, and `str()` of a bound method is
+a **filename** - so 23 diary files named `<built-in method append of list object at 0x...>` appeared **in
+the repo root**, one of them 930 B of real diary JSON, on a box that also holds the owner's `data/`. They
+were committed before I noticed, because I asked `git diff --numstat` for a file count and got 25 rows of
+`<built-in` instead. `Pen` now raises `TypeError("Pen wants a path or None, got <type>")` at construction.
+The law is not "test your paths": it is **a writer that accepts a job instead of a place must fail loudly,
+because the filesystem will happily accept whatever you call it.** And a handover patch is not reviewed
+until its FILE LIST has been read line by line - a diff with a count you did not expect is a bug found,
+not a detail to explain away.
+
+**LAW 89 (for the block, and against my memory).** *A path in a handover is a claim, and an unmeasured claim
+is a bug.* I sent the owner `cd /c/Users/Jafar` for `nov18_data_inventory_block.sh` because the **report**
+landed in `$HOME` last time and I remembered that as the **script's** folder. Four commands, four
+`No such file or directory` - and note what that failure did NOT produce: no wrong result, no damage. A
+wrong path fails loudly; a wrong `cwd` in a script that also writes is a different story. From the same
+run: he had **four** `inventory_*.txt` reports (`19451 / 27955 / 31650 / 6997`) and I nearly read
+"`inventory_27955.txt`" as *the last run, therefore v7*. It is not - the file name carries a `$RANDOM`
+number and nothing else. The report's own line 1 stamps `== DATA INVENTORY v7 ==`, so **the version lives
+inside the artifact, never in my memory of the order**. Before I quote a number, I quote the version stamp
+that produced it.
+
+**LAW 90 (for the process).** *The map outranks my prose.* The owner's standing instruction this session:
+**keep your eyes on the Holy Book and the FACTORY2 map, and book every change as we make it.** The map is
+the path; my messages are commentary. Two failures of exactly this law were found in one day, both in
+pages the owner reads: `OVERVIEW.md:126` still said `Room E: not built, on purpose` after Room E had been
+built AND proved on his box, and `OVERVIEW.md:128` told him to set `DAYS="2026-11-16"` **in a script that
+has no `DAYS` knob** (that knob belongs to `nov18_row4_band_block.sh`). A stale page does not merely fail
+to inform - it **manufactures a wrong command**. So: when a step closes, the closing sentence is written in
+the same turn, in the same commit, in all four pages, or the step is not closed.
+
+**Room E, 12c - the wiring, booked as it happened.** `run_cycle(..., shadow=None)` now accepts a dict and calls
+`shadow["cycle_hands"]`; `tools/gates_replay.py` grew `--hands-shadow`, threaded as a real `hands_shadow`
+PARAMETER (my first draft read `getattr(args, ...)` inside `replay_day`, which has no `args` - `NameError` on
+every sail, caught by **10 failing tests**, because this house's own tests spawn real replay processes; my
+reasoning would never have caught it). The hall **does not import** `factory2_hands` - the caller hands over the
+function, which is how `gates_replay.py:1002` already documents it should be done. Rehearsed here: `--demo --once
+--dry` exits **0** in 1.7 s with g1/g2/g3 printed and one diary line (`NO-VERDICT`, correctly, no order). Numbers:
+`test_factory2_hands.py` **30 passed**, three suites **103 passed**, mutations **15 / 0 survive** incl. cp1252.
+Handovers cut from the owner's `c8dda38` blobs: `room_e_wiring_91efdd0.patch` (`5f1ed22ca28f18d8`, 5 files,
++1057/-4) and the drop-in `room_e_wiring_91efdd0.zip` (`74bbb10e0cb07e0b`). **Status: SHIPPED, awaiting his
+`APPLIED` + `103 passed`.** The map's ladder sentence `--demo -> one synthetic heartbeat` is corrected below:
+`--demo` chooses the SOURCE and **loops forever**; `--once` is what stops it.
+
+
+**LAW 91 (for the process - the owner's words, `2026-11-24`).** *There are three pages. Notes go IN them,
+not beside them.* I had been ending each round trip with a new `.md` in the workspace - `nov24_block7_and_12c.md`,
+`nov24_errand1.md`, `nov24_errand1_take3.md` - and each one was a **second map of the same territory**: the
+moment a receipt arrived, three pages disagreed about where we were and only one of them was the book. That is
+LAW 90 wearing my favourite hat: **a note outside the papers is a note nobody audits, and a note the papers
+do not know about is a lie waiting to be quoted.** From now: `HOLY_BOOK.md` (laws and decisions) +
+`FACTORY2_MAP.md` (where we are) + `FACTORY2_TODO.md` (the rows), one commit, mirrors re-copied and
+hash-compared - and **a block that must be pasted lives in the chat, not in a file.** `OVERVIEW.md` is a
+convenience mirror of the map, which is exactly why its two stale sentences could misfire (LAW 90): it now
+carries no verdict the three pages do not. Also deleted, at the owner's instruction and by my own law:
+`FACTORY2_MAP_new.md` (975 L, superseded, still carrying the OLD ▸NOW text) - a mis-named duplicate map is
+how a wrong page gets read as the right one, and its re-typeset had been blocked for days on a lost `/tmp`
+template anyway.
+
+
+**Row 4, CLOSED `2026-11-24` by the owner's own run.** `JSONL_CAP_MB=2000`, script sha `790a9f6e76026479`,
+exit 0 at `15:44Z`, report `/c/Users/Jafar/inv_1116_big.txt`. The decisive line, printed BY THE READER:
+`diary_20261116.jsonl -> CAPABLE of a measured zero (it has a `notes` field, read WHOLE)` and, for the day,
+`papers 0`. So **2026-11-16 is ungradeable from paper AND from diary notes** - and the `0` is now evidence,
+not silence. The run also widened the claim: **0 full-cut events across 47,580 notes-capable lines, 65 of 66
+files read WHOLE** (before it: 60 files / 27,437 lines, because the cap bound the SCAN, not just the file).
+
+**LAW 92 (for every reader I write from now on).** *A reader that truncates must name what it truncated, and
+a zero from a truncated reader is never evidence.* v7 passed this test - `:128` printed
+`the byte budget TRUNCATED 1 of 185 files: a zero above may be a note BELOW the cut - raise JSONL_CAP_MB
+before believing it`, `:164` named the day's file and its WHOLE/PARTIAL state, and `:169` admitted
+`61 *.jsonl NOT scanned (budget)`. That is why row 4 took one more command instead of one wrong verdict:
+**the confession was part of the tool.** But the corollary is the part I nearly missed - the budget is
+GLOBAL (`:111`: `partial means the byte budget cut the file short`), so raising `JSONL_CAP_MB` does not
+merely *rescue* a truncated zero, it *enlarges the population* the verdict is quoted over: 60 files became
+185, and "0 events" silently went from "of 27,437 lines" to "of 47,580 lines". **State the denominator in
+the same breath as the count, or the number is a mood.** Anything still unread (`tfrobot_M3_2026-10-16.jsonl`
+PARTIAL, 61 older `.jsonl`) stays an OPEN LIMIT, never a verdict, and October is left open on purpose: the
+gradeable set is the five days with papers (11-04, 05, 06, 12, 13).
+
+**One fact from the same run, for the plan, not for the row:** the newest file in `data/` was
+`2026-11-24 15:44:03` - **0 minutes old**, with `decisions_log.csv`, `market_quality_evidence.jsonl` and
+`diary_20261124.jsonl` all stamped the same second. **The live loop is running right now, on real tape.**
+So "test it on real-time market data" is not a future thing to arrange: the data is already arriving. What
+is missing is only the factory's own engine being turned over once, deliberately - which is exactly rung 1.
+
+
+**LAW 93 (for every handover).** *Prove the DELIVERY, not only the code - and know the tree you are
+patching.* Two of my own deliveries were broken while the code inside them was fine. (a) The wiring patch
+was cut as `git diff c8dda38..HEAD`, which is correct against his **tip** and wrong against his **applied
+state**: it creates `tools/factory2_hands.py`, `test_factory2_hands.py` and `mutate_hands.py` from
+`/dev/null`, and his Room E patch already holds all three (`git cat-file -e c8dda38:<file>` -> absent,
+`1765c5e:<file>` -> EXISTS - I checked that and still shipped the create-from-nothing diff). A
+`git apply` failure there is **my base assumption**, not a conflict in his tree, and it would have sent us
+both hunting for a conflict that never existed. Fix: cut the patch **from the state he proved** (399 L,
+`d1bae9aaf841a244`, a true diff of all 5 files) or hand complete files. (b) My first zip was built with
+`python3 -m zipfile -c`, which **stores basenames only** - `tools/factory2_hands.py` became
+`factory2_hands.py`, so the drop-in silently landed two files in the repo root. A container format is part
+of the deliverable: rebuild with explicit arcnames, then **list the entries** and **extract it into a copy
+of his tree and run the suite** (`103 passed` twice, zip path and patch path, on a clean `1765c5e` worktree).
+A handover is not shipped when the bytes hash right; it is shipped when the RECEIVING tree runs green.
+
+**And the same law indicts my prose twice over.** `cd /c/gitHub/Gold-BookMap` - the repo is at
+**`/a/gitHub/Gold-BookMap`**, printed in his own prompt bar in every paste and hard-coded at
+`nov18_data_inventory_block.sh:27`. I read that line to answer a *different* question and still wrote `/c/`
+from memory. LAW 89 said "a path in a handover is a claim"; the practice now is: **copy the path from the
+page that shows it, never from the head that typed it before.**
+
+
+**His wiring attempt, `2026-11-24` 16:0x - and the finding it made.** `git rev-parse` -> **`c8dda38`** ✅
+(my base was right). The zip was **not in `~/Downloads`** - a present_file is a DOWNLOAD, and I said
+"save it to `~/Downloads`" as if that were an action you take after the fact. The run therefore hit the
+repo **un-wired**: `grep -c` -> `0` / `0`, and `test_factory2.py test_committee.py` -> **`1 failed, 94 passed in
+239.22s`**. Two things in that line, one of them new to us:
+
+1. **`1 failed` is NOT mine.** `test_day_grammar_is_canonical_for_the_sea` asserts `canon_day`/`day_token`
+   in `tools/gates_replay.py`. I extracted his tracked blob `c8dda38:tools/gates_replay.py` and my
+   `91efdd0` one and ran all six assertions against **each**: **6/6 OK on both.** The code in git passes
+   in both places. So the failure lives in **his working tree not matching his own commit** - or in a
+   shadowed `gates_replay.py` found earlier on `sys.path` (the root of that repo holds the whole old
+   factory, and the test does `sys.path.insert(0, HERE/"tools")`, so a root-level namesake is reachable).
+2. **A drop-in is now the dangerous kind of delivery, not the safe one.** It OVERWRITES tracked
+   `factory2_gates.py` and `tools/gates_replay.py`. If his working tree holds uncommitted work in either,
+   my extraction destroys it silently. PREFLIGHT BEFORE EXTRACT: `git status --porcelain`. That is the
+   first row of the road, above every handover, and it is why "103 passed" must be quoted together with a
+   CLEAN TREE, never alone.
+
+Also booked: his suite takes **239 s** where mine takes 43 s - his tree is bigger (the old factory lives in
+it), so `pytest` is collecting far more files. Not a fault, a fact about timing, and the reason I ask for
+the `tail -3` rather than the whole scroll.
+
+
+**LAW 94 (for every test I ship or vouch for).** *A test that asks the world "which days are there?"
+must be told the answer, or it is not a test - it is a weather report.* `tools/gates_replay.available_days()`
+already knows this and has a `scoped=True` contract for exactly it; but the default path opens with
+`import audit_day` and asks its OWN finder, whose `ROOT` is `Path(__file__).resolve().parent`. Result:
+on any machine with a real `data/`, the hermetic-looking fixture `gr.available_days(base, base, 9)`
+returns the OWNER'S days - `['2026-12-01','2026-11-30','2026-11-29','2026-11-24',...]` - and the fixture's
+own two days fall out of the truncated list. Measured on my recreation, not inferred: **no `data/` ->
+passes; fake drawer with three newer `ticks_*.csv` -> fails, exactly his failure.** Which is the real
+danger: **this bug can only be seen from a machine that has data**, so mine was clean and I nearly called
+his red result "a dirty working tree". Two rules come out of it. (1) When a failure appears ONLY on his box,
+first build the condition here before explaining it away - I had to add real tape to my fake tree to see it.
+(2) `1 failed, 94 passed` was booked as a FINDING, not an obstacle: the same zip now carries an inert
+`tools/audit_day.py` shadow (every entry point raises, and both call sites wrap `import audit_day` in
+`try/except Exception`), which makes the fixture honest again, leaves the tracked suite at `73 passed`, and
+delivers `103 passed` - **verified on a recreation of HIS tree** (`c8dda38` + his untracked Room E trio),
+not on mine. A green run in my sandbox is a claim; a green run in a copy of his is evidence.
+
+
+**LAW 95 (the patch path is DEAD in this repo, by my own hand).** *You cannot patch a file you have
+already told the owner to edit in place.* `git apply` refused: `patch failed: mutate_hands.py:102`. Not a
+conflict in his work - his copy of that file is not the text my patch expected, because **my own earlier
+blocks had already rewritten it**: the 2026-11-23 `sed -i 's/\r$//'` (CRLF -> LF) and the glyph strip that
+removed the `✓` I had put near line 111. A patch is a *context* request - "find these 3 lines, then change
+this one" - so every hand-edit I instruct on a file makes the next patch against that file less likely to
+land. And note what the refusal DID: `git apply` is atomic, so **nothing was written**, which is why his
+suite still read `1 failed, 94 passed` = the untouched `c8dda38` state. A refusal is a guard, and guards
+should be thanked, not forced with `--reject` / `patch -f`.
+**Rule from now:** files the owner may have hand-edited (my shadow copies: `tools/factory2_hands.py`,
+`test_factory2_hands.py`, `mutate_hands.py`) are **replaced wholesale**, never patched; only his CLEAN
+TRACKED files are patched - and after any replacement the diff is read back (`git diff --stat` must name
+exactly the 2 tracked files) so an unintended change to `factory2_gates.py` / `tools/gates_replay.py` is
+seen, not trusted. `git diff` then remains his UNDO for the tracked two.
+
+
+**12c CLOSED by the owner's receipt, `2026-11-24` 16:3x.** Verbatim, so the page carries the thing itself:
+
+```
+57e14ff7a8a6cc3d
+warning: in the working copy of 'Workspace/26,09,16-23.20.bmw', LF will be replaced by CRLF ...
+ Workspace/26,09,16-23.20.bmw | 204 ++++++++++++-------------------------------
+ factory2_gates.py            |  18 +++-
+ tools/gates_replay.py        |  19 +++-
+ 3 files changed, 88 insertions(+), 153 deletions(-)
+103 passed in 179.15s (0:02:59)
+```
+
+Four readings, all of them measurements and none of them a hope. (1) **`103`** = my `95 tracked + 8`, i.e.
+his `94 passed + 1 failed` became **103 green** - the arithmetic of the day-grammar shadow doing its job.
+(2) The wiring is **+18/+19 on exactly the two tracked files** - nothing else of his moved, and `git diff`
+is his undo. (3) **`Workspace/26,09,16-23.20.bmw` at `204 ±` was ALREADY dirty before I sent anything** -
+his `git status` in the preflight showed ` M` on it, and the `LF will be replaced by CRLF` line is git's
+standing `.gitattributes` warning on a large text-y blob, not damage from the zip. I say this because a
+warning printed right after my command looks like my command, and the honest answer was in the earlier
+paste, not in the later one. (4) **179 s where mine took 40 s**: his tree collects the whole old factory.
+A timing difference is data about his tree, not a verdict about my code.
+
+Ladder L1 is now the step, and it is measured, not promised: `--dry` means `Pen.__call__` prints and
+returns before the `open()` (`factory2_gates.py:321`), and an isolated rehearsal against a shadowed
+`GATES_DATA_DIR` printed `new files in the real data/ : NONE` with g1 `MOOD=WALK | LEAN=DOWN` and
+g3 `RUNG=demand | PUSH=NONE | TOLL=unpaid`. One heartbeat, one line of paper, and it stops.
+
+
+**Ladder rung L1 PASSED on the owner's box, `2026-11-24` 16:59:53Z - the engine turns over.**
+`ls -1 data | wc -l` was **1241 before and 1241 after**; `exit 0`; one diary line printed to the console
+by `--dry`, and it is a *complete* one: `g1 MOOD=WALK | LEAN=DOWN` · `g2 LOCATION=today_open | CANDS=6` ·
+`g3 RUNG=today_open | PUSH=NONE | TOLL=unpaid | L3Q=synthetic | VERDICT=UNDECIDED` · `final.allow=false,
+fails:[NO-VERDICT]` · `price/rung 2032.63` · `git c8dda38` · `ver factory2.2026-11-13.5`. Eyes saw, brain
+located, judge refused to invent, paper recorded, process **stopped by itself**. On synthetic tape, in a
+repo that has his live loop next door, with **0 files added to `data/`** - which is what the rung is for.
+And note the refusal is the PASS condition, not a problem: a heartbeat that manufactured a `ticket` from a
+`DEMO` tape would be the bug.
+
+**LAW 96 (for the labels the paper carries).** *A stamp is a claim; grep where its value comes from before
+you trust it.* Reading his L1 line raised two, both measured in the source, neither a bug to fix tonight:
+
+- `"mode":"live"` on a `--demo` run. The mode is a **literal** passed to `run_cycle(..., "live")`
+  (`factory2_gates.py:608`); the actual source is computed one line earlier (`:600`, `source = "demo" if
+  a.demo else config.DATA_SOURCE`) and **never reaches the record**. So on the diary, a made-up-tape
+  heartbeat and a real one are indistinguishable by `mode`. It survived tonight only because `--dry` wrote
+  nothing. The independent tells that DO exist in his line: `L3Q=synthetic`, and the demo price `2032.63`.
+- `"git":"c8dda38"` is `git rev-parse --short HEAD` run at runtime (`:107`, called at `:359`) - the COMMIT,
+  not the tree. **His working tree is not `c8dda38`**: it is `c8dda38` plus my uncommitted wiring (+18/+19),
+  and the stamp cannot see that. A reader who grades tomorrow's diary will believe it came from clean
+  published code. That is precisely why the two tracked edits are his to COMMIT (the map's row-merge), and
+  why `git diff --stat` after any drop-in is read back rather than trusted. A label printed from intent is
+  not a measurement of state; either record the state (`git status --porcelain` count, or a
+  `git stash create` hash) or do not print the label as if it were one.
+
+
+**LAW 97 (the map's own vocabulary is a claim too).** *Before you tell a man a flag keeps him safe, grep
+that the flag exists.* For days the map's ladder said `--live --hall-off`, and I have been pasting it into
+blocks - **`grep -c "hall-off"` -> 0 in `factory2_gates.py` and 0 in `tools/gates_replay.py`**; the only
+`HALL_ARMED` in the whole tool is inside a **help string** (`gates_replay.py:1344`, explaining why
+`--hands-shadow` can never send). It is the OLD FACTORY's runner silencer, and the word survived into
+Factory 2's papers in **21 places** (map 8, book 9, to-do 3, overview 1), where it now reads as a promise
+that a flag exists. Two consequences, both good to know: (1) the safety he has been relying on is
+**structural, not switchable** - `order_send`/`MetaTrader5`/`mt5.` appear **0 times** in
+`factory2_gates.py`, so this factory writes paper and cannot do anything else; (2) if I had ever *added*
+the flag, the safety it implied would have been mine to test, and an untested switch is worse than none.
+The map keeps the old sentences (history) but the ladder section now CARRIES THE DEFINITION, so a reader
+cannot mistake the noun for a flag. LAW 96's shape again: a label that describes intent, not state -
+this time in PROSE, not in a record.
+
+**L2, attempt 1 - and the refusal was the point.** His `factory2_gates.py --once --dry` printed
+`exit 2` and left `data/` at **1241 -> 1241**. Reproduced on my copy: argparse's last line is
+`error: one of the arguments --replay-jar --replay-file --demo --live is required` (`:550`, a REQUIRED
+mutually exclusive group). So `exit 2` = "I never started", not "the robot failed" - and the block I wrote
+for him was MY bug: I put `--once` in the position of a source. The corrected rung, rehearsed here:
+`--live --once --dry` -> **`exit 0`**, one diary line `NO-VERDICT`, and it creates
+`data/gates_sandbox/` (the borrowed-writers drawer) - which is why a bare `ls -1 data | wc -l` is NOT a
+perfect guard and the honest one is a before/after file LIST plus a `grep -v gates_sandbox` diff.
+
+
+**Ladder rung L2 - the heartbeat PASSED, my GUARD failed. `2026-11-24` ~17:5xZ.** `--live --once --dry` ->
+**`exit 0`**, `git c8dda38`, and the diary line read `g1: MOOD=SLEEP | CERTAINTY=0 | MOVING=SETTLING` with
+`g3: SKIPPED (no rung under the feet - waiting is the answer)`. I did not take "SKIPPED" for a failure: the
+string is emitted at `committee.py:457`, and it is the judge SAYING NO on purpose - no rung means nothing to
+stand on. So L2 is green: **one heartbeat on the source his config names, paper written to the console, and
+the process stopped itself.**
+
+**LAW 98 (a guard that is not the same test on both sides is a rumor).** My block was
+`ls -1 data > before` and `ls -1 data | grep -v gates_sandbox > after` - I filtered the AFTER and not the
+BEFORE. `diff` then reported **209 removed lines and exit 1**, and every one of them was `gates_sandbox*`,
+which is exactly what the filter was for. **Zero files were added, zero removed: the run touched nothing.**
+A guard must be a comparison of like with like, or it manufactures fear - and the fear lands on the owner,
+not on me. Two corollaries, both from what those 209 lines actually were: (1) `data/gates_sandbox/` and its
+`_prev_*` set are the borrowed-writers DRAWER and they accumulate one pair per replay/sail (his listing held
+11-14, 11-17, 11-18 and nine pairs from TODAY) - so "the sandbox folders changed" is the NORM of running
+this factory, never a violation, and the honest guard must EXCLUDE them on both sides; (2) a **count can
+never see an append** - the loop is live in tab 1, so `diary_20261124.jsonl` grows every minute whatever I
+run - which is why the guard is now `stat -c '%n %s'` on the ROOT FILES only, with the caveat that a
+size/timestamp change there is HIS LOOP, not my command.
+
+**And a reading I must not slide past:** `L3Q` is NOT a "is the tape fake" field (it is the ladder-quality
+grade - `ok | stale | partial`, `test_committee.py:136`), so after L2 I still cannot tell from the diary
+alone whether his `--live` run ate real BookMap data or the `demo` fallback at `config.py:245`. The honest
+tell is `price` (a demo run is deterministic; his L1 demo printed `2032.6285770641107`) and the
+DATA_SOURCE value itself. **Ask, don't infer.**
+
+
+**LADDER L3: THE FACTORY RODE THE REAL FEED. `2026-11-24` ~18:0xZ.** `DATA_SOURCE = bookmapbridge` - printed
+by his own `import config`, not inferred - so the L2 heartbeat and this L3 run were fed by **the live BookMap
+bridge**, not the `demo` fallback. The L3 run (`--live --dry`, no `--once`) was alive for its whole 900 s and
+was stopped by `timeout` - **`exit 124` is the proof the loop was LOOPING, not a failure** - and `l3.txt` came
+back **0 bytes**, which looked like silence-but-nothing. It was not nothing: it was my block's bug, twice.
+
+**LAW 99 (the two traps in every "run it and look at the file" block).**
+1. **Buffered stdout + `timeout` = a run that leaves no evidence.** When `print()` goes to a FILE, Python
+   holds it in a block buffer; a clean exit flushes, a `SIGTERM` never does. Measured here, same command,
+   same timeout: no `-u` -> **exit 124, 0 bytes**; with `-u` -> **exit 124, 2,360 bytes of real diary
+   lines** (`NO-VERDICT`, correct). This is the SAME class as my `--demo --dry | tail` scare on 2026-11-24 -
+   **a loop that is running fine and prints to a pipe/file looks dead.** Every block that runs a LOOP into a
+   file must use `python3 -u`. LAW 86 again, one level down: not just "a verdict that cannot be printed is
+   not a verdict", but **a verdict that is never FLUSHED is not a verdict either.**
+2. **`$?` after a pipe belongs to the LAST command, never to the interesting one.** My line was
+   `diff before after | grep -v ...; echo "diff exit $?"`, so the "0 = PASS" he read was **grep's** verdict
+   on whether it printed anything. Proved both directions here: a diff with 6 changed blocks + grep printing
+   lines -> **0** (a red diff reporting PASS), and an identical diff + grep printing nothing -> **1** (a green
+   diff looking red). **The number must be captured, not inferred** - `diff > file; echo $?` then
+   `wc -l < file` then print both. And the guard's own arithmetic was honest: `262,263c262,263`, `306c306`,
+   `484c484`, `500,501c500,501`, `681c681` = **6 change blocks / 8 lines**, and `grep -v` ate the NAME of
+   5 of them; the only name that survived is `data/market_snapshot.json 573250 -> 582288` (+9,038 B), a file
+   **his tab-1 loop writes every minute**. My `2>/dev/null` swallowed stat's own lines, which is why the
+   `---`/`+++` headers dangled - a filter that eats names is worse than no filter, because it leaves a
+   number nobody can attribute.
+3. **And the safety question that actually mattered was measured, not asserted.** After 25 s of a live
+   `--demo --dry` LOOP in a folder containing a `data/session_levels.json` and a `last_book_state.json`,
+   **both files were byte-identical afterwards** (`isolate_data_dir()` + `--dry`). So the tab-2 factory
+   cannot corrupt the tab-1 loop's level file - which is the owner's standing fear, and it now has a
+   receipt instead of my reassurance.
+
+
+**Row 13 (the HANDS on a past day) - REHEARSED HERE, SHIPPED: `2026-11-24`.** The wiring proves itself on
+a tape: `--hands-shadow --no-diary` -> `146 cycles fed`, `HEALTH: PASS`, and the hands answered **inside the
+same diary line**: `"hands": {"notes": [], "refused": "HANDS-NO-VERDICT:NO-VERDICT", "status": "NO-PLAN",
+"v": "factory2.hands.2026-11-18.1"}` - `mode: "replay:tapes"`. 146 refusals on a monotonic ramp fixture is
+the CORRECT answer (no event, no plan); the wiring is what this row tests, not the verdict.
+
+**LAW 100 (the flags are not in my head).** Four mistakes in one rehearsal, all of them mine, all of them
+avoidable by asking the program instead of remembering it: (1) I have twice written `--day YYYY-MM-DD` in
+blocks - **no such flag exists**, the real pair is `--date YYYY-MM-DD` (a day) and `--days N` (an INT count,
+and it answered `invalid int value: '2026-11-13'`, which is the refusal that caught me); (2) `--no-diary`
+means "diary to stdout only" (`:1341`), which is exactly what a rehearsal wants; (3) **`--max-cycles 20`
+silently starved the run twice** - the warm-up is charged from the START of the WINDOW (`:609-619`: 60 M1
+candles, and a floor of `every*60` minutes is ENFORCED, so `--prewarm 2` is raised, not honoured), so a cap
+below the warm-up means every cycle is "skipped: warm-up" and the report still reads like a clean short run;
+**drop `--max-cycles`, widen the WINDOW** instead; (4) my first fixture wrote `,TRADE,` and the tape's own
+filter reads `,Last,`/`,Trade,` - **case is grammar** (`:663`), and a fixture that no reader accepts produces
+"0 prints" and tempts me to blame the reader. Measured fix for all four: 205 minutes of tape, `--window
+06:00-09:25 --every 60` with NO cap -> `146 cycles`. The law: `--help` is one command; run it before
+inventing a flag, and when a rehearsal prints ZERO of something, suspect the FIXTURE before the FACTORY.
+
+
+**ROW 13 PASSED ON THE OWNER'S REAL TAPE - THE HANDS MOVED. `2026-11-24` ~18:3xZ.** `--date 2026-11-13
+--window 06:00-21:00 --every 180 --hands-shadow --no-diary` -> `exit 0`, **`75 cycles fed`**, `HEALTH: PASS`,
+`allowed 7 of 75`, and the hands paragraph landed **inside the same diary lines** as the gates:
+
+```
+38  "hands": {"event":"", "status":"HELD",  "ticket":"SHADOW/REPLAY/2026-11-13:57", "tp":3853.3675}
+19  "hands": {"event":"", "status":"HELD",  "ticket":"SHADOW/REPLAY/2026-11-13:28", "tp":3868.200...}
+13  "hands": {"notes":[], "refused":"HANDS-NO-VERDICT:NO-VERDICT", "status":"NO-PLAN"}
+ 1  "hands": {"sl":3912.04, "status":"FILLED", "ticket":"...:57", "tp":3853.3675}
+ 1  "hands": {"sl":3907.46, "status":"FILLED", "ticket":"...:28", "tp":3868.200...}
+ 1  "hands": {"notes":[], "refused":"HANDS-NO-VERDICT:NO-EDGE",   "status":"NO-PLAN"}
+```
+
+That is the whole Room E contract, on real November-13 tape: **two positions opened on two GOs, each held
+for its own shadow ticket, and 13+1 honest refusals when the judge had nothing.** The numbers to remember:
+the two `FILLED` = the 2 GOs that produced plans; 38+19 `HELD` = never re-opened while a position was
+already open (the one-position law held for 57 cycles); the tickets are `SHADOW/REPLAY/`-prefixed, so they
+could not be mistaken for a broker ticket if they ever escaped. Also from the same line: `1744076 ticks-tape
+Mbo row(s) ignored as fake-id` - the house's own fake-order trap swallowed 1.7 M rows on a real day, quietly,
+as designed. And `post-last-row 103` is not an error either: the day's tape ends mid-window and the replay
+refuses to invent candles after the last row.
+
+**LAW #1, checked without me touching his files.** `tools/factory2_hands.py:304` is literally
+`res["tp"] = float(pos["tp"])   # echo, never move: Law #1`, so on HIS OWN `~/r13.txt` the frozen target is
+`awk 'match($0,/"ticket":"[^"]+"/){t=substr($0,RSTART+11,RLENGTH-12)} match($0,/"tp":[0-9.]+/){v=substr($0,7);print t, v}' | sort -u |
+awk '{c[$1]++} END{for(k in c) print c[k], k}'` -> **one line per ticket, count = how many times the (single)
+tp was echoed.** Two counts for one ticket would mean the target moved, i.e. LAW #1 broken. The same is NOT
+true of `sl` (`:302` re-reads `m["sl"]`): break-even is the law that DOES move the stop, so a changing `sl`
+is a working manager, not a violation - and `be_done` is not echoed into the diary line at all, which is
+why row 14 needs its own report rather than a grep of this file. My earlier `grep -oE '"status": "[A-Z-]+"'`
+style guesses would have missed `WAIT`/`CLOSED` had they appeared; the keys in the record are exactly
+`event, closed, status, ticket, sl, tp, refused, notes, v` (`:303-325`), and that is what the block asks for.
+
+
+**Row 14 - the frozen target gets a TOOL before it gets a claim (`2026-11-24`).** Law #1 ("TP never moves")
+lives at `tools/factory2_hands.py:304`: `res["tp"] = float(pos["tp"])   # echo, never move`. A grep cannot
+prove that - two values have to be COMPARED per ticket. So `tpcheck.py` was written (kept in the owner's
+HOME, deliberately not in his repo: the to-do is papers and code I hand over, not litter he must later
+explain) and **mutation-tested before it was offered**:
+
+| input | what `tpcheck.py` printed | verdict |
+|---|---|---|
+| fixture, 2 tickets, tp echoed | `1 tp value for ...:28` / `...:57`, `moved target: 0`, exit 0 | PASS |
+| **planted** one changed tp on the 2nd line of ticket `:57` | `2 tp values ...:57  <-- LAW #1 BROKEN: 3853.3675, 3860.00`, exit 1 | **it FLINCHES** |
+| no-space JSON (his real format) | same, correct | format-tolerant |
+| a log with NO positions | `That is NOT a pass and NOT a fail: the law is UNGRADED by this file`, exit 2 | **refuses to fake a pass** |
+
+**My first plant was wrong and it is worth recording:** I moved `3853.3675` with a plain `sed`, which rewrote
+BOTH lines of that ticket - so the checker "passed" a file where both entries agreed, and I nearly reported
+`the checker failed to catch it`. It was my fixture, not the checker: the pair `(ticket, tp)` was identical on
+both lines and `sort -u` collapsed them. The law was that a guard must be seen to fail, and the plant had to
+be built line-targeted (`sed '2s/.../.../'`) to actually disagree with itself. Same reason `paste` was
+abandoned: it aligned the ticket list (1 line) with the tp list (3 lines) and produced a silent lie - a
+`grep|grep|paste` check would have PASSED a broken law. A pair must be read **within one line**, by one pass.
+
+For the record: my own wandering-tape fixture (54,000 rows, 900 min, price 1667.90-2037.53) produced
+`281 cycles`, `NO-VERDICT=281`, `allowed 0` -> **no positions at all**, so `tpcheck` on MY log says UNGRADED.
+The law can only be graded on HIS `~/r13.txt`, which held 2 real tickets. That is the difference between a
+tool that reports and a tool that performs reporting.
+
+
+**Row 14, first half PASSED on his real tape - and the tool had to be broken first.** `tpcheck.py` on
+`~/r13.txt` -> `tickets: 9 | moved target: 0`, exit 0. The LAW #1 result (no target ever moved) is real;
+the **9** is not: his log holds **2 hands positions** (`SHADOW/REPLAY/...:28` and `:57`) and **7 gate
+verdict tickets** (`REPLAY/...:NN:G3`). **v1 graded the wrong namespace** - and it did it invisibly, because
+a diary line carries `"ticket"` TWICE (`final.ticket` from the judge, `hands.ticket` from Room E) and
+`TICKET.search(line)` returns the FIRST, i.e. the gate's, whenever the hands paragraph had no ticket of its
+own. Three lessons, all booked as LAW 101.
+
+**LAW 101 (a grader must look at the object the law talks about, and must be seen to fail).** (1) A field
+that appears twice in a record needs a SCOPE, not a regex: v3 slices the `"hands": { ... }` block by BRACE
+COUNT and searches only inside it. (2) A checker whose PASS is "counts of unique values == 1" silently
+grades ONE-line tickets as frozen forever - **it cannot see a single-line target move at all**, so v3 also
+counts `hands lines with NO ticket (allowed, not opened)`, which is the gap v1 could not distinguish from
+success. (3) **Mutation-test on a fixture that can actually violate the rule**: I planted a changed `tp`
+three times before it was a real plant - once it moved BOTH lines (the pair stayed unique), once it hit the
+GATE's `tp` (v3 correctly ignored it - accidentally proving the scoping worked), once onto a ticket that had
+only ONE line (still one value, still "frozen"). Only a SECOND HELD line for `:57` with a different `tp` made
+it print `2 tp values ... <-- LAW #1 BROKEN: 3868.2, 3870.0`, exit 1. A guard tested against a fixture that
+cannot fail is decoration - and my first "it failed to catch it" almost became a bug report against my own
+tool, when the bug was in my plant.
+
+**What his numbers mean, read against the code:** `allowed 7 of 75` is the JUDGE firing; 2 became positions.
+The path after a GO is `plan_from_fire` -> `stage_order` -> `open_shadow`, and when the shadow does not open,
+`cycle_hands` writes `res["reason"]` (`factory2_hands.py:319-325`) WITHOUT a ticket - so the missing five are
+not missing, they are answered in that field, and the next question is what those five `reason`s were.
+**"7 allowed, 2 opened" is also the honest shape of a strategy**: an allowed jump that cannot be filled,
+bracketed or sized must be declined, not forced.
+
+
+**Row 14, v4: one tool, BOTH laws of the lawn - and his log already holds the first realised trade.**
+His status tally came back `58 HELD / 14 NO-PLAN / 2 FILLED / 1 CLOSED` = **exactly 75 = the cycles fed**:
+every cycle got an answer, none silently skipped. And `1 CLOSED` means the replay did not just open and
+hold - **it exited**, and `close_shadow` writes a record into the diary line: `rule, side, entry, exit,
+points, usd, lots, be_done, tp_frozen` (I checked the shape by generating a line and grepping it back).
+So the "protect the winner" half is gradeable from `~/r13.txt` after all - **my earlier claim that it
+needs new code was too strong**: `be_done` is absent from HELD lines, but the close record carries it,
+and `manage_shadow` echoes `"event"` (`BREAK-EVEN at r=0.79>=0.75`) on the cycle where the stop moved.
+
+`tpcheck.py` v4 (86 -> 122 L) now grades, per position ticket, inside the `"hands":{...}` slice only:
+**LAW #1** `tp` takes exactly one value; **LAW #2** `sl` takes at most TWO and every step moves TOWARD
+profit - BUY never down, SELL never up (side inferred from `tp` vs `sl`, since the hands line has no
+`side`; the close record confirms it). Mutation-tested on 5 fixtures: legal break-even exit 0; stop
+pushed back 3900.10 -> 3911.00 -> `LAW #2 BROKEN: stop moved AWAY from profit (SELL)` exit 1; a third
+edit -> `stop edited 3 times`; target moved -> `LAW #1 BROKEN`; no position -> `UNGRADED` exit 2.
+
+**Two of my own bugs, both caught by running the tool instead of reading it.** (a) **His "v3 run" was v1** -
+output said `tickets: 9` and printed none of the lines v3 always prints. A grader must PROVE which build
+it is: v4's first line (`gate verdict tickets`) is the tell, and `grep -c 'POSITION tickets' ~/tpcheck.py`
+says it without running anything. (b) My "good" fixture FAILED at first: I gave a **SELL** a break-even
+that raised the stop - the tool was right, my numbers were wrong, and had I "fixed" the tool to accept it
+I would have installed a law that allows widening a stop. (c) `if not bad` reported breaks only until the
+first one silenced the rest - fixed with a per-ticket `before` count, so every ticket gets its own line.
+
+
+**LAW 102 (a hand-over must be ONE small paste block, and must prove its own build).** `tpcheck` failed to
+install TWICE, quietly both times: I presented a file for download, he ran `~/tpcheck.py`, and the output
+LOOKED PLAUSIBLE because v1 and v3/v4 print nearly the same words. Only the numbers differed (`tickets: 9`
+vs `POSITION tickets: 2`) and only because he happened to paste enough of the output for me to notice the
+missing tell-tale line. Nothing in the run said "you are running an old build". Two rules follow:
+(1) **stop using downloads as the delivery channel** - the tool now ships as one `cat > file <<'PYEOF'`
+block, small enough to survive a terminal; (2) **the tool prints its own version on its first output line**
+(`tpcheck v4s | positions: N`), so a stale install cannot masquerade as a fresh one. A grader whose build
+you cannot identify from its output is a grader you cannot trust.
+
+**v4s = v4 compressed for pasting, same laws, 48 lines / 2,392 B / 0 non-ascii, re-proven on 12 fixtures**
+(6 shapes x both JSON spacings, since `--no-diary` output spacing is a build detail, not a law): legal
+break-even `exit 0`; stop pushed back `3900.10 -> 3911.00` `exit 1` x2 (`AWAY from profit` + `edited 3
+times`); a 3rd edit `exit 1`; target moved `exit 1`; no-position log `exit 2` UNGRADED; **a log with only
+report lines (no `hands` at all) also `exit 2`** - it does not read "nothing graded" as "nothing wrong".
+Module-level script, no `main()`, no `def`s beyond `hb()` - every line that survives a paste is a line that
+can be read on his screen. `d += (l[k]=="{") - (l[k]=="}")` keeps the brace count honest for the nested
+`closed:{...}` inside a hands block, which is where `be_done` and the exit `rule` live.
+
+
+**LAW 103 (a check that CANNOT fail on the file you point it at is not a pass - it is a decoration).**
+Row 14 came back green - `tpcheck v4s | positions: 2 | law breaks: 0`, exit 0 - and I must not bank the
+half of it that cannot be seen. Read the manage branch (`factory2_hands.py:296-312`): when a position is
+already open it writes **only** `res["event"]` and `res["tp"]`. **It never writes `res["sl"]`.** So a diary
+line carries `sl` exactly once - on the `FILLED` cycle - and my "stop moves at most twice, and only toward
+profit" check sees `sl 1 value(s)` on BOTH tickets and calls it a pass. **On this file that check could never
+have failed, for any behaviour whatsoever.** LAW #2 stays UNGRADED. This is the same trap as LAW 101 one
+level up: I mutation-tested the checker on fixtures where `sl` appeared 3 times, but no real log can produce
+that, so the test proved the arithmetic and not the wiring. Before I ever call a check a pass I must ask
+**"what would this file have to look like for it to say FAIL?"** - if the answer is "it can't", the check
+needs code, not a re-run.
+
+**What his receipt DOES grade (LAW #1, for real):** `SHADOW/...:28  tp frozen [3868.2000000000003]` and
+`...:57  tp frozen [3853.3675]`, across 39 + 22 `HELD` lines - the target your hands set on `FILLED` was
+re-echoed, unchanged, until the trade ended. That is measured, not stamped: two values would have printed
+`LAW #1 BROKEN`. The float tail `...2000000000003` is the stored value round-tripping through JSON - proof
+it was **computed once and kept**, not recomputed each cycle (a recompute could jitter at the 1e-13 level
+and a jittering target is still a moving target).
+
+**His one CLOSED trade, read against the code (no poetry, just the fields):** `entry 3898.4 -> exit 3899.6`,
+`side SELL`, `points -1.2`, `rule HARD_STOP`, `be_done true`, one event `BREAK-EVEN at r=0.54>=0.5`. So the
+lawn did run: at +0.54 R the stop was moved (`:264`) to `entry + sign * 0.1 * atr` = **slightly BELOW entry
+for a SELL = a small profit locked**; on a later cycle price came back through that stop and closed the
+position. The close is stamped with `datetime.now` and my `max(abs(pos["sl"]-entry))` denominator, so the
+`r` in that event is measured against the stop as it stood then. **The -1.2 is a replay-resolution artefact,
+not a strategy loss**: the replay steps `--every 180`, so it fills at the price it happened to observe
+(3899.6), not at the stop level (~3897.4) - 2.2 points of "slippage" the code refused to paper over. It had
+the chance to pretend it got the stop price and it did not: that is the house being honest, and it is worth
+more than the number.
+
+**The dial in his event line is HIS, not mine:** `PM_BE_TRIGGER_R` defaults to **0.5** in `config.py:360`,
+while my code's fallback says 0.75 - the printed `>=0.5` proves `manage_shadow` read the bridge's setting
+through `getattr(config, ...)` instead of imposing my own. Same for `PM_TIME_STOP_MINUTES = 180`
+(`config.py:378`) - which is why no `TIME_STOP` fired: nothing was held 3 hours.
+
+**Three honesty defects in MY code, all found by reading the file his tool printed, all booked for row 14b:**
+(1) `close_shadow` writes `"tp_frozen": True` as a **literal** (`:343`) - it asserts, it does not measure,
+and a reader could take it for a check (LAW 96 applies to my own stamps now). (2) `"at"` is
+`datetime.now(timezone.utc)` (`:343`, and `:356` in the book record) - **the wall clock of the run**, which
+is why his close says `2026-11-24T17:41:58` for a trade the tape took on **2026-11-13**: a replayed trade
+stamped with the machine's time. Any evening report (L4) that sorts by `at` would grade the wrong day.
+(3) `"lots": null, "usd": null` - `close_shadow` reads `pos["volume"]` (`:338`) but the staged plan never
+carried `volume_lots` (`:242` got 0), so **no dollar figure exists for this trade** and the owner's ±80 band
+law cannot be applied to it at all. Points only.
+
+
+**LAW 104 (before you call a number a decline, ask what the counter counts - and the status tally must ADD UP to `cycles fed`).** Row 13 left a hole I had been quoting as a finding: `allowed 7 of 75` yet only
+**2** positions. Five GOs "declined". His `refused` grep closes it and the answer is the opposite of a
+refusal: **`13 HANDS-NO-VERDICT:NO-VERDICT + 1 NO-EDGE = 14 = exactly the `NO-PLAN` count.** Every decline in
+the log is the JUDGE's door, **the hands refused nothing.** The five are accounted for by structure:
+`factory2_gates.py:295` is `if pos:` — **MANAGE first, return, never reach `plan_from_fire`** — so a GO that
+arrives while a position is already open produces a `HELD` line, not a new position and not a refusal. It is
+a **one-position-at-a-time rule with no log field of its own**, which is why I had to reconstruct it from
+arithmetic instead of reading it. (Same code, `:326`: an open attempt that fails writes `res["reason"]` —
+his `"reason":` grep came back EMPTY, so no allowed cycle ever reached a failed fill either.)
+
+**Second finding from the same line: the bridge was NOT blind.** All 14 declines printed `"notes": [` with
+**nothing inside**. `plan_from_fire` writes `notes: []` on the door path (`:13`) but puts the actual error
+text in `notes` on the blind path (`:22`, `HANDS-BLIND:bridge-import`). Empty notes on all 14 therefore
+**rules out a broken input** — the organs were readable, the judge simply did not fire. That is the
+difference between "the factory is quiet" and "the factory is deaf", and his log proves the first.
+
+**And my own arithmetic error, corrected.** My row-13 writeup said `2 FILLED + 57 HELD + 13 NO-PLAN + 1 NO-EDGE`
+= **73 of 75** and I did not notice the missing two. The status tally is the check: `58 HELD + 2 FILLED +
+14 NO-PLAN + 1 CLOSED = 75` exactly. **From now on the rule is: add the statuses, and they must equal
+`cycles fed`, or an unaccounted cycle exists and the writeup is wrong** (LAW 104's second half). It also
+means my "38 + 19 HELD per ticket" count was not the truth of that file - the per-ticket count came from a
+`tp`-echo tally, a different question.
+
+**14b therefore gains a fourth item**, and it is the one this whole exercise taught me: echo the gate's
+`allow` onto EVERY cycle line (`"allow": true` + `"holding": true` when a position is already open), so
+"a GO arrived while holding" is MEASURED in the diary rather than reconstructed by hand from 7 tickets.
+The 7 `REPLAY/...:G3` ticket ids in his log are exactly that evidence - cycle numbers 28, 41, 57, 60, 67,
+75, 83 - and I had earlier dismissed them as contamination to be filtered out of `tpcheck`. **They were the
+answer.** Two of them (`:28`, `:57`) are also the two SHADOW position tickets, which is why those two opened.
+
+
+**LAW 105 (name the UNIT a count is counting: `grep -c` counts LINES, and a diary can hold more than one
+kind of line).** The prediction test on his `~/r13.txt` came back **half-hit, and the miss is the discovery**:
+
+| predicted | measured |
+|---|---|
+| among the lines carrying a gate ticket, **no `NO-PLAN`**; `2 FILLED + 5 HELD` | **exactly `2 FILLED + 5 HELD`, no `NO-PLAN`** ✅ |
+| `grep -c` on the gate-ticket pattern = **7** (one per allowed cycle) | **14** ❌ |
+
+The discriminating half is what the model rested on - **the 5 "missing" GOs are absorbed by MANAGE-first
+(`:295`), not refused** - and it is now measured on his file, not derived. The `14` says something the model
+never contained: **7 of those lines carry no `"hands"` object at all**, because his own status tally proves
+the file holds exactly **75** status-bearing cycle lines (`58+2+14+1`), so 14 ticket-bearing lines means
+**~7 extra lines that are not cycle rows** - the replay's own VERDICT line per fired gate, printed alongside
+the cycle row. Two objects, one file. `grep -c` was silently adding them.
+
+**Why this matters before it can hurt us:** L4 (`report_evening_gates.sh`) grades a day by counting. If it
+counts LINES containing a ticket it gets **14**, and if it counts verdicts it gets **7**; if it counts cycle
+lines it must get **75**. A report that mixes the two inflates the day by ~9 % and "the robot fired 14 times"
+becomes the headline of a paper that means "7 - and 5 of those were absorbed by one-position-at-a-time".
+So the rule for 14b and L4 both: **every line gets a `"kind"` field (`cycle` | `verdict`) and every count
+names its kind.** Never count a file; count a class of lines inside it.
+
+
+### 14b BUILT IN SHADOW (`2026-11-24`) - and the split is the safety, not the code
+
+**First, the last piece of the archaeology.** His mystery lines were `{"card": "RUNG=today_open | PUSH=DOWN
+| ... | VERDICT=BOUNCE", "rung": ...}` - written by **`committee.py:435`**, the judge's own verdict row. So
+`~/r13.txt` = **75 cycle rows + 7 verdict rows + 31 lines that are neither** (`113 - 75 - 7 = 31`, the
+replay's report text). `grep -c` on ANY field of this file counts the wrong thing, which is exactly how I
+predicted `7` and measured `14`. L4 must select by shape (`"hands"` vs `"card"`), or by `"kind"` once 14b's
+third file lands.
+
+**His cards also show an unwired organ, and I am not filing it as noise:** both visible cards read
+**`OI=BLIND`** and `EFFORT=n/a`. The verdicts and the two laws are unaffected (the door does not need OI),
+but an input the map names is sitting dark on his box. Booked for **row 15 (manager checkup + settings)**,
+which is where "one number at a time" belongs - not smuggled into 14.
+
+**What 14b changed (`tools/factory2_hands.py`, 395 -> 430 L, and `factory2_gates.py`):**
+
+| # | the defect | the fix | why it is a fix, not a decoration |
+|---|---|---|---|
+| 1 | the manage branch echoed only `tp`, so **no log could ever show a bad stop** (law 103) | `res["sl"] = float(pos["sl"])` on HELD lines | `tpcheck v4s` now FLINCHES: on a 14b-shaped log it reads `sl 2 value(s) [3912.04, 3900.1]` = legal break-even, `exit 0`; widen the stop to `3921.0` and it prints `LAW #2 BROKEN: stop moved AWAY from profit (SELL 3900.1 -> 3921.0)`, **exit 1** |
+| 2 | `allowed 7` vs `2 FILLED` read as 5 declines for a session (law 104) | `res["gate_allow"]`, `res["holding"]` on EVERY paragraph | a GO absorbed by MANAGE-first is now `gate_allow:true, holding:true, status:HELD` - and the new test asserts `"refused" not in got and "reason" not in got`, so it can never be filed as a refusal again |
+| 3 | `"tp_frozen": True` was a LITERAL (law 96 turned on my own code) | `tp0 = pos["tp_at_open"]`; frozen = `\|tp - tp0\| <= 1e-9`, `tp_at_open` stored at open | mutation M8 (hardcode it back) -> `1 failed`. A stamp that cannot say no is not a check |
+| 4 | the close was stamped `datetime.now` - his 2026-11-13 trade printed `2026-11-24T17:41:58` | `_iso(now_ts or time.time())`, and `open_shadow`'s `opened_at` too | mutation M9 -> `1 failed`; `test_the_close_stamp_is_the_tape_clock` pins `now_ts=1_700_000_000.0` to `2023-11-14T22:13:20+00:00` exactly |
+| 5 | `"usd": null, "lots": null` with no name, so the ±80 band had nothing to bite (law 83) | `usd_note: "no dollars: sizing gave no lots, so the number would be invented..."` | mutation M10 (drop the note) -> `1 failed`. Root cause sits at `:174`: `compute_lot_size` raising -> `lots = None` -> `pos["volume"] = 0.0` |
+| 6 | a diary mixing row kinds (law 105) | `rec["kind"] = "cycle"` in `factory2_gates.py` | **DEFERRED FILE - see below** |
+
+**Receipts, all run here, none promised:** `test_factory2_hands.py` **36 passed** (30 + 6 new) · his three
+suites `test_factory2_hands.py test_factory2.py test_committee.py` = **109 passed** (his `103` + my `6`) ·
+whole repo `python3 -m pytest -q` = **847 passed, 3 subtests passed in 71.20s** · four mutations (M7 also
+re-run CLEAN as a key rename after my first attempt just broke the file's syntax: `1 failed, 35 passed`) ·
+live-path smoke on a 21,600-row synthetic tape: `101 cycles`, **`HEALTH: PASS`**, `REPLAY_EXIT=0`, and
+**all 101 lines carry `"kind": "cycle"` with `gate_allow`/`holding`** - zero verdicts on that tape (no order
+tape that day), which is the replay refusing to invent orders, not a failure.
+
+**The safety split, and it is the part I want him to read.** `factory2_gates.py` is the ONE file of the three
+his **live loop in tab 1 imports** (the hall never imports the hands - `gates_replay.py:889` does that, and
+only with `--hands-shadow`; the live loop passes no `shadow` dict at all). His law is *never write a file the
+loop imports*. So the handover ships **two files** - `tools/factory2_hands.py` (replay-only) and
+`test_factory2_hands.py` (test-only) - as `row14b_hands.zip` (18,250 B, sha256 `63e1f98992ac3bc5…`), and
+the single `kind` field in `factory2_gates.py` **waits until he stops the loop**. One line of a diary record
+is not worth touching a running trading process for, and L4 does not need it to exist yet: it can select by
+`"hands"` vs `"card"` shape today.
+
+**Install-proof rule for this and every later handover (the lesson of TWO silent failed `.py` installs):**
+do not trust the copy, **compare the sha256 of the file that landed** - published here:
+`b0b794cb2b8314344ce245bfd7b27b7756df34b8dcc651877775edcfbb30b237  tools/factory2_hands.py`
+`07cfb4ba81a325bae68efa0d3cdbc3826d30d84ea7b2ab69648c564ff7a530e9  test_factory2_hands.py`
+
+
+**14b pre-install gate PASSED (`2026-11-24`), and the gate is the point.** He ran the check BEFORE overwriting
+anything: `git hash-object tools/factory2_hands.py test_factory2_hands.py` -> `77213e7000ba52a438fc6c264bd546e96fa6e8d2`
+and `a3d1fc6bf974f021af24a3d13c241027feb1b93b` — **both equal to the `91efdd0` baseline I edited from**. That
+proves three things at once: his tree is not drifted, my worktree is the same file (not a look-alike), and his
+git normalizes line endings the same way mine does (if it didn't, the BEFORE hash would have differed). This
+is the fix for two silently-failed `.py` installs: **never ask "did the copy work?", ask "is the file I now
+have the file I meant to have?"** I also verified the parcel from the inside before he touched it - `zipfile`
+read back `['tools/factory2_hands.py', 'test_factory2_hands.py']` (repo-relative paths, so `unzip -o` in the
+repo root lands them where they belong - not the `python3 -m zipfile -c` flat-name trap), sha256
+`b0b794cb…` / `07cfb4ba…`, **0 CR bytes**, and **byte-identical to the two files that ran 109 passed**.
+
+
+### THE OWNER'S RECEIPT FOR 14b (`2026-11-24`) — the first handover that closed with PROOF
+
+```
+$ unzip -o ~/Downloads/row14b_hands.zip
+  inflating: tools/factory2_hands.py
+  inflating: test_factory2_hands.py
+$ git hash-object tools/factory2_hands.py test_factory2_hands.py
+6ec77c645b8a94fa832f30bce66813fe74e1cd1a
+62c7f7da97a4c66454c08c2d5a4cafabb3d84b22
+$ PY=python; "$PY" -m pytest -q test_factory2_hands.py test_factory2.py test_committee.py
+109 passed in 196.38s (0:03:16)
+```
+
+**Both hashes equal the ones I published from my tree, and `109 passed` = his `103` + my `6`.** Two facts
+worth keeping: (1) the BEFORE/AFTER hash pair is what makes a stale copy impossible - after two silent `.py`
+install failures (LAW 102), the rule is now *"never ask 'did the copy work?', ask 'is the file I have the file
+I meant to have?'"*; (2) **it passed on Python 3.14 on his machine** where I rehearsed on 3.13, and his suite
+took `196.38s` against my `38s` - slower disk and a cold cache, not a different result. Same verdict, two
+boxes, two Python versions.
+
+What his tree now has that it did not: the HELD paragraph **echoes the managed `sl`** (so a widened stop is
+VISIBLE and `tpcheck` can flinch), **`gate_allow`/`holding`** on every paragraph (so a GO absorbed by
+MANAGE-first can never be mis-read as a decline), **`tp_frozen` measured** against `tp_at_open` instead of
+stamped, a **tape-clock** `at`/`opened_at`, and a **named** null `usd`. Still queued: `factory2_gates.py`'s
+`"kind": "cycle"` field, waiting for a moment with tab 1 stopped - and nothing depends on it yet, because
+L4 can select by shape (`"hands"` vs `"card"`).
+
+**The next test is deliberately the boring one: the same tape, re-run, must reach the SAME decisions.** 14b
+added *words*, not *judgement*. So the expectation is `75 cycles fed`, `allowed 7 of 75`, the same two
+tickets, the same `FILLED/HELD/NO-PLAN/CLOSED` split - and NEW: the log can finally show `sl 2 value(s)`
+if break-even fires. Any DECISION that changes is a bug in my handover, not an improvement.
+
+
+**LAW 106 (a replay log has NO tape clock on the line - sort it by `cycle`, never by `t`).** The head of his
+`~/r13.txt` exposed this without anyone meaning to: the first five cycle rows are stamped
+`17:41:45, :45, :46, :46, :47` - **five cycles inside two seconds**, because `factory2_gates.py:356` writes
+`"t": datetime.now(...)` for BOTH modes, live and replay. In a live loop that is right (now IS the tape). In
+a replay it is the machine's clock, so at second resolution the field is a constant and any report that
+sorts or windows by `t` silently grades nothing. It also explains his `2026-11-24T17:41:58` close stamp - I
+found that in `close_shadow` and fixed the CLOSE, but **the LINE header has the same disease one level up**,
+and it is in the file I deliberately deferred.
+
+**The good news is that the fix is one additive field, and the plumbing already exists.** The replay does
+know the tape time: `gates_replay.py:1009` sets `cv["ts"] = float(tc)` and `:1015` calls
+`run_cycle(cv, ..., now_ts=float(tc))` - which is exactly why 14b's `_iso(now_ts)` works for the close record.
+So `rec` gains `"t_tape"` (read from `cyc.get("ts")`, blank in live where the tape time IS now), and L4 can
+then order by `t_tape` while still counting by `kind:cycle`. Queued WITH `kind` in the one `factory2_gates.py`
+moment, when tab 1 is stopped. Until then: **L4 must sort replay rows by `cycle`.**
+
+**His first four lines also showed the mirror pile, and it is a designed pile, not a leak:**
+`mirror reset: 3 learned item(s), 1284597 B set aside to gates_sandbox_prev_20261124T184125.2/ (kept, never
+deleted; **209 earlier rehearsal(s) waiting beside it**)`. `gates_replay.py:239` is explicit - *"operator's
+own hand: `rm -rf data/gates_sandbox_prev_*`, never our code"* - so **I do not touch it and I will not offer
+to**: it lives under `data/`, which is his trading directory and off-limits by his law. The honest part is
+the arithmetic, so he can decide with his eyes open: ~1.28 MB per rehearsal x 211 ≈ **~270 MB** on the A:
+drive, and it grows every time anyone sails a day. A read-only `du` is the right first look, whenever he wants it.
+
+
+
+**LAW 107 (a bash-redirected log is CONSOLE-CODEPAGE text, not UTF-8 - every reader must say
+`errors="ignore"`, or an em dash kills it).** His next step died on
+`UnicodeDecodeError: 'utf-8' codec can't decode byte 0x97 in position 850`, and the fault was in MY line,
+not his file. Cause, found by reproducing it: `gates_replay.py:1096` prints
+`=== gates_replay <ver> — day … ===` with an **em dash**; his console codepage (cp1250) encodes that as the
+single byte `0x97`, and `0x97` is not a legal UTF-8 start byte. I re-encoded my own sail log to cp1250 and
+got the same exception, same byte, same word. **Why the house survived it and I did not:** `gates_report.py:99`
+and `tpcheck.py:19` both open logs with `encoding="utf-8", errors="ignore"` - that is why the night teacher and
+`tpcheck` graded the very file that broke my `"$PY" -c` line. So the law is not "use utf-8", it is:
+**a reader of a log must name a policy for bytes it cannot read, and this house's policy is ignore-and-say-so.**
+
+**The deeper half, which is why this belongs to 14f and not to a bash tip.** The same Pen has TWO byte
+grammars: `factory2_gates.py:347` writes a FILE with `encoding="utf-8", newline="
+"` (a law, for the size
+count), but in dry mode `:335` **prints** the same line through stdout - so `data/gates_shadow_*.jsonl` is
+UTF-8 and `~/r14f.txt` is whatever the console spoke. `json.dumps(..., ensure_ascii=False)` makes that real,
+not theoretical. A report that assumes one grammar for both will pass on a diary and crash on a sail.
+
+**Tool born of it: `kindcheck.py`** (next to `tpcheck.py`, my file, not the factory's; 82 lines, 0 CR,
+sha256 `0326c2bb72975e14…`). It counts the WHOLE file, sorts it by `line_kind`, prints
+`the equation: 104 lines == 1 UNNAMED + 101 cycle + 1 day + 1 verdict`, and **exits 1 on any unnamed or
+unparseable json line**. Four receipts on my copy: a UTF-8 sail `PASS` (124 lines = 21 NOT-JSON + 102 cycle
++ 1 day); the **same log mangled to cp1250 `PASS`** (it reports the codepage instead of dying); a live-style
+diary with a verdict line `PASS`; and **one line with its tag deleted -> `UNNAMED=1`, `cycle=101`, FAIL,
+exit 1** - the tool can say no, which is the only reason a PASS is worth anything.
+
+**LAW 108 (retiring a factory retires its CHORES, not just its decisions - list them before the switch).**
+The owner's standing decision, `2026-11-24`: *factory 2 is the new version; once it works, the old factory is
+not used any more and only factory 2 gets updates.* Before booking a sentence that big, every dependency was
+traced in the code, and the news is mostly good:
+
+* **The tape does not come from the old factory.** `bookmap_bridge_provider.py:1-14` says the flow is
+  `BookMap (app) + bookmap_addon_l3.py -> ticks.csv / mbo.csv -> the provider's tailers`. So retiring
+  `main.py` stops NO data, as long as BookMap itself stays open with its addon. **His loop is not the source;
+  the chart is.**
+* **The rung map follows the hall, not the old factory.** `session_levels.json` and `last_book_state.json` are
+  rewritten INSIDE `analyze_market` (`step2_market_analysis.py:6691-6694`, `_book_state_file()` at `:5281`), and
+  factory 2 calls `analyze_market` every cycle. So G2's feet keep moving with only the new hall running.
+* **Per-cycle `DataAcquisition(...)` is not a leak.** `factory2_gates.py:638` builds one every cycle, and I
+  expected to blame it - but the bridge tailers are a **locked module singleton** (`_get_tail()`,
+  `bookmap_bridge_provider.py:1143-1154`: create once, return the same object), and `main.py:1041-1043` does
+  the identical thing. Wasteful at worst, shared at best, and **not** a thread pile-up. My suspicion was wrong
+  and the file said so.
+* **One chore really does die.** `main.py:2719 run_maintenance()` - *"light: rotates logs, trims CSVs, cleans
+  old recordings"*, including `maintenance.py:160-177` clearing `data/archive/ticks_*.csv.gz`. Factory 2 has no
+  caller for it. That is the disk the owner's own footprint law protects (the 209-dir `gates_sandbox_prev_*`
+  pile is already that debt showing interest). Fix = give the chore a home: `maintenance.py:199` documents
+  `python maintenance.py` as a manual run, and the natural home is the EVENING shell - **his call, not a
+  side effect of my parcel.**
+
+So: retire the decisions, keep the eyes, and move the chores. Nothing in this row changes what the hall
+DECIDES; it makes the retirement honest.
+
+**LAW 109 (a live run cannot tell you the feed is dead - so ask the FILE before you trust the day).** Asked
+"should I open BookMap first?", the answer was not in any runbook (the three root `*.txt` files say *legacy*, and
+`QUICK_START.md` is patch history), so it was read out of the code, and two things there are worth more than the
+answer itself. **(1)** `bookmap_addon.py:29-31`: *"Do NOT run `python bookmap_addon.py` directly for live data -
+BookMap must launch it via the embedded editor with a port arg"*; the addon builds to `GoldBridge.jar`, is
+ENABLED inside BookMap, and then writes `ticks.csv` **by itself**. "Run the app" is therefore not a bash step.
+**(2)** The failure is SILENT, twice over: `bookmap_bridge_provider.py:1412-1422` waits
+`BOOKMAP_WAIT_SECONDS` (default **5**, `config.py:730`) for any tick at all and then **continues with an empty
+book instead of raising**, and the tailer catches up `BOOKMAP_WINDOW_SECONDS=43200` (**12 h**) /
+`BOOKMAP_CATCHUP_MB=64` from the file's tail (`config.py:726-728`) - so a closed platform with yesterday's rows
+still in `ticks.csv` produces a run that LOOKS alive, stamps `assumed`, and grades a day nobody watched. The
+staleness law is real but soft: `BOOKMAP_LEVEL_MAX_AGE=900` s (`config.py:639`) drops old LEVELS, not old cycles.
+So the pre-flight is one question to the filesystem, asked BEFORE tab 1: is `ticks.csv` modified in the last two
+minutes? `find ticks.csv -mmin -2` prints the name when the platform is really feeding, and prints NOTHING when
+it isn't. Delayed data is refused by design (the `isDelayed` check), so "BookMap open but the file is cold" is a
+known state, not a mystery. And for a smoke test without the platform: `--demo --once --dry` - the `--dry` is not
+decoration, because `--demo` WITHOUT it writes a synthetic line into the SAME `data/gates_shadow_<today>.jsonl`
+that is supposed to be today's real book (detectable afterwards, since `mode` says `demo`, but a book you have to
+explain is a worse book than one you don't).
+
+**LAW 110 (an order of two lines can break a promise made three files away - read the CALL SITE, not the
+docstring).** First live day of factory 2 (`2026-11-25`): 4 real cycles printed, and **no diary in `data/`**,
+after I told him to look in `data/`. The file, in order: `factory2_gates.py:581` calls `isolate_data_dir()`,
+which sets `config.DATA_DIR = <drawer>/gates_sandbox` to protect the borrowed writers; `:596` then calls
+`resolve_data_dir(None)`, which reads `config.DATA_DIR` - **so the hall's own diary follows the borrowed writers
+into the sandbox.** The function's own docstring (`:65-68`) says the opposite: *"Our own papers (gates_*.jsonl /
+gates_*.txt / gates_rung_state.json) stay in `data/` - only the borrowed writers are diverted."* Words and
+behaviour disagree, and **behaviour wins**. His receipt, not my theory: `THE HALL WRITES TO:
+A:\gitHub\Gold-BookMap\data` (a fresh process, no isolation run) while `find` located
+`data/gates_sandbox/gates_shadow_20261125.jsonl`, **6,379 B, growing**.
+**The live seam:** `tools/gates_report.py` never calls `isolate_data_dir()` (grep: only `factory2_gates.py:581`
+and `gates_replay.py:1313` do), so the night teacher looks in `data/` and will find **no diary** tonight unless
+it is pointed at the sandbox - `--dir data/gates_sandbox`. **Not fixed today, on purpose:** moving the diary path
+mid-session would split today's book into two files, and a day in two books is worth less than a day in a
+sandbox. Fix = decide which promise survives (papers in `data/`, borrowed writers in the sandbox - the sane one),
+then change the ORDER (`:581` after `:596`, or resolve the paper path before isolating), with a test that pins
+WHERE a live diary lands. Row 15's list.
+**The general law, though, is bigger than this folder: a docstring describes intent; the call site describes
+fact. When I quote one to predict the other, I am guessing.**
+
+### 🏆 THE FIRST LIVE DAY OF FACTORY 2 (`2026-11-25`, 12 cycles, his own report pasted)
+
+`NIGHT GRADE: 9 PASS / 2 WARN / 0 FAIL` on a **live** book, and the rows are the ones that matter:
+`partition closes: 12 == 12` (every line named, **0 unnamed**, **0 error lines** - 14f working on the first
+day it existed), `max 822 B` inside the 1 KB law, `modes: live=12`, `ATR IS ALIVE: 12 cycles, 0 without a
+yard`, `G1 NEVER GOES SILENT: WALK=12`, and **`G3 IS A REAL DOOR: verdicts: 3, tickets allowed: 0`,
+refusals `NO-VERDICT=9 + LOOK-BOTH-WAYS:spread=3`**. Note the arithmetic on its own: **9 + 3 = 12 = the cycles
+fed** - law 104 holding on a live day, computed by a different instrument than the one that counted them.
+Three times the hall WANTED to fire and the door said no, out loud, with a reason. Nothing was traded, exactly
+as designed. Two WARNs to carry forward, not to hide: `G2 12/12 on a rung (100%)` - the report itself warns
+that ~100% means the yardstick may be too generous (12 cycles is a first look, not a verdict), and Section C/D
+`not-answerable`, which turned out to be a real gap (below).
+`--dir data/gates_sandbox` found the diary, and the teacher wrote its papers there too
+(`wrote gates_20261125.txt + gates_20261125_metrics.json -> data\gates_sandbox`) - the sandbox swallows the
+whole night, LAW 110 again, no fix today.
+
+**The owner's saving order (same day, path C):** *"we don't care of the word, we need to finish this steps and go
+back to follow the previous steps and make sure the app is working end to end."* So the repo stays PUBLIC and the
+push carries FIVE code files + the THREE papers + `kindcheck.py` (as `tools/kindcheck.py` - `NEW FILE JUSTIFIED:
+tools/kindcheck.py because it is the only instrument that audits the diary's partition, and a tool outside the repo
+dies with the machine`). My old claim "the papers are not in his repo" proved WRONG - they sat there since
+`2026-10-31` (`200`, not `404`), frozen at 5,309 book lines against my 6,575: read the tree, then claim. His five
+disk hashes matched my artifact before staging (`543cda089a54 / f28c9114e878 / 78753a2db400 / 5f64d29f4b48 /
+c4b539ea77d1`) - and note WHICH numbers those are: re-measured from `row14f_hall.zip` itself, because the hashes
+I had quoted from memory (`04157c1e…`) did not match the shipped bytes. **Measure the artifact, never the memory -
+twice now that correction cost a wasted script and the uncorrected version would have cost a false alarm.**
+The paragraph above this one was ALMOST booked twice: my first insert died on a wrapped anchor (the sentence
+breaks across lines in the file) and the chained `git commit` ran anyway, so the map moved while the book stayed -
+caught by re-reading, not by the exit code of the chain. LAW 109's lesson, on me again: an exited script proves
+nothing; the file proves.
+
+**Three findings from reading his report against the code, not against my memory:**
+
+1. **`--hall-off` LIED about today.** `gates_report.py:715-718` prints `SEA-GRADE ONLY (hall off) … no health
+   certificate is given or withheld` purely because the FLAG was passed - and I told him to pass it. His hall was
+   very much on. So today's paper refused to grade itself for a reason that was my flag, not his machine.
+   **Tonight: drop `--hall-off`** and the real line appears.
+2. **The real bar for "HEALTHY" is now on paper:** `healthy = FAIL == 0 and sea_cycles >= 20` (`:713`). So the
+   sentence `THE NEW FACTORY IS HEALTHY (sea passed)` is unreachable from a diary ALONE - the replay-first law is
+   load-bearing, not decorative. Tonight the day is closed, so we sail it: `gates_replay.py --date 2026-11-25`
+   then the teacher WITH `--sea`, and for the first time the healthy line can be EARNED on data he and I
+   produced together, today.
+3. **LAW 111 - advice that names a flag or a field the code does not ship is a dead end printed as a
+   direction.** Section C's own words: *"run factory2 with `--record-shot`, or read the sea's json (`--sea`)
+   which carries `shot_action`."* Both halves are false in this factory: `--record-shot` exists NOWHERE in the
+   repo (grep: the only hit is that sentence at `gates_report.py:268`), and `shot_action` is produced by the OLD
+   `tools/raw_replay.py`, never by `tools/gates_replay.py` (grep count in the new sea: **0**). So Section C is
+   permanently `not-answerable` for factory 2, while telling the operator two ways to open a door that isn't there.
+   Same family: the spread law reads `committee.py:38 MAX_SPREAD_PCT = 0.010` - its OWN constant - while
+   `config.py:267` advertises `MAX_SPREAD_PCT = 0.05`, so **a `.env` change to that setting does nothing to G3**,
+   and the unit is percent-of-price (`step2_market_analysis.py:1146`: *"bid-ask spread as % of price (0 =
+   unknown)"*) - 0.010 % ≈ **0.39 points on gold**, which is why 3 live verdicts died there today (a real number:
+   a `None` spread would have been replaced by the hall's assumed `0.005` and stamped `spread:assumed`,
+   `factory2_gates.py:241-245`, and 0.005 % passes the cap). **Fix = say what exists, and put the setting and the
+   law in one place.** Both are OUR files now, so both are row 15 with a test, not a footnote.
+
+### ROW 14 CLOSED IN FULL (`2026-11-24`) — the same day, decided again, and the log can finally prove the lawn
+
+
+
+His re-run of the identical command (only the output name changed, `~/r14b.txt`) came back **every predicted
+number exact**:
+
+| the stake | predicted | his log |
+|---|---|---|
+| decisions unchanged | `75 fed (skipped 123: post-last-row 103, warm-up 20)`, `NO-VERDICT=67, NO-EDGE=1`, `allowed 7 of 75`, `7 verdict(s)`, `HEALTH: PASS` | **all of it, character for character** |
+| the 75 test | `58 HELD + 2 FILLED + 14 NO-PLAN + 1 CLOSED` | same (sums to 75 ✅) |
+| the door's word | `7 true + 68 false` | **`7 true / 68 false`** |
+| already-holding | `59 true + 16 false` | **`59 true / 16 false`** |
+| **the whole row-14 archaeology, one number** | **`5`** | **`5`** |
+| LAW #1 | `tp` frozen on both tickets | `tp frozen [3868.2000000000003]`, `[3853.3675]`, `law breaks: 0`, **exit 0** |
+| LAW #2, *newly visible* | `:28` shows the stop moving | **`sl 2 value(s) [3907.46, 3897.645] \| break-even YES`**; `:57 \| sl 1 value(s) \| break-even never reached` (a pass, not a fault) |
+| the close record | tape time, both laws, named null | `"at": "2026-11-13T13:33:00+00:00"` (was `2026-11-24T17:41:58`), `sl_at_open: 3907.46`, `sl_moved: -9.815`, `tp_at_open` present so **`tp_frozen: true` is now MEASURED, not stamped**, `usd_note` naming the null |
+
+**Two numbers I can now state exactly, having estimated them before - and the estimates were wrong enough to matter.**
+1. `sl_moved: -9.815` = `3897.645 - 3907.46`, and the new stop is **exactly** `entry - 0.1*atr` = `3898.4 - 0.1*7.55`
+   = `3897.645`: the break-even rule reproduced to the last decimal from his own `atr`, which is the strongest
+   form of "the code did what the law says".
+2. The replay-resolution loss is **1.955 points**, not the "~2.2" I quoted - I had estimated the stop while the
+   log hid it. Had he exited *at* the stop he'd have booked **+0.755**; the replay saw `3899.6` on the next
+   3-minute cycle, so `-1.2`. **The law cost him nothing; the sampling step cost him 1.955 points.** That is a
+   statement about `--every 180`, and it is testable (14d, optional): the same tape at `--every 60` should show
+   a smaller gap. *A different `--every` legitimately changes decisions - finer sampling sees different prices.
+   That is not a determinism failure, and it must never be read as one.*
+
+**Also closed by this receipt, quietly:** `declined lines (no ticket): 14` from my tool equals the `14 "status":
+"NO-PLAN"` from his grep - two independent instruments, same count, so neither is reading a shape the other
+invented. And `1 day(s) with an order tape -> L3 possible` reappeared, so the day he sailed is still an L3-grade
+day whenever he wants the live-loop paper (`l3.txt`) re-cut with `-u`.
+
+**What row 14 was, in one line: the hands held a frozen target across 39 + 22 cycles on real 2026-11-13 tape,
+moved the stop once, only toward profit, to the exact break-even value the bridge's own dials demanded, closed
+on a `HARD_STOP` at a replay-resolution penalty of 1.955 points, and refused everything the door refused -
+and every one of those claims is now printed by the log, not argued by me.**
+
+
+### 14e BUILT (the deferred hall file) — `line_kind` + `t_tape`, and the dead-field trap caught by a test
+
+The owner chose the rung that needs his machine free, so it had to be **finished and rehearsed before he ever
+stopped tab 1**. Two fields on the hall's diary line (`factory2_gates.py`, `rec`):
+
+**1. `line_kind: "cycle"`** (law 105) - **and it is NOT named `kind`.** This house already uses `kind` for
+rung/level kinds (`test_factory2.py:265` reads `{r["kind"] for r in lv}` over `signal_map.targets`). Two
+meanings in one diary is exactly how a grep finds the wrong object, and I found this only by grepping my own
+new field name before shipping it - the 14b draft said `"kind"`, and it is renamed here on purpose.
+
+**2. `t_tape`** (law 106) - the tape's own clock beside the machine's. **The bug I nearly shipped:** my first
+line read `_iso_ts(cyc.get("ts"))`. `run_cycle` does `cyc = build_cyc(cv, ...)`, and `build_cyc` assembles its
+dict **key by key** - `ts` is not one of them. So the field would have been **permanently empty**: worse than
+absent, because an empty `t_tape` reads as "no tape time today". Reading from `cv` fixes it. **This is the
+`cv["shadow_law"]` trap from the file's own v8f comment, in a new costume**, and the reason the test pins the
+*value* (`2023-11-14T22:13:20+00:00` for that epoch) and not just the key's presence. Second test pins the
+other half: `ts = 0.0` must print `""`, **never `1970-...`** - a missing clock must not look like the epoch.
+Third test pins the size: the hall's line with 14e is **739 B**, inside this file's own ~1 KB diary law.
+
+**Receipts, all run here:** 3 new tests; **all three mutations flinch** - M11 read from `cyc` → `1 failed`
+(the dead-field case), M12 fall back to the epoch → `1 failed`, M13 drop `line_kind` → `1 failed` ·
+**his three suites: `112 passed`** (his 109 + my 3) · whole repo **`850 passed, 3 subtests`** ·
+**rehearsal on a real sail** (101-cycle synthetic day, `REPLAY_EXIT=0`, `HEALTH: PASS`): all **101 lines
+tagged `line_kind:"cycle"`**, and `t_tape` = `07:00:00, 07:03:00, 07:06:00…` - **101 distinct tape times
+against 2 distinct `t` values**. That is law 106 measured, and now fixable: L4 can order a replay day by the
+clock the tape actually ran on, and the gap `t - t_tape` is the staleness number his row-2 law was always about.
+
+**Parcel:** `row14e_hall.zip`, 47,807 B, sha256 `507be9ed60068f7d…`, entries `['factory2_gates.py',
+'test_factory2.py']` at repo root, both **byte-identical to the files that ran 112 passed**, 0 CR bytes.
+Published blob hashes for the gate: BEFORE (must match his tree before the unzip) `722dc2fc…` / `98bab715…`;
+AFTER (must match after) `c8288c2a…` / `63353402…`. **His install needs tab 1 stopped**, because this is the
+file his live loop imports - the one thing 14b deliberately did not touch.
+
+### 14e CLOSED IN FULL (his own screen, `2026-11-24`) — and 14f was born out of what it revealed
+
+**His receipt, unedited:** `112 passed in 191.22s`; both AFTER hashes matched (`c8288c2a…`, `63353402…`);
+the sail `exit 0` with `cycles fed : 75 (skipped 123: post-last-row 103, warm-up 20)` and
+`1/1 day(s) sailed, 75 cycle(s), 7 verdict(s). HEALTH: PASS`; `tpcheck v4s`: `law breaks: 0`, `:28`
+`tp frozen [3868.2000000000003] | sl 2 value(s) [3907.46, 3897.645] | break-even YES`, `:57`
+`sl 1 value(s) [3912.04] | break-even never reached`, `declined lines (no ticket): 14`.
+**Same day, same numbers, new words in the file.** 14e changed what the diary SAYS, not what the hall DOES.
+
+**One of my predictions was wrong, and the file is better for it.** I said the machine clock `t` would show
+**1 or 2** distinct values across the sail. He measured **53**. Mine came from my copy finishing the whole
+sail inside two seconds; his box takes ~53 s for the same 75 cycles, so `t` walked 53 different seconds.
+The lesson is unchanged and now sharper: **`t` advances ~0.7 seconds per cycle while `t_tape` advances 180**
+— two clocks that have nothing to do with each other, sitting in one line. That is law 106 in one sentence,
+and `sort -u | wc -l` over both fields is now the cheapest way to show it to anyone.
+
+### 14f BUILT (`40d9c21` in the build worktree) — "name each line" was only two thirds true
+
+14e's promise was that **every** line carries its class. His `grep -c` on `line_kind` did return 75 — and
+that is exactly how the gap hid: **counting the tagged lines can never tell you how many lines were NOT
+tagged.** The first time I held a diary the evening paper itself had produced, I counted the file:
+**103 lines, 102 tagged.** The 103rd was the **day footer** (`gates_replay.py:1078-1083`,
+`mode: "replay:summary"`) — a THIRD class — and `factory2_gates.py:415`/`:645` write a FOURTH: the **error
+line** that law 8 makes the hall write when a card fails to build. So the vocabulary is `cycle` / `day` /
+`error`, and a diary that names only its good lines is the same trick as a scoreboard that counts only the
+shots it liked.
+
+* `tools/gates_replay.py` — `tally["line_kind"] = "day"` on the footer (1 line).
+* `factory2_gates.py` — `"line_kind": "error"` on BOTH except-branch writes (2 lines).
+* `tools/gates_report.py` `sec_health` — three real gains from the tags: the **~1 KB LINE SIZE LAW now
+  measures heartbeats only** (it is a law about cards; before, a fat footer could fail the hall, and a trimmed
+  footer could hide a fat card), Section A prints the **partition as an equation**
+  (`line_kind: cycle=102, day=1 (partition closes: 103 == 103)`), and a new row **`SELECTORS AGREE`** FAILs
+  when the *name* of a line and the *shape* of a line disagree (`line_kind=cycle` vs `"cycle" in r`, the
+  selector the teacher used before and still uses for old papers). A **pre-14f paper with no tags is measured
+  the old way and the report says so** — an instrument that changes its meaning silently is worse.
+
+**Three tests, mutation-proved.** (1) the **whole sea runs** on a synthetic tape in the house's own fixture
+style (`_sea_fixture_day`, gzip into `data/archive/`, `--diary-out`): the file must close as an equation, the
+footer's own `cycles` must equal the tagged count, the tag count must equal `agg["cycles"]` in the json, and
+the shape-selector must agree; (2) a **pen that raises on its first call only** — the real except-branch fires
+and the file must hold exactly one line that names itself `error`; (3) the teacher facing a **2 200 B footer**
+(PASS + `NOT counted against the heartbeat law`), a **1 400 B card** (WARN — a fat card must not hide), an
+**untagged old file** (must announce `ALL lines - this paper carries no line_kind`) and a **liar line** shaped
+like a card but named `day` (must FAIL with `named cycles: 2 / shape cycles: 3`).
+Mutations M14 no footer tag · M15 unnamed error line · M16 footer named `cycle` · M17 sizes back to all rows ·
+M18 partition line deleted · M19 tags ignored · M20 selector law deleted — **each one flinches.** Two honest
+notes: **M20 did not flinch the first time**, because I had never written a case where the two instruments
+disagree — a law with no failing test is a wish; and my first size-law test asserted its own index arithmetic
+instead of the row the office grammar prints, so it failed on a good build. The teacher also
+**exits NONZERO the moment any row says FAIL**, so `run()` had to stop demanding rc=0 or the test would have
+to look away from the very row it proves.
+
+**First-draft numbers, kept so the record shows the count moving under me:** `115 passed`, `853` repo-wide, a
+four-file parcel of 92,584 B (sha256 `6b624caa346d0d7a…`). The SECOND DRAFT below supersedes it — and the
+stale hash list is exactly why the handover rule says *"compare the hash of the file that landed, never
+the copy you made."*
+
+### 14f SECOND DRAFT — a FIFTH class, and the one a `grep -c` can never reveal
+
+The partition test passed, the night closed at `103 == 103`, and I was about to ship it. Then I asked the
+question the field exists to make cheap: **who else holds the pen?** `factory2_gates.py:366` hands the pen to
+the prefire dict (`pre["diary"] = pen`), and `committee.py:434` writes through it —
+`pre["diary"]({"ticket": …, "verdict": …, "rung": …, "card": …})`. So **every ticket ever approved is its own
+diary line**: his real day (75 cycles, 7 allowed) holds 75 + 7 + 1 = **83 lines**, and 14f had named 76 of
+them. `grep -c '"line_kind"'` returns a number that is *true* and still *not the file* — counting the named
+lines can never show the unnamed ones. The only move that finds them is to **count the whole file and ask the
+names to add up**, which is now what the report prints: `(partition closes: 103 == 103)`.
+
+* `committee.py` — the ticket line carries `line_kind: "verdict"`. Borrowed code, so the **whole repo** ran,
+  not just the hall's files: **854 passed** — the old factory never notices a new word on a line it did not write.
+* `test_factory2.py` — a 4th test drives the **real seven fire-laws to an earned ticket** (`attempt_fire` with
+  a `pre` that passes them all) and reads back what the pen was handed: it must be exactly one line, named
+  `verdict`, carrying the ticket it names. The partition test's vocabulary grew to `cycle/day/error/verdict`.
+* Mutations M21 (the word renamed) and M22 (the ticket line named `cycle`) both flinch. My first attempt at
+  M21 mis-timed its own regex and reported nothing at all — a mutation script that silently skips is worse
+  than no mutation, so the pair was re-run against the real bytes before it was believed.
+* End-to-end on a real night with a ticket added: `other classes: day=1, verdict=1  (max 832 B - NOT counted
+  against the heartbeat law)` and `line_kind: cycle=102, day=1, verdict=1  (partition closes: 104 == 104)`.
+  The card count stayed **102** while the file grew to **104** — the whole point, on one line.
+* **Booked, not fixed:** `committee.py:436` wraps that write in `except Exception: pass`. A ticket that could
+  not be written is uncountable, which is the same crime as a swallowed error. It is the old factory's shared
+  brain and the owner trades on it, so it goes to **row 15's checkup** as a named item, not into my parcel.
+
+**Parcel (final):** `row14f_hall.zip` · 102,378 B · sha256 `ec01f05b8aa1c628…` · five entries at repo root
+(`factory2_gates.py`, `test_factory2.py`, `committee.py`, `tools/gates_replay.py`, `tools/gates_report.py`),
+0 CR bytes, each byte-identical to the file that ran **116 passed**. Gate table (BEFORE = his tree at 14e):
+`factory2_gates.py c8288c2a→04157c1e` · `test_factory2.py 63353402→cc1df5a0` · `committee.py b01a96cc→b12622a9`
+· `tools/gates_replay.py 86f64b2c→eb65181a` · `tools/gates_report.py ccf9b30b→2bdb4922`.
+Suites on my copy: `116 passed` (his 109 + 14e's 3 + 14f's 4) and `854 passed` repo-wide.
+
+
+### 14f CLOSED IN FULL — and the OWNER'S STANDING NOTE: the loop is OFF, so TODAY HAS NO DATA
+
+**His screen, unedited:** `tasklist | grep -ci python.exe` → **`0`** (both factories quiet). Five BEFORE
+hashes matched my table to the character; five AFTER hashes matched after the unzip (`04157c1e`,
+`cc1df5a0`, `b12622a9`, `eb65181a`, `2bdb4922`); **`116 passed in 189.32s`**; the sail `exit 0` with
+`cycles fed : 75 (skipped 123: post-last-row 103, warm-up 20)`, `1/1 day(s) sailed, 75 cycle(s),
+7 verdict(s). HEALTH: PASS | diary: (stdout only)`; `tpcheck v4s`: `law breaks: 0`, `:28`
+`tp frozen [3868.2000000000003] | sl 2 value(s) [3907.46, 3897.645] | break-even YES`, `:57`
+`sl 1 value(s) [3912.04] | break-even never reached`, `declined lines (no ticket): 14`, `v4s exit 0`.
+**Fourteen numbers staked, all fourteen landed** - and the sail decided exactly what it decided before 14f,
+which is the proof that naming lines changes the BOOK and not the JUDGEMENT.
+
+**The partition, closed on his box.** `kindcheck.py` landed **byte-perfect on the first paste of this whole
+project** (`sha256 0326c2bb72975e141a7b3e37fadc6a9f36a8626112ac4db78ff0c9b4ace6da7c`, 82 lines - every character
+of my 64 matched) and it printed: `lines read : 112 | bytes above 0x7F: 1`, the codepage note naming byte
+`0x97 at 82770` **instead of dying**, `named classes : cycle=75, verdict=7, day=1`, `other lines :
+NOT-JSON=29`, and `the equation : 112 == 29 + 75 + 1 + 7` -> `VERDICT: PASS`, `exit 0`. **No `UNNAMED` anywhere,
+on the first live use of the law.** 14e and 14f are now both closed by his own instruments, not mine. My
+`~21` for NOT-JSON was low because MY rehearsal day had no verdicts to print; the human block is a property of
+the RUN, which is exactly why the equation, not any single count, is the thing to trust.
+
+**Two lines of my handover failed, both mine, and the second failure is the one worth keeping.**
+(1) My partition one-liner opened `/c/Users/Jafar/r14f.txt` - an **MSYS path**, which `bash` understands and
+**Windows python does not**: `FileNotFoundError`, while the very next line (`grep ~/r14f.txt`) read the same
+file happily. Rule booked: a path inside `"$PY" -c` must be a Windows path or `expanduser("~")`. (2) So I
+sent the `expanduser` version - and it died again, differently: `UnicodeDecodeError`, `byte 0x97`.
+**The lesson is that fixing the first error only revealed the second, and that my tool was reading a log with
+a stricter grammar than the house's own tools use.** `gates_report.py:99` and `tpcheck.py:19` read with
+`errors="ignore"` and graded that exact file; my line did not, so my line broke. The answer is not a cleverer
+one-liner - it is `kindcheck.py`, a file of its own that names its byte policy, prints the equation, and
+exits 1 when a line has no name. **LAW 107.** A man-shaped lesson too: I had to be told twice about the same
+file by the same owner, and the second time the honest move was to reproduce his failure on my own copy
+(re-encoding my log to cp1250 gave the identical exception) instead of sending a third guess.
+
+### 🧭 STANDING NOTE FROM THE OWNER (`2026-11-24`, his words) — no data today, focus is finishing factory 2
+
+He stopped the loop on purpose and set the aim: **finish the new factory 2 and start using it properly.**
+Recording the consequence honestly, because a book that hides a hole is worse than the hole:
+
+* **Today has NO tape and NO diary in either factory.** The graded, gradeable days stay
+  `2026-11-04 / -05 / -06 / -12 / -13`. Any number I or he quotes for TODAY is **not measured** - do not
+  write one, do not believe one, do not let any report imply one. `report_evening_gates.sh` on today will
+  say `no diary`/`0 prints`, and that answer is CORRECT, not a failure to fix.
+* The old factory is not mirroring the market while it is stopped. That is his decision and his risk to
+  carry; nothing in my parcel touches it.
+* **"Start using it" has a safe order, and it is not the lever.** 14f's live hall reads and writes only:
+  `factory2_gates.py` has **no order path at all** (checked by grep: the live branch borrows
+  `step1_data_acquisition.DataAcquisition` for eyes and `step2_market_analysis.analyze_market` for the
+  brain; `ALLOW_LIVE_TRADING` is never read). So a live day of the NEW hall - `--live` without `--dry` -
+  is a **book-writing run**, and it is the fastest way to have something real to grade tonight
+  (`diary = data/gates_shadow_<today>.jsonl`, plus `gates_rung_state.json`, and `fold_day` on start).
+  The lever stays last, stays his, and stays off until L1-L4 + 15 are green - **and 15 is not green yet.**
+
+### L4 REHEARSED — the bedtime paper already exists, and two traps surfaced on MY box first
+
+He asked what to do next, so I ran his own `report_evening_gates.sh` on my copy instead of inventing a report
+— the house law: consult what exists before writing. All three findings are from actually running it:
+
+1. **A sea with no tape folder sails nothing — and the paper refuses out loud.** My first run printed
+   `day 2026-11-13 (src=None)`, `NOT RUN: only 0 prints in window`, `0 cycle(s)`. Cause: discovery globs
+   `ticks_*.csv*` under the directory it is *handed* (`gates_replay.py:120/136`) plus `data/archive/`, and my
+   flat `data/ticks_20261113.csv` was invisible to it. With `GATES_DATA_DIR=/home/user/t14e/data` the same
+   night fed **102 cycles**. His box finds the tape without it, so **I am not touching that** — what matters
+   is the guard: this failure is graded `[FAIL] THE SEA` with
+   `READ THIS AS: … the tape is fine, the request was impossible`, never a quiet zero.
+2. **`--no-heartbeat` is honoured, not punished** (item 24): Section A prints
+   `not asked to: --no-heartbeat (hall off)` and the night reads `SEA-GRADE ONLY … no health certificate is
+   given or withheld`. I nearly called that a bug — the sea writes `gates_replay_<day>.jsonl` while the
+   teacher reads `gates_shadow_<day>.jsonl` — and running it proved the split is **by design and says so on
+   the page**. `--write-diary` cannot rescue it through the shell either: `a.diary_out` is tested BEFORE
+   `a.write_diary` (`gates_replay.py:1409-1416`) and the shell always passes `--diary-out`, so that flag is
+   true of a hand-run sea and unreachable from the evening script. Booked, **not fixed** — choosing which
+   book Section A grades is the owner's call, not a side effect of my parcel.
+3. **The full paper on a tape night is one flag away:**
+   `python tools/gates_report.py --date 2026-11-13 --diary data/gates_replay_20261113.jsonl --sea
+   data/gates_sea_20261113.json --hall-off` → `diary: gates_replay_20261113.jsonl (103 lines)`, Section A
+   every row PASS, **`NIGHT GRADE: 9 PASS / 5 WARN / 0 FAIL / 3 not-answerable`**.
+   So L4 needs no new program — it needed 14f's classes and this one command.
+
 
 ## 🅱️ ROOM B — THE JUDGE *(steps 4-7 — the engine we started from)*
 
@@ -5293,7 +6571,10 @@ Proof, one line: `run_cycle()` is defined ONCE at `factory2_gates.py:337` and **
 2. **A live day is ONE pass, not a hundred.** Replay can be re-sailed until the arithmetic agrees; live gets each
    minute once, in order, at market speed — which is exactly why every law here is written as *abstain and stamp*,
    never *guess*.
-3. **There is still no Room E.** Live gives you cards and a diary, not a closed position in profit or loss.
+3. **Room E now exists, but unwired - that is what the sentence above used to mean.** It was written `2026-11-17`,
+before the build. As of `2026-11-23` the hands EXIST as shadow code (`tools/factory2_hands.py`, 22 tests, 13
+mutations 0 survivors) and exist NOWHERE ELSE: live still gives you cards and a diary, not a closed position, and
+the room is not wired after the judge until the owner says go. See `3.5al` and `3.5am`.
 
 > 🧒 **Yes, the same machine can watch the live market** — because we never built a "yesterday robot". We built
 > ONE robot and, while testing, we showed it a **recording** instead of the window. Rooms A-B-C-D are the same
