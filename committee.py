@@ -36,6 +36,12 @@ FRESH_MAX_SECONDS = 15.0   # fire-law (1) fresh eyes (Book receipts: 18.6s ages 
 NEWS_DEADBAND = 0.15       # Book #12-sealed crier floor: |news| below => no vote
 FLAT_LAKE_ER = 0.22        # G1 guard: ER below this FORCES hard BELLY
 MAX_SPREAD_PCT = 0.010     # fire-law (4) look-both-ways: sanity cap, tuned at rules-time
+try:                                       # D5: one home - config.py:267 ADVERTISES this
+    import config as _cfg                  # setting; the .env value now REALLY arms the
+    MAX_SPREAD_PCT = float(                # door (until today it changed nothing for G3)
+        getattr(_cfg, "MAX_SPREAD_PCT", MAX_SPREAD_PCT) or MAX_SPREAD_PCT)
+except Exception:                          # bare imports (no config on path) keep 0.010
+    pass
 TOLL_CLOSES = 2            # verdict law 1: 2 consecutive M3 closes beyond = moved in
 TOLL_HOLD_MIN = 5.0        # verdict law 1: or 5+ minutes holding with volume building
 # v8f (2026-11-14, the owner's two measured nights - item 48). Law 1 could only
@@ -437,8 +443,10 @@ def attempt_fire(verdict: Dict[str, Any], rung: Optional[Rung], pre: Dict[str, A
                                           #   below - a verdict that could not be written is uncountable.
                           "ticket": ticket, "verdict": verdict["verdict"],
                           "rung": rung.name if rung else "", "card": verdict["card"]})
-        except Exception:
-            pass
+        except Exception as exc:           # D5 / LAW 114 family: a jammed pen is LOUD. The
+            import sys as _sys             # verdict still counts (allow unchanged) - but the
+            print(f"[committee] VERDICT LINE WRITE FAILED: "
+                  f"{type(exc).__name__}: {exc}", file=_sys.stderr)   # LOST line prints itself.
     return {"allow": bool(ticket), "ticket": ticket, "fails": fails}
 
 

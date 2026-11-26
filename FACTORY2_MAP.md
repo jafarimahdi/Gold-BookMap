@@ -19,7 +19,7 @@ back from GitHub (`f70728d` code, `dc280b0` paper).  ← YOU ARE HERE.
 WHERE WE ARE GOING — one step per message, in THIS order (the number is the TODO row; `[you]` = you run a block,
 `[me]` = I cut it). Nothing in rows 3-9 changes what the factory DECIDES; they make it impossible to misread what
 it DID.
-  ▸NOW   FIRST LIVE DAY DONE, SAVING TO GITHUB: the day happened. Tab 1 ran the hall `--live`
+  ▸NOW   DAY 1 GRADED: HEALTHY (sea passed). Tab 1 ran the hall `--live`
                                    all morning; 12 real cycles reached `data/gates_sandbox/
                                    gates_shadow_20261125.jsonl` and his own teacher graded them
                                    `9 PASS / 2 WARN / 0 FAIL`, `partition closes: 12 == 12`,
@@ -36,6 +36,19 @@ it DID.
                                    row 15's whole ledger (OI=BLIND, settings walk, USD mapper,
                                    the two swallowed writes, the dead `--record-shot`, the
                                    MAX_SPREAD_PCT split). Lever stays his, last.
+  ▸DEMO  ROAD TO DEMO (owner `2026-11-25`, TODO sec.D): D5 CLOSED; D6 1/5 graded HEALTHY ->
+                                   D1 donor autopsy, organ by organ with line numbers (the demo
+                                   guard ALREADY exists old-side: step4 `:386-398`) ->
+                                   D2 live hands in the hall (`--live --hands-shadow`, hook
+                                   `:403` waits) + Section C's dead words fixed, it IS the
+                                   twin scoreboard -> D3 `tools/factory2_exec.py`: copy the
+                                   donor's wire (send :622, buckets :528, PROOF :858-925),
+                                   FLIP its TRADING_ENABLED default to OFF, write a NEW diary
+                                   class `order`, guard every path with a failing test first ->
+                                   D4 one-order selftest on the DEMO terminal -> D5 row-15
+                                   safety subset (two swallowed writes, spread-law home,
+                                   diary-folder truth) -> D6 demo days until 5 gradeable ->
+                                   THE LEVER: his hand, last, demo-world until he says.
   ▸HOW   A HAND-OVER IS ONE SMALL PASTE  law 102: two SILENT failed installs. A downloaded file can
       AND IT NAMES ITS OWN BUILD         stay OLD while its output still reads right. Tools ship now
                                          as one `cat > f <<'PYEOF'` block AND print their build on

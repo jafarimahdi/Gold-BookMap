@@ -6140,6 +6140,45 @@ breaks across lines in the file) and the chained `git commit` ran anyway, so the
 caught by re-reading, not by the exit code of the chain. LAW 109's lesson, on me again: an exited script proves
 nothing; the file proves.
 
+**PUSH SEALED, PROVEN FROM OUTSIDE (`fdac3f1`, minutes later):** GitHub's `strategy-v2` tip =
+`fdac3f1a1075fc700f77921b1c2e0d15139d8aad` - his `git rev-parse HEAD` and `ls-remote` agree; I fetched ALL NINE
+pushed files anonymously from `raw.githubusercontent.com` AT THAT SHA and re-hashed: **9/9 byte-identical** to the
+artifacts (5 code + kindcheck + the three papers), and the GitHub book already carries `LAW 111`, the
+`FIRST LIVE DAY` section and the moved ▸NOW. For the first time in this project the laws and the machine exist on
+the same durable shelf, not only in my sandbox. His `status -sb` printed `## strategy-v2...origin/strategy-v2`
+(disk == remote) with ONE known leftover: `M Workspace/26,09,16-23.20.bmw` - older than factory 2, row 3d's
+history already says "attic/jar/bmw stayed out"; it is the owner's shelf-declutter, never ours to sweep.
+What the push did NOT do: change one running byte of tab 1 - the hall kept writing the same day it started.
+
+**THE NEXT GOAL, THE OWNER'S WORDS (`2026-11-25`):** *"if the new factory2 is able to start to trade and work,
+we use demo account and thats our goal... when you got some problems and faced issue, you can check the old
+factory and see how the system was working there end to end and make copy of that work."* The honest answer I
+gave, with receipts: **decide - yes (today's live day); open a position - not yet**: no broker wire in the hall
+(by design, the `:403` hook waits for hands nobody passes in live mode), no minute-manager in the loop, no demo
+guard. The donor already built all three - `step4_mt5_execution.py` (send `:622`, retcode buckets `:528`,
+close verified by `positions_get` as PROOF `:858-925`), `position_manager.py:1115 manage()` called in-loop at
+`main.py:3063`, and a **gate 4b demo guard at `step4:386-398` that refuses REAL accounts** - so D1-D6
+(TODO section D) is a COPY road, not an invention road. Two design decisions booked now, while the old hall still
+runs: the donor's `TRADING_ENABLED` DEFAULTS ON (`config.py:253`) - **ours will default OFF and no single env
+edit arms it**; and a real order book gets its OWN diary class `order` so the 14f partition still closes -
+kindcheck must stay TRUE across the whole road. The lever stays his, last, in a demo world.
+
+**The owner overrode the clock (`2026-11-25`, minutes later):** *"i want to finish these steps now and the app
+start to work, please we don't need to wait until night... build and add to it, and it should start to trade and
+open and manage positions after it, i don't want we wait more."* The road compressed WITHOUT skipping organs:
+D1's autopsy ran first (every donor organ read AT its line numbers before one new line was written) and D2+D3
+shipped as one parcel because both live in files the running hall does not import until the flag is given. The
+donor's house became our law, four times over: (1) its `TRADING_ENABLED` defaults **ON** (`config.py:253`) - the
+mirror has no such switch: arming = explicit flag + a PROVEN demo/contest `trade_mode`, unknown mode refuses,
+stricter than gate 4b; (2) "a receipt is not proof" (`step4:784`) - an order exists only when `positions_get`
+shows it, and `NOT-SEEN` is a named diary outcome; (3) broker-is-truth - after any restart `discover()`
+reconciles against the terminal, no local ghost ledger; (4) a position that vanished at the broker (its stop hit
+before the paper's) sets LOST-PENDING and BLOCKS a new open - the mirror never fights a stop-out. One rung NOT
+compressed: D5 stays its own parcel tomorrow, because widening the door (the 0.010 % spread cap that refused 3
+verdicts today) on the SAME day the money-wire lands would mix two causes in one diff. My own near-miss while
+booking this: the first version of this paragraph died in a quote-escaping SyntaxError - parse-time, so NO file
+moved; the hashes above were re-read from the files, not from that crashed script.
+
 **Three findings from reading his report against the code, not against my memory:**
 
 1. **`--hall-off` LIED about today.** `gates_report.py:715-718` prints `SEA-GRADE ONLY (hall off) … no health
@@ -6164,6 +6203,72 @@ nothing; the file proves.
    a `None` spread would have been replaced by the hall's assumed `0.005` and stamped `spread:assumed`,
    `factory2_gates.py:241-245`, and 0.005 % passes the cap). **Fix = say what exists, and put the setting and the
    law in one place.** Both are OUR files now, so both are row 15 with a test, not a footnote.
+
+**LAW 112 (a tool tested only by IMPORT has never RUN as a SCRIPT).** The first selftest on the owner's box
+crashed: `python tools/factory2_exec.py` -> `ModuleNotFoundError: No module named 'config'` - because a script
+inside `tools/` gets `sys.path[0]=tools/`, not the repo root, while every one of my 11 tests imported the module
+FROM root, where the import resolves fine. The one path untested was the exact line I had told the operator to
+type. The house ALREADY had the answer (`tools/gates_replay.py:34-38`: bootstrap ROOT+HERE onto sys.path) -
+copied verbatim, version stamped `.2`, and `MetaTrader5`-missing became an `ExecRefused` too: on any machine,
+every answer is a NAMED outcome, no path may end in a traceback. The new test runs BOTH commands in a
+subprocess and asserts `nothing to do` / no `Traceback` / exit in the allowed set - a rehearsal of the HAND-OVER,
+not of the library. The general law: **rehearse the exact command the owner will type.** The owner's guard held
+again too: every hash matched before he ran anything, the crash was loud, and no money stood anywhere near it.
+
+**LAW 113 (a broker answer of `UNKNOWN` is usually a MISSING FIELD, not a mystery - and my bucket table was
+smaller than the donor's on purpose nobody chose).** First real DEMO touch ever through factory 2
+(`2026-11-25`, evening): `ARMED demo login 62153279 XAUUSD 0.01` - my guard proved the account type and the
+terminal answered; then `OPEN bucket=UNKNOWN`. Two faults, one parcel: v.1 never set `type_filling` (the donor's
+requests ALWAYS carry it - `step4:885-896`, chosen IOC→FOK→RETURN by the symbol's flags at `:1028-1037`), and I
+had copied only PART of the donor's retcode taxonomy (`:512-525` + its named 10016/10019 operator text
+`:544-545`), so even a KNOWN code could print as UNKNOWN. v.1 also buried the number in the diary `reason` and
+printed only act/bucket - the operator saw less than the file knew. v.3: donor's filling selection verbatim, named
+`INVALID-STOP`/`NO-MONEY` buckets, and `retcode=` + `reason=` now on every failure line on screen.
+**The law: when copying an organ, copy the WHOLE organ - the request shape AND the error table - and print what
+you print INTO the diary.** He who reads the donor's line numbers first guesses nothing.
+
+**LAW 114 (code that CLAIMS about paper must be made TRUE by paper).** Right after the historic PASS, I asked
+the owner to grep the day's diary for the v.1 failure line - and `grep '"order"' … | tail -2` printed **nothing**.
+Because v.1's (and v.3's) `--selftest-demo` path builds `DemoMirror()` with **no pen**, yet its failure text
+says *"see the order line above"*: a claim inside a string, false in the file. The day-diary was ALSO empty of
+`order` lines for a second reason - the live hall hadn't been relaunched with hands yet. Both truths booked; the
+fix rides tomorrow's D5 parcel (cause hygiene, one diff): selftest writes its OWN named book
+`data/gates_sandbox/gates_selftest_<day>.jsonl` - `order`-shaped lines stamped `selftest:true` - and NEVER
+appends into a running hall's diary, so the day's partition stays exactly the day's. The general law: **every
+sentence a program prints about paper is a CLAIM; test it by reading the paper - rehearsals are paper too.** And D5, built the same night without waiting, closed both open claims honestly: the
+selftest got its OWN book (`gates_selftest_<day>.jsonl`, named lines, `selftest:true`), and the spread law got
+its ONE home - which went through a near-miss: I first moved the shared `config` DEFAULT to the tuned 0.010 and
+the OLD factory's oct28 test went RED - proof the retired-but-not-deleted factory is still ALIVE in the test
+suite (LAW 108 means exactly that). The fix the book demanded: default stays the DONOR's 0.05, committee reads
+it, the hall's door therefore widens on restart AS AN ORDERED COPY of the donor's end-to-end behavior, printed
+on the boot line so nobody ever wonders which cap is in force. The teacher's sandbox-first lookup closes LAW 110
+by choosing the SANE promise (one drawer, words matching deeds) over the day-splitting alternative I had feared;
+the version-seal test caught my bump and I moved its expectation BY HAND - the seal doing its job.
+
+*The receipt this law sits next to is the one the whole road was built for:* `SELFTEST: PASS (ticket 102826760
+opened AND proved gone)` - factory 2's first and only kind of trade so far: tiny, demo, opened, managed by the
+mirror, closed, and PROVEN GONE at the broker, with the account-type guard having said DEMO first.
+
+**LAW 115 (a test that CAN trade, on the only box where a broker lives, IS a trade - arm the exit before
+shipping the door).** One minute before the owner ran the D5 block, he asked a housekeeping question ("tab 1 still
+runs - keep it?"). Answering it forced the last re-read of the parcel, and the parcel had a landmine: the LAW-112
+test runs `python tools/factory2_exec.py --selftest-demo` in a subprocess - harmless where no MetaTrader5 exists
+(my box: REFUSED), but ON THE OWNER'S BOX, terminal open, demo logged in, it would have OPENED AND CLOSED A REAL
+DEMO ORDER every single pytest run - the assertions would have PASSED while the machine traded. No test suite may
+be able to move money: the executor now refuses everything when `F2_SELFTEST_DISABLE=1` (exit 8, named), and the
+test asserts THAT - so it is deterministic on every machine and cannot trade on any. `83 + 874 passed` after; the
+ship list re-measured (exec `93d80eac3b72`, tests `e51ef2d310c2`, zip v2 `085ee3a0cc20`), old zip hashes void -
+re-download, do not reuse. The general law: **the box that has a broker is not the box you tested on; env
+kill-switches belong on every command that can touch money, BEFORE the first run on the dangerous one.**
+
+**The first armed night, as the owner's own paste records it:** the wide door is in force (`spread cap in
+force: 0.05 %` printed at boot - a setting finally meaning what it says), the hall armed itself on the demo
+account (`EXEC ARMED`), the diary carries BOTH arming lines (`55 == 53 cycle + 2 order`, kindcheck PASS), the
+rehearsal traded its second pair of tickets (`102839925` open->proof->close->gone) AND left paper this time, and
+the machine still refused to take a strategy position because none was earned: `TOLL=paid | EXCESS=c4/h10m` on a
+cycle that read `PUSH=NONE`. A door that waits for the verdict is the whole point - readiness and restraint now
+live in the same process. The pytest-run is safe with the terminal open BY DESIGN (LAW 115's gate), so the 83
+can be re-proved on his box any minute without anyone's money moving.
 
 ### ROW 14 CLOSED IN FULL (`2026-11-24`) — the same day, decided again, and the log can finally prove the lawn
 

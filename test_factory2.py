@@ -1966,7 +1966,7 @@ def test_the_hall_stamps_its_own_name_and_the_seal_moved():
     # .1 = BELT-1 (2026-11-14): the teacher gained the counter audit. The seal moves
     # WITH the gate or the receipt reads state instead of paper - that is the whole
     # reason this test pins a string, so bumping a stamp means editing it HERE.
-    assert 'REPORT_VERSION = "gates.report.2026-11-17.3"' in rep
+    assert 'REPORT_VERSION = "gates.report.2026-11-25.4"' in rep
     import committee as C
     assert getattr(C, "ACCEPT_BEFORE_BOUNCE", None) is True
     assert getattr(C, "ACCEPT_MARK", "") == "REPLAY/"
@@ -2325,3 +2325,322 @@ def test_the_committee_verdict_line_names_itself_14f():
     assert len(got) == 1, f"expected exactly one ticket line, got {len(got)}"
     assert got[0].get("line_kind") == "verdict", got[0]
     assert got[0].get("ticket") == f["ticket"], "the named line must carry the ticket it names"
+
+
+# ============================= D3: tools/factory2_exec.py - the MIRROR ==================
+# Every organ copied from the donor (step4_mt5_execution.py); every guard gets a test that
+# FAILS without it - a law with no failing test is a wish (M20). No real MetaTrader5 exists
+# anywhere in this file: the fake module IS the broker, and the mirror must not know.
+
+class _Tick:
+    def __init__(self, bid, ask):
+        self.bid, self.ask, self.last = float(bid), float(ask), float(ask)
+
+class _PosNS:
+    def __init__(self, ticket, ptype, volume, sl, tp, comment):
+        self.ticket, self.type, self.volume = ticket, ptype, volume
+        self.sl, self.tp, self.comment = sl, tp, comment
+
+class _AccNS:
+    def __init__(self, trade_mode, login=123, equity=1000.0):
+        self.trade_mode, self.login, self.equity = trade_mode, login, equity
+
+class _SymNS:
+    volume_min, volume_step = 0.01, 0.01
+
+class _ResNS:
+    def __init__(self, retcode, order=0):
+        self.retcode, self.order = retcode, order
+
+class FakeMT5:
+    TRADE_ACTION_DEAL, TRADE_ACTION_SLTP = 1, 5
+    ORDER_TYPE_BUY, ORDER_TYPE_SELL, ORDER_TIME_GTC = 0, 1, 0
+    ACCOUNT_TRADE_MODE_DEMO, ACCOUNT_TRADE_MODE_CONTEST, ACCOUNT_TRADE_MODE_REAL = 0, 1, 2
+
+    def __init__(self, trade_mode=0):
+        self._mode = trade_mode
+        self.positions, self.sends = [], []
+        self.tick = _Tick(3900.0, 3900.2)
+        self._next, self._seq, self._shift = 5001, [], None
+    # --- module surface the mirror is allowed to touch, nothing more ---
+    def initialize(self, **kw): return True
+    def last_error(self): return (0, "")
+    def account_info(self): return _AccNS(self._mode)
+    def symbol_info(self, s): return _SymNS()
+    def symbol_info_tick(self, s): return self.tick
+    def positions_get(self, symbol=None): return list(self.positions)
+    def order_send(self, req):
+        self.sends.append(dict(req))
+        rc = self._seq.pop(0) if self._seq else 10009
+        if rc != 10009:
+            if self._shift:                       # broker "moved the price" for the retry test
+                self.tick = _Tick(3901.0, 3901.0)
+            return _ResNS(rc, 0)
+        if req.get("action") == self.TRADE_ACTION_SLTP:
+            for p in self.positions:
+                if p.ticket == req["position"]:
+                    p.sl, p.tp = req.get("sl", p.sl), req.get("tp", p.tp)
+            return _ResNS(rc, req["position"])
+        if req.get("position") is not None:       # close by ticket
+            self.positions = [p for p in self.positions if p.ticket != req["position"]]
+            return _ResNS(rc, req["position"])
+        t = self._next; self._next += 1
+        self.positions.append(_PosNS(t, req["type"], req["volume"],
+                                     req.get("sl", 0.0), req.get("tp", 0.0),
+                                     req.get("comment", "")))
+        return _ResNS(rc, t)
+
+class _Cfg:
+    MT5_RETRY_MAX, MT5_RETRY_BACKOFF_MS, MT5_DEVIATION = 0, 0, 20
+    MT5_CLOSE_VERIFY_SECONDS = 0.05
+    LOT_SIZE, MAX_LOT_SIZE = 0.1, 1.0
+    MT5_SYMBOL, ALLOW_LIVE_TRADING = "XAUUSD", False
+
+def _mirror(mode=0, cfg=None):
+    import tools.factory2_exec as fx
+    pen = []
+    m = fx.DemoMirror(mt5mod=FakeMT5(trade_mode=mode), config_mod=cfg or _Cfg(),
+                      pen=lambda rec: pen.append(rec), print_fn=lambda s: None)
+    return m, pen
+
+def _pos(side="BUY", sl=3899.0, tp=3905.0):
+    return {"side": side, "sl": sl, "tp": tp, "tp_at_open": tp, "sl_at_open": sl,
+            "volume": 0.1, "ticket": "SHADOW/X:1"}
+
+def test_mirror_refuses_real_account_gate4b():
+    m, _ = _mirror(mode=2)
+    import tools.factory2_exec as fx
+    try:
+        m.arm(); assert False, "REAL account must never arm"
+    except fx.ExecRefused as exc:
+        assert "REAL" in str(exc)
+
+def test_mirror_refuses_unprovable_mode():
+    m, _ = _mirror(mode=7)                      # neither demo, contest, nor real - unknown
+    import tools.factory2_exec as fx
+    try:
+        m.arm(); assert False, "unknown trade_mode must refuse too (stricter than the donor)"
+    except fx.ExecRefused as exc:
+        assert "DEMO" in str(exc)
+
+def test_mirror_open_is_mirrored_and_proven_at_broker():
+    m, pen = _mirror()
+    m.arm()
+    shadow = {"pos": None, "cycle_hands": None}
+    shadow["pos"] = _pos()
+    acts = m.sync(shadow, 3900.0)
+    assert acts == ["OPENED"] and m.held == 5001
+    p = m._m().positions[0]
+    assert p.comment.startswith("F2/") and p.sl == 3899.0 and p.tp == 3905.0
+    opens = [r for r in pen if r.get("act") == "OPEN"]
+    assert opens and opens[-1]["proof"] == "SEEN-AT-BROKER"
+    assert opens[-1]["line_kind"] == "order"    # the diary's FIFTH class is real
+
+def test_mirror_close_needs_positions_get_proof():
+    m, pen = _mirror()
+    m.arm(); shadow = {"pos": _pos()}
+    m.sync(shadow, 3900.0)
+    shadow["pos"] = None
+    assert m.sync(shadow, 3900.0) == ["CLOSED"]
+    assert m._m().positions == [] and m.held is None
+    assert [r for r in pen if r.get("act") == "CLOSE"][-1]["proof"] == "GONE"
+
+def test_mirror_moves_sl_when_paper_moved_tp_frozen():
+    m, pen = _mirror()
+    m.arm(); shadow = {"pos": _pos()}
+    m.sync(shadow, 3900.0)
+    shadow["pos"]["sl"] = 3900.5                 # break-even walk (hands moved it)
+    assert m.sync(shadow, 3900.5) == ["MOVED"]
+    assert m._m().positions[0].sl == 3900.5
+    assert m._m().positions[0].tp == 3905.0       # TP does NOT move - law 13, mirrored
+
+def test_mirror_lost_position_blocks_a_new_open():
+    m, fake = None, None
+    m, pen = _mirror()
+    fake = m._m()
+    m.arm(); shadow = {"pos": _pos()}
+    m.sync(shadow, 3900.0)
+    fake.positions.clear()                        # broker's stop fired before the paper's
+    acts = m.sync(shadow, 3900.0)
+    assert acts == ["LOST", "LOST-PENDING"] and m.held == -1
+    n_before = len(fake.sends)
+    m.sync(shadow, 3900.0)                        # must NOT re-open while the paper still holds
+    assert len(fake.sends) == n_before
+    shadow["pos"] = None
+    assert m.sync(shadow, 3900.0) == ["LOST-CLEARED"]
+
+def test_mirror_never_touches_foreign_positions():
+    m, pen = _mirror()
+    m.arm()
+    m._m().positions.append(_PosNS(7777, 0, 0.5, 0.0, 0.0, "OTHER/owner-manual"))
+    shadow = {"pos": None}
+    assert m.sync(shadow, 3900.0) == []
+    assert m._m().positions[0].ticket == 7777     # foreign soil: untouched, uncounted
+    assert m.discover() == []                     # and invisible to our ledger
+
+def test_mirror_discover_adopts_ours_after_a_restart():
+    m, pen = _mirror()
+    m.arm()
+    m._m().positions.append(_PosNS(9001, 0, 0.1, 3899.0, 3905.0, "F2/live"))
+    assert m.discover() == [9001] and m.held == 9001   # broker is the state of truth
+
+def test_mirror_retry_refreshes_price_and_bracket():
+    class _C(_Cfg):
+        MT5_RETRY_MAX = 1
+    m, pen = _mirror(cfg=_C())
+    m._m()._seq = [10004, 10009]                  # REQUOTE, then DONE
+    m._m()._shift = True
+    m.arm()
+    t = m.open_mirror("BUY", 3900.0, 3899.0, 3905.0, 0.1)
+    assert t == 5001
+    s0, s1 = m._m().sends[-2], m._m().sends[-1]
+    assert s0["price"] == 3900.0 and s1["price"] == 3901.0
+    assert s1["sl"] == 3900.0 and s1["tp"] == 3906.0   # stale bracket never re-sent (donor law)
+
+def test_kindcheck_names_the_fifth_class():
+    import pathlib as _pl
+    txt = (_pl.Path(__file__).resolve().parent / "tools" / "kindcheck.py").read_text(
+        encoding="utf-8")
+    assert '"order"' in txt.split("NAMES")[1][:120]
+    assert "five named classes" in txt
+
+def test_hall_refuses_hands_demo_with_demo_or_dry(capsys):
+    import factory2_gates as f2
+    assert f2.main(["--demo", "--once", "--hands-demo"]) == 2
+    assert "REFUSED" in capsys.readouterr().out
+    assert f2.main(["--live", "--dry", "--hands-demo"]) == 2
+
+def test_exec_runs_as_a_script_the_way_the_owner_types_it():
+    """LAW 112: v.1 died on `python tools/factory2_exec.py` with ModuleNotFoundError(config)
+    while every import-based test passed - the REHEARSAL must run the exact command handed
+    to the operator, not only the library behind it. Subprocess, repo-root cwd, no mocks."""
+    import subprocess, sys
+    from pathlib import Path as _P
+    root = _P(__file__).resolve().parent
+    r = subprocess.run([sys.executable, "tools/factory2_exec.py"],
+                       capture_output=True, text=True, cwd=str(root), timeout=120)
+    assert r.returncode == 2 and "nothing to do" in r.stdout       # bare run: speaks, exits clean
+    import os as _os
+    env = dict(_os.environ, F2_SELFTEST_DISABLE="1")      # LAW 115: on a box WITH the broker,
+    r2 = subprocess.run([sys.executable, "tools/factory2_exec.py", "--selftest-demo"],
+                        capture_output=True, text=True, cwd=str(root), timeout=180, env=env)
+    assert "Traceback" not in r2.stderr                            # any machine: NO crash, ever
+    assert r2.returncode == 8 and "DISABLED" in r2.stdout          # and NO TRADE, on ANY machine
+
+def test_mirror_sends_filling_ioc_when_symbol_allows_it():
+    """LAW 113: a demo broker said `UNKNOWN` to v.1 because no `type_filling` was sent at
+    all. The donor always sends it, chosen by flag priority IOC(2) -> FOK(1) -> RETURN(0)."""
+    class _SymIOC:
+        volume_min, volume_step, filling_mode = 0.01, 0.01, 2
+    m, pen = _mirror()
+    m._m().symbol_info = lambda s: _SymIOC()
+    m.arm()
+    t = m.open_mirror("BUY", 3900.0, 3899.0, 3905.0, 0.1)
+    assert t == 5001
+    assert m._m().sends[-1]["type_filling"] == 1          # IOC
+    class _SymRet:
+        volume_min, volume_step, filling_mode = 0.01, 0.01, 0
+    m2, _ = _mirror()
+    m2._m().symbol_info = lambda s: _SymRet()
+    m2.arm()
+    m2.open_mirror("BUY", 3900.0, 3899.0, 3905.0, 0.1)
+    assert m2._m().sends[-1]["type_filling"] == 2         # RETURN fallback (donor's last way)
+
+def test_mirror_failure_prints_the_brokers_own_number():
+    class _C(_Cfg):
+        MT5_RETRY_MAX = 0
+    m, pen = _mirror(cfg=_C())
+    m._m()._seq = [10016]                                  # donor's named INVALID_STOPS
+    m.arm()
+    assert m.open_mirror("BUY", 3900.0, 3899.0, 3905.0, 0.1) is None
+    line = [r for r in pen if r.get("act") == "OPEN"][-1]
+    assert line["bucket"] == "INVALID-STOP" and line["retcode"] == 10016
+
+# ======================= D5: one home, two loud pens, sandbox-first, rehearsal paper ======
+
+def test_d5_spread_law_has_one_home():
+    """LAW 111's 'one place' fix: the G3 cap IS config.MAX_SPREAD_PCT now - a .env edit
+    moves the door, which until tonight it never did."""
+    import config, committee
+    assert float(committee.MAX_SPREAD_PCT) == float(
+        getattr(config, "MAX_SPREAD_PCT", 0.010) or 0.010)
+
+def test_d5_spread_gate_moves_with_the_cap():
+    import committee
+    def fire(spread, cid):
+        lines = []
+        pre = {"age_s": 0.0, "bar_closed": True, "sensors_ok": True, "spread_pct": spread,
+               "news_blackout": False, "position_count": 0, "max_positions": 1,
+               "daily_loss_ok": True, "kill_switch": False, "diary": lines.append,
+               "symbol": "TEST", "cycle_id": cid}
+        out = committee.attempt_fire({"verdict": "BOUNCE", "blocked": False,
+                                      "card": "L3Q=ok"}, None, pre,
+                                     committee.TicketLedger())
+        return out, lines
+    out, _ = fire(committee.MAX_SPREAD_PCT + 0.001, "c-wide")
+    assert "LOOK-BOTH-WAYS:spread" in out["fails"] and not out["allow"]
+    out2, lines = fire(0.0, "c-tight")
+    assert out2["allow"] and lines and lines[0]["line_kind"] == "verdict"
+
+def test_d5_jammed_verdict_pen_prints_loud(capsys):
+    import committee
+    def boom(rec):
+        raise RuntimeError("jam")
+    pre = {"age_s": 0.0, "bar_closed": True, "sensors_ok": True, "spread_pct": 0.0,
+           "news_blackout": False, "position_count": 0, "max_positions": 1,
+           "daily_loss_ok": True, "kill_switch": False, "diary": boom,
+           "symbol": "TEST", "cycle_id": "c-boom"}
+    out = committee.attempt_fire({"verdict": "BREAK", "blocked": False, "card": "L3Q=ok"},
+                                 None, pre, committee.TicketLedger())
+    err = capsys.readouterr().err
+    assert "VERDICT LINE WRITE FAILED" in err      # loud now - never again swallowed
+    assert out["allow"]                           # the verdict itself keeps its meaning
+
+def test_d5_jammed_diary_pen_prints_loud_and_counts(tmp_path, capsys):
+    from factory2_gates import Pen
+    try:
+        p = Pen(tmp_path)                           # a DIRECTORY as the diary path = guaranteed jam
+    except TypeError:
+        p = Pen(str(tmp_path))
+    p({"line_kind": "cycle", "t": "now"})
+    err = capsys.readouterr().err
+    assert "DIARY WRITE FAILED #1" in err and int(getattr(p, "failures", 0)) == 1
+
+def test_d5_rehearsal_is_paper_too(tmp_path, monkeypatch):
+    """LAW 114: the selftest pen writes NAMED lines to its OWN book, never the day diary."""
+    import json as _j
+    import tools.factory2_exec as fx
+    monkeypatch.setattr(fx, "ROOT", tmp_path)
+    pen = fx._selftest_pen()
+    assert pen is not None
+    pen({"line_kind": "order", "act": "ARM", "bucket": "REFUSED", "v": fx.EXEC_VERSION})
+    lines = [_j.loads(x) for x in
+             open(pen.path, encoding="utf-8").read().strip().splitlines()]
+    assert lines[-1]["selftest"] is True and lines[-1]["line_kind"] == "order"
+    assert (tmp_path / "data" / "gates_sandbox").exists()   # own drawer, own book
+
+def test_d5_teacher_follows_the_quarantined_diary(tmp_path, monkeypatch, capsys):
+    """LAW 110 closed: on a live day the teacher finds the diary in the SANDBOX by itself."""
+    import json as _j
+    monkeypatch.delenv("GBM_DATA_DIR", raising=False)
+    import config
+    data = tmp_path / "data"
+    sand = data / "gates_sandbox"
+    sand.mkdir(parents=True)
+    rec = {"line_kind": "cycle", "t": "2026-11-25T10:00:00Z", "t_tape": "2026-11-25T10:00:00Z",
+           "mode": "live", "cycle_id": "c1",
+           "gates": {"g1": {"mood": "WALK"}, "g2": {}, "g3": {"verdicts": 0}},
+           "atr": 12.0, "price": 3900.0}
+    (sand / "gates_shadow_20261125.jsonl").write_text(
+        _j.dumps(rec) + "\n", encoding="utf-8", newline="\n")
+    monkeypatch.setattr(config, "DATA_DIR", data, raising=False)
+    import tools.gates_report as rep
+    fn = getattr(rep, "main", None) or getattr(rep, "run", None)
+    assert fn is not None, "no main() on the teacher - the auto-discovery is unreachable"
+    r = fn(["--date", "2026-11-25", "--hall-off"])   # no --no-heartbeat: THAT is the shell's
+    assert r in (0, 1)                               #   flag, not the teacher's - argparse
+    #                                                      would die with SystemExit(2) here
+    out = capsys.readouterr().out
+    assert "gates_shadow_20261125.jsonl" in out and "lines)" in out
+
+

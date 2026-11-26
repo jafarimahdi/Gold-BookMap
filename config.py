@@ -264,6 +264,13 @@ def _refresh() -> None:
 
     g["CONFIRM_ENABLED"] = _fget("CONFIRM_ENABLED", "1") == "1"
     g["CONFIRM_TIMEFRAMES"] = _fget("CONFIRM_TIMEFRAMES", "H1,M15,M5")
+    # D5 (LAW 111's "one place" fix) v.2: committee.py READS this setting now, so the
+    # .env value actually arms the door - which it never did before. The DEFAULT stays
+    # 0.05 = the old shooter's own cap, because an oct28 test guards THAT behavior and
+    # the donor is retired-but-not-deleted (LAW 108). Side effect accepted ON PURPOSE:
+    # the hall's G3 door moves 0.010 % -> 0.05 % of price on restart - the donor's
+    # end-to-end number, exactly what "copy the old system's working" ordered. The
+    # boot line prints the cap in force; .env `MAX_SPREAD_PCT=0.010` tightens it again.
     g["MAX_SPREAD_PCT"] = _ffloat("MAX_SPREAD_PCT", 0.05)
 
     g["ORDER_BLOCKS_ENABLED"] = _fget("ORDER_BLOCKS_ENABLED", "1") == "1"

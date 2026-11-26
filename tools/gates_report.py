@@ -36,7 +36,7 @@ for _p in (str(ROOT), str(HERE)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-REPORT_VERSION = "gates.report.2026-11-17.3"   # TALLY-2: asserts the doorman's own equation (row 3) - and refuses to grade a pre-.3 paper as if it had `allowed`   # BELT-1: the teacher audits the sea's own counters (item 46 still holds: a verdict is scored from the ROWS)
+REPORT_VERSION = "gates.report.2026-11-25.4"   # TALLY-2: asserts the doorman's own equation (row 3) - and refuses to grade a pre-.3 paper as if it had `allowed`   # BELT-1: the teacher audits the sea's own counters (item 46 still holds: a verdict is scored from the ROWS)
 MAX_LINE_BYTES = 1100          # ~1KB diary line law (+10% slack for long rung names)
 CPU_PCT_BUDGET = 0.3           # percent of one core, the owner's cap
 STAMPS_ALLOWED = {
@@ -645,6 +645,16 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     import factory2_gates as f2
     data_dir = Path(a.dir) if a.dir else f2.resolve_data_dir(None)
+    if not a.dir:
+        # D5 closes the folder trap of LAW 110 for good: the hall's papers live in the
+        # QUARANTINED drawer, so the teacher follows the diary before it ever says "none".
+        _dc = (a.date or datetime.now(timezone.utc).strftime("%Y-%m-%d")).replace("-", "")
+        if not (data_dir / f"gates_shadow_{_dc}.jsonl").exists():
+            _sand = data_dir / str(getattr(f2, "DATA_SANDBOX_NAME", "gates_sandbox"))
+            if ((_sand / f"gates_shadow_{_dc}.jsonl").exists()
+                    or (data_dir / f"gates_shadow_{_dc}.jsonl.gz").exists() is False
+                    and (_sand / f"gates_shadow_{_dc}.jsonl.gz").exists()):
+                data_dir = _sand
     day = a.date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
     day_c = day.replace("-", "")
     buf: List[str] = []

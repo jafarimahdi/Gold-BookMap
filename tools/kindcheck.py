@@ -11,7 +11,7 @@ import json
 import sys
 from collections import Counter
 
-NAMES = ("cycle", "verdict", "day", "error")        # the four named classes of a diary line
+NAMES = ("cycle", "verdict", "day", "error", "order")        # the five named classes of a diary line
 
 
 def scan(path):

@@ -39,7 +39,7 @@ for _p in (str(HERE), str(HERE / "tools")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-FACTORY2_VERSION = "factory2.2026-11-13.5"
+FACTORY2_VERSION = "factory2.2026-11-25.6"
 
 
 DATA_SANDBOX_NAME = "gates_sandbox"
@@ -63,8 +63,9 @@ def isolate_data_dir(quiet: bool = False) -> bool:
     create or mutate live state/log files inside ./data"). We do not edit the
     old factory (law N1); we move our OWN process's config.DATA_DIR instead.
 
-    Our own papers (gates_*.jsonl / gates_*.txt / gates_rung_state.json) stay in
-    `data/` - only the borrowed writers are diverted. Opt out with
+    Our OWN papers follow the diverted config too (LAW 110 CLOSED at D5: the words
+    now MATCH the deeds - the diary lives in `data/gates_sandbox/`, ONE drawer for
+    borrowed writers AND ours, and the night teacher looks there first). Opt out with
     GATES_SHARED_DATA=1 if you ever want the live drawer on purpose.
     """
     global DATA_QUARANTINED
@@ -346,8 +347,11 @@ class Pen:
             # BYTES. One byte grammar for the diary, everywhere.
             with open(self.path, "a", encoding="utf-8", newline="\n") as fh:
                 fh.write(line + "\n")
-        except OSError:
-            pass
+        except OSError as exc:               # D5 / LAW 114: a jammed pen is LOUD, and the
+            import sys as _sys               #   count is queryable - silence became a verdict
+            self.failures = int(getattr(self, "failures", 0)) + 1
+            print(f"[factory2] DIARY WRITE FAILED #{self.failures} ({self.path}): "
+                  f"{type(exc).__name__}: {exc}", file=_sys.stderr)
 
     @property
     def callable_ok(self) -> bool:
@@ -590,7 +594,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--dry", action="store_true", help="print lines, write nothing")
     ap.add_argument("--data-dir", type=str, default=None)
     ap.add_argument("--interval", type=int, default=180, help="live seconds")
+    ap.add_argument("--hands-shadow", action="store_true",
+                    help="live only: Room E plans/manages a PAPER book every cycle (D2)")
+    ap.add_argument("--hands-demo", action="store_true",
+                    help="live only: ALSO mirror that book onto the DEMO MT5 account (D3)")
     a = ap.parse_args(argv)
+    if a.hands_demo and (a.demo or a.dry):
+        # synthetic prints and an un-logged mirror must never meet a broker
+        print("[factory2] --hands-demo with --demo/--dry is REFUSED"); return 2
 
     gh = _gh()
     dd = resolve_data_dir(a.data_dir)
@@ -632,13 +643,36 @@ def main(argv: Optional[List[str]] = None) -> int:
     import config
     source = "demo" if a.demo else str(getattr(config, "DATA_SOURCE", "demo"))
     from step2_market_analysis import analyze_market
+    shadow = None
+    mirror = None
+    import committee as _cap
+    print(f"[factory2] spread cap in force: {_cap.MAX_SPREAD_PCT} % of price "
+          f"(config MAX_SPREAD_PCT - one home since D5)")
+    if a.hands_shadow or a.hands_demo:   # the CALLER hands the book - 12c's law holds
+        _hands = __import__("tools.factory2_hands", fromlist=["cycle_hands"])
+        shadow = {"cycle_hands": _hands.cycle_hands, "pos": None}
+    if a.hands_demo:
+        _ex = __import__("tools.factory2_exec", fromlist=["DemoMirror"])
+        try:
+            _mir = _ex.DemoMirror(pen=pen)
+            _mir.arm()                   # every refusal is an ExecRefused, never a silence
+            _mir.discover()              # the broker is the state of truth, restart-safe
+            mirror = _mir
+            print("[factory2] EXEC ARMED on the DEMO account - the mirror follows the paper")
+        except _ex.ExecRefused as exc:
+            print("[factory2] EXEC NOT ARMED -", exc, "- the hall keeps running PAPER-only")
     cid = int(time.time() // max(60, a.interval))
     while True:
         try:
             data = DataAcquisition(source=source).acquire_market_data()
             snap = analyze_market(data)
-            out = run_cycle(cv_from_snapshot_dict(_snap_to_dict(snap), cid),
-                            state, pen, "live")
+            d = _snap_to_dict(snap)
+            out = run_cycle(cv_from_snapshot_dict(d, cid),
+                            state, pen, "live", shadow=shadow)
+            if mirror is not None:
+                _acts = mirror.sync(shadow, float(d.get("price") or 0.0))
+                if _acts:
+                    print("[factory2] exec:", ",".join(_acts))
             print("[factory2] g1:", str(out.get("g1"))[:100])
             print("[factory2] g2:", str(out.get("g2"))[:100])
             print("[factory2] g3:", str(out.get("g3"))[:120])
