@@ -1966,7 +1966,9 @@ def test_the_hall_stamps_its_own_name_and_the_seal_moved():
     # .1 = BELT-1 (2026-11-14): the teacher gained the counter audit. The seal moves
     # WITH the gate or the receipt reads state instead of paper - that is the whole
     # reason this test pins a string, so bumping a stamp means editing it HERE.
-    assert 'REPORT_VERSION = "gates.report.2026-11-25.4"' in rep
+    assert 'REPORT_VERSION = "gates.report.2026-11-28.5"' in rep
+    # .5 = THE DEAD SIGN (2026-11-28): the --record-shot hint pointed at a flag the factory
+    # does not have; telling a human to run a ghost is a trap, so the sentence came down.
     import committee as C
     assert getattr(C, "ACCEPT_BEFORE_BOUNCE", None) is True
     assert getattr(C, "ACCEPT_MARK", "") == "REPLAY/"
@@ -2644,3 +2646,106 @@ def test_d5_teacher_follows_the_quarantined_diary(tmp_path, monkeypatch, capsys)
     assert "gates_shadow_20261125.jsonl" in out and "lines)" in out
 
 
+# ---- v.6 parcel (the Thanksgiving fixes): every scar the 26th's diary produced gets a test ------
+def test_v6_hand_speaks_the_banks_ruler():
+    """61 diary lines of MODIFY/NOT-CONFIRMED on 2026-11-26 = 3-decimal wishes at a 2-digit
+    bank. One helper, three places (ask / remember / compare). This test is that sentence."""
+    m, pen = _mirror()
+    m.arm(); m.digits = 2
+    t = m.open_mirror("BUY", 3900.123, 3899.4449, 3905.6789, 0.01)
+    assert t
+    req = m._m().sends[-1]
+    assert req["price"] == 3900.12 and req["sl"] == 3899.44 and req["tp"] == 3905.68
+    note = [r for r in pen if r.get("act") == "OPEN"][-1]
+    assert note["sl"] == 3899.44          # the paper now remembers what was ASKED, rounded
+
+def test_v6_mapper_moves_the_rope_to_the_true_entry():
+    """Trade 2 of the 26th: eye-entry 3565.7, bank-entry 3566.57 (basis 0.87) - a 'locked +0.11'
+    rope was really -0.76. The mapper shifts every eye-number by the MEASURED delta."""
+    m, pen = _mirror()
+    m.arm(); m.digits = 2
+    shadow = {"pos": _pos()}
+    m.sync(shadow, 3900.0)                          # opens at eye 3900.0
+    m._basis, m._eye_px = 0.87, 3900.0               # what open() now measures at a real broker
+    shadow["pos"]["sl"] = 3900.0                     # walk-home: rope to the (eye) entry
+    acts = m.sync(shadow, 3900.9)
+    assert "MOVED" in acts
+    assert m._m().sends[-1]["sl"] == 3900.87         # the bank's true entry, not the eye's
+    assert m._m().positions[0].sl == 3900.87
+
+def test_v6_pending_proves_at_the_next_breath_and_never_knocks_twice():
+    """The 1-second doubt is dead: an accepted-but-not-yet-visible change PENDS, the next cycle's
+    own glance verifies it, and no second request is ever sent for the same wish."""
+    m, pen = _mirror()
+    m.arm(); m.digits = 2
+    fake = m._m()
+    shadow = {"pos": _pos()}
+    m.sync(shadow, 3900.0)
+    orig, delayed = fake.order_send, {}
+    def slow_send(req):                              # broker: acks now, applies between breaths
+        if req.get("action") == fake.TRADE_ACTION_SLTP:
+            delayed["sl"] = req["sl"]
+            return _ResNS(10009, req["position"])
+        return orig(req)
+    fake.order_send = slow_send
+    shadow["pos"]["sl"] = 3900.5
+    assert "MOVE-UNVERIFIED" in m.sync(shadow, 3900.5)
+    assert [r for r in pen if r.get("act") == "MODIFY"][-1]["proof"] == "PENDING-NEXT-BREATH"
+    n = len(fake.sends)
+    assert m.sync(shadow, 3900.5) == ["MOVE-PENDING"] and len(fake.sends) == n   # no double-knock
+    fake.positions[0].sl = delayed["sl"]             # the bank catches up while the shop sleeps
+    assert m.sync(shadow, 3900.5) == []
+    assert [r for r in pen if r.get("act") == "MODIFY"][-1]["proof"] == "VERIFIED-AT-BREATH"
+
+def test_v6_kill_paddle_freezes_and_releases_the_hands():
+    """RTS 6 demands a kill switch that can be flicked mid-day WITHOUT blinding the eyes."""
+    import tools.factory2_exec as fx
+    kd = fx.ROOT / "data" / "gates_sandbox"
+    made_dir = not kd.exists()
+    kd.mkdir(parents=True, exist_ok=True)
+    try:
+        m, pen = _mirror()
+        m.arm()
+        (kd / "KILL").write_text("pause", encoding="utf-8")
+        shadow = {"pos": _pos()}
+        fake = m._m()
+        assert m.sync(shadow, 3900.0) == ["FROZEN"] and len(fake.sends) == 0
+        (kd / "KILL").unlink()
+        assert m.sync(shadow, 3900.0) == ["OPENED"]  # paddle up, the shop breathes again
+        assert [r for r in pen if r.get("act") == "KILL"][-1]["bucket"] == "OFF"
+    finally:
+        if (kd / "KILL").exists():
+            (kd / "KILL").unlink()
+        if made_dir:
+            try:
+                kd.rmdir()
+            except OSError:
+                pass
+
+def test_v6_budget_sits_the_hand_down():
+    """7 polite knocks a day is fine; a thousand is the same disease at speed. 30 sends, then HOLD."""
+    m, pen = _mirror()
+    m.arm(); m.digits = 2
+    m._sends_day = time.strftime("%Y%m%d"); m._sends = 30
+    t = m.open_mirror("BUY", 3900.0, 3899.0, 3905.0, 0.01)
+    assert t is None and len(m._m().sends) == 0
+    assert [r for r in pen if r.get("act") == "OPEN"][-1]["bucket"] == "BUDGET-HOLD"
+
+def test_v6_bank_answers_are_never_nameless_again():
+    """The 26th's `reason=` was EMPTY seven times. Now: every non-OK answer carries rc + the
+    broker module's own word - and three UN-nameable answers in a row freeze the hand."""
+    m, pen = _mirror()
+    m.arm()
+    fake = m._m()
+    setattr(fake, "TRADE_RETCODE_NO_CHANGES", 10024)
+    fake._seq = [10024]
+    assert m.open_mirror("BUY", 3900.0, 3899.0, 3905.0, 0.01) is None
+    note = [r for r in pen if r.get("act") == "OPEN"][-1]
+    assert note["bucket"] == "NO-CHANGES" and "10024" in note["reason"]
+    fake._seq = [99999, 99999, 99999]                # codes NO module can name
+    for _ in range(3):
+        m.open_mirror("SELL", 3900.0, 3901.0, 3895.0, 0.01)
+    assert [r for r in pen if r.get("act") == "HAND-FROZEN"], "streak law must freeze the hand"
+    assert m._frozen is True
+    m.open_mirror("SELL", 3900.0, 3901.0, 3895.0, 0.01)
+    assert [r for r in pen if r.get("act") == "OPEN"][-1]["reason"].startswith("hand frozen")

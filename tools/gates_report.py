@@ -36,7 +36,7 @@ for _p in (str(ROOT), str(HERE)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-REPORT_VERSION = "gates.report.2026-11-25.4"   # TALLY-2: asserts the doorman's own equation (row 3) - and refuses to grade a pre-.3 paper as if it had `allowed`   # BELT-1: the teacher audits the sea's own counters (item 46 still holds: a verdict is scored from the ROWS)
+REPORT_VERSION = "gates.report.2026-11-28.5"   # TALLY-2: asserts the doorman's own equation (row 3) - and refuses to grade a pre-.3 paper as if it had `allowed`   # BELT-1: the teacher audits the sea's own counters (item 46 still holds: a verdict is scored from the ROWS)
 MAX_LINE_BYTES = 1100          # ~1KB diary line law (+10% slack for long rung names)
 CPU_PCT_BUDGET = 0.3           # percent of one core, the owner's cap
 STAMPS_ALLOWED = {
@@ -265,8 +265,9 @@ def sec_twin(T: Teacher, rows: List[Dict[str, Any]], sea: Dict[str, Any],
                 n += 1
     if not n:
         T.add("NA", "TWIN SCOREBOARD", "old shooter vs new committee on the same cycles",
-              ["the diary has no `shot` block - run factory2 with --record-shot, "
-               "or read the sea's json (--sea) which carries shot_action"], buf)
+              ["the diary has no `shot` block - read the sea's json (--sea), which "
+               "carries shot_action (the old `--record-shot` direction pointed at a room "
+               "that no longer exists; sign taken down 2026-11-28 parcel)"], buf)
         eps = sea.get("episodes") or []
         if eps:
             acts = Counter(str(e.get("shot_action") or "?") for e in eps)

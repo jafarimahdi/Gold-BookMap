@@ -51,7 +51,7 @@ for _p in (str(ROOT), str(HERE)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-EXEC_VERSION = "factory2.exec.2026-11-25.5"
+EXEC_VERSION = "factory2.exec.2026-11-28.6"
 OURS_COMMENT = "F2/"          # ownership stamp - the ONLY comment we may act on
 MAGIC = 20261125              # our magic number; doubles as the road-to-demo date
 
@@ -73,6 +73,8 @@ class DemoMirror:
     _RC_PLACED = 10008        # TRADE_RETCODE_PLACED
     _RC_RETRYABLE = frozenset({10004, 10020, 10021})
     _RC_FATAL = frozenset({10006, 10007, 10016, 10019, 10013, 10014, 10015, 10018})
+    _SEND_BUDGET = 30        # a day's knocks, all actions (v.6; RTS 6 calls it a throttle)
+    _STREAK_FREEZE = 3       # this many answers NO dictionary could name -> the hand sits down
 
     def __init__(self, mt5mod=None, config_mod=None, pen=None, print_fn=None):
         self._mt5 = mt5mod
@@ -83,6 +85,17 @@ class DemoMirror:
         self.symbol: Optional[str] = None
         self.account_login: Optional[int] = None
         self.lot: float = 0.0
+        # --- v.6 (2026-11-28, the Thanksgiving parcel): every field below exists because a REAL
+        # diary line demanded it on 11-26/27 - the decimals, the empty reason=, the 1e-6 doubt.
+        self.digits: Optional[int] = None            # the BANK's price ruler, read once, cached
+        self._basis = 0.0                            # bank_px - eye_px at our open (two-golds delta)
+        self._eye_px = 0.0
+        self._pending: Optional[Dict[str, Any]] = None    # deferred proof (verify next breath)
+        self._names_map: Optional[Dict[int, str]] = None  # the broker module's OWN retcode words
+        self._sends, self._sends_day = 0, ""         # the knock budget, per day
+        self._unk_streak = 0
+        self._frozen = False
+        self._kill_on = False
 
     # -------------------------------------------------------------- plumbing --
     def _m(self):
@@ -127,6 +140,12 @@ class DemoMirror:
             return "RETRYABLE"
         if retcode in self._RC_FATAL:
             return "FATAL"
+        try:                                        # v.6: never bake a code-table - ASK the
+            nm = self._names().get(int(retcode))     # broker's own module what its codes mean
+        except Exception:
+            nm = None
+        if nm:
+            return nm
         return "UNKNOWN"
 
     def _px(self, want_ask: bool) -> float:
@@ -137,6 +156,51 @@ class DemoMirror:
         a = (getattr(tick, "ask", 0.0) or getattr(tick, "last", 0.0) or 0.0) if want_ask \
             else (getattr(tick, "bid", 0.0) or getattr(tick, "last", 0.0) or 0.0)
         return float(a or 0.0)
+
+    # ------------------------------------------- v.6: the ruler, the mapper, the names --
+    def _dg(self) -> int:
+        if self.digits is None:
+            si = None
+            try:
+                si = getattr(self._m(), "symbol_info", lambda s: None)(self.symbol)
+            except Exception:
+                si = None
+            self.digits = int(getattr(si, "digits", 2) or 2) if si is not None else 2
+        return max(0, min(8, self.digits))
+
+    def _q(self, x: float) -> float:
+        """The bank's ruler before the bank's counter: 3-decimal wishes became 61 diary lines
+        and a liar's `NOT-CONFIRMED` on 2026-11-26. One helper, three places, gone."""
+        try:
+            return round(float(x), self._dg())
+        except Exception:
+            return float(x)
+
+    def _mp(self, eye_val: float) -> float:
+        """Eye currency -> bank currency -> bank ruler. Trade 2 of the 26th lost 0.76 because
+        a rope tied in eye-numbers sat 0.87 from the bank's true entry. Never again."""
+        return self._q(float(eye_val) + self._basis)
+
+    def _eq(self, a: float, b: float) -> bool:
+        return abs(float(a) - float(b)) <= 0.5 / (10 ** self._dg())
+
+    def _new_trade(self) -> None:
+        self._pending, self._basis, self._eye_px = None, 0.0, 0.0
+
+    def _names(self) -> Dict[int, str]:
+        if self._names_map is None:
+            d: Dict[int, str] = {}
+            try:
+                for a in dir(self._m()):
+                    if a.startswith("TRADE_RETCODE_"):
+                        try:
+                            d[int(getattr(self._m(), a))] = a[len("TRADE_RETCODE_"):].replace("_", "-")
+                        except Exception:
+                            continue
+            except Exception:
+                pass
+            self._names_map = d
+        return self._names_map
 
     # ------------------------------------------------------- filling + buckets --
     # v.3 (LAW 113): the donor's close request ALWAYS carries `type_filling`
@@ -216,9 +280,23 @@ class DemoMirror:
 
     # -------------------------------------------------------------- the send --
     def _send(self, req: Dict[str, Any]):
-        """One order, donor's bounded retry: RETRYABLE/NONE re-send with a FRESH price,
-        the SL/TP offsets re-derived so a retried order never carries a stale bracket."""
+        """One order. v.6 wraps the donor's bounded retry in the three laws this file was
+        missing, each earned by a real line in a real diary: the BANK-TICKET CHECK (the broker's
+        own tick freshness - eyes and hand can watch DIFFERENT markets, see trade 2 of 11-26),
+        the DAY BUDGET (a polite loop must still be a bounded one), and THE NAMED ANSWER
+        (rc + the module's word + comment - `reason=` was empty seven times on the 26th)."""
         mt5, cfg = self._m(), self._cfg
+        tk = getattr(mt5, "symbol_info_tick", lambda s: None)(self.symbol) if self.symbol else None
+        t_age = int(getattr(tk, "time", 0) or 0) if tk is not None else 0
+        if t_age > 0 and time.time() - t_age > 900.0:
+            return None, "TAPE-COLD", (f"bank tick is {int(time.time() - t_age)}s old - the market "
+                                       "the hand would knock on looks closed (v.6 skip)"), 0
+        day = time.strftime("%Y%m%d")
+        if day != self._sends_day:
+            self._sends_day, self._sends = day, 0
+        if self._sends >= self._SEND_BUDGET:
+            return None, "BUDGET-HOLD", (f"{self._SEND_BUDGET} sends already today - the hand sits "
+                                         "down until tomorrow (v.6 throttle)"), 0
         max_retry = int(getattr(cfg, "MT5_RETRY_MAX", 2) or 0)
         backoff = float(getattr(cfg, "MT5_RETRY_BACKOFF_MS", 250) or 0) / 1000.0
         dev = int(getattr(cfg, "MT5_DEVIATION", 20) or 20)
@@ -227,11 +305,27 @@ class DemoMirror:
         attempts, result, reason = 0, None, ""
         while True:
             attempts += 1
+            self._sends += 1
             try:
                 result = mt5.order_send(dict(req))
             except Exception as exc:            # network/IPC failure mid-send
                 result, reason = None, f"order_send raised {type(exc).__name__}: {exc}"
             bucket = self._bucket(getattr(result, "retcode", None))
+            if reason == "" and bucket not in ("OK", "PARTIAL", "PLACED"):
+                rc = self._rc(result)
+                nm = self._names().get(rc, "")
+                cmt = str(getattr(result, "comment", "") or "") if result is not None else ""
+                reason = " ".join(x for x in (f"rc {rc}", nm, f"'{cmt}'" if cmt else "") if x)
+            if bucket == "UNKNOWN":
+                self._unk_streak += 1
+                if self._unk_streak >= self._STREAK_FREEZE and not self._frozen:
+                    self._frozen = True
+                    self._note({"act": "HAND-FROZEN", "bucket": "STREAK", "retcode": self._rc(result),
+                                "reason": f"{self._STREAK_FREEZE} consecutive answers no dictionary "
+                                          "could name - hands sit until the hall restarts; the judge "
+                                          "keeps writing"})
+            elif bucket in ("OK", "PARTIAL", "PLACED"):
+                self._unk_streak = 0
             if bucket in ("OK", "PARTIAL", "PLACED", "FATAL", "UNKNOWN") or attempts > max_retry:
                 return result, bucket, reason, attempts
             time.sleep(backoff)                  # retryable: re-quote and re-derive the bracket
@@ -272,13 +366,17 @@ class DemoMirror:
             self._note({"act": "OPEN", "bucket": "REFUSED",
                         "reason": "one-position law: a ticket is already held or LOST-PENDING"})
             return None
+        if self._frozen:
+            self._note({"act": "OPEN", "bucket": "REFUSED",
+                        "reason": "hand frozen after unnamed bank answers (v.6 streak law)"})
+            return None
         mt5 = self._m()
         buy = str(side).upper() == "BUY"
         t = getattr(mt5, "ORDER_TYPE_BUY", 0) if buy else getattr(mt5, "ORDER_TYPE_SELL", 1)
         px = float(price or 0.0) or self._px(buy)
         req = {"action": getattr(mt5, "TRADE_ACTION_DEAL", 1), "symbol": self.symbol,
-               "volume": self._round_vol(volume or self.lot), "type": t, "price": round(px, 3),
-               "sl": round(float(sl), 3), "tp": round(float(tp), 3), "magic": MAGIC,
+               "volume": self._round_vol(volume or self.lot), "type": t, "price": self._q(px),
+               "sl": self._mp(sl), "tp": self._mp(tp), "magic": MAGIC,
                "type_time": getattr(mt5, "ORDER_TIME_GTC", 0),
                "type_filling": self._filling(mt5, getattr(mt5, "symbol_info", lambda s: None)(self.symbol)),
                "comment": OURS_COMMENT + "live"}
@@ -292,10 +390,17 @@ class DemoMirror:
         ticket = int(getattr(result, "order", 0) or 0)
         if ticket and self._wait_ticket(ticket, True):
             self.held = ticket
+            self._new_trade()
+            bp = self._live().get(ticket)
+            bank_px = float(getattr(bp, "price_open", 0.0) or 0.0) if bp is not None else 0.0
+            if bank_px > 0 and px > 0:
+                self._basis, self._eye_px = round(bank_px - px, 6), float(px)   # the delta, MEASURED
             self._note({"act": "OPEN", "bucket": bucket, "proof": "SEEN-AT-BROKER",
                         "ticket": ticket, "side": "BUY" if buy else "SELL",
                         "px": req["price"], "sl": req["sl"], "tp": req["tp"],
-                        "vol": req["volume"], "attempts": attempts})
+                        "vol": req["volume"], "attempts": attempts,
+                        **({"px_bank": self._q(bank_px), "basis": round(self._basis, self._dg() + 1)}
+                           if bank_px > 0 else {})})
             return ticket
         # accepted but NOT SEEN: loud, and we do not claim what we cannot prove
         self._note({"act": "OPEN", "bucket": bucket, "proof": "NOT-SEEN", "ticket": ticket,
@@ -314,6 +419,7 @@ class DemoMirror:
             self._note({"act": "CLOSE", "bucket": "NOOP", "proof": "ALREADY-GONE",
                         "ticket": self.held})
             self.held = None
+            self._new_trade()
             return True
         buy_pos = int(getattr(p, "type", 0)) == int(getattr(mt5, "ORDER_TYPE_BUY", 0))
         t = getattr(mt5, "ORDER_TYPE_SELL", 1) if buy_pos else getattr(mt5, "ORDER_TYPE_BUY", 0)
@@ -329,6 +435,7 @@ class DemoMirror:
             self._note({"act": "CLOSE", "bucket": bucket, "proof": "GONE",
                         "ticket": int(self.held), "reason": reason, "attempts": attempts})
             self.held = None
+            self._new_trade()
             return True
         self._note({"act": "CLOSE", "bucket": bucket, "proof": "STILL-THERE",
                     "ticket": int(self.held), "reason": "positions_get still shows it",
@@ -338,6 +445,10 @@ class DemoMirror:
     def modify_sl(self, new_sl: float) -> bool:
         if self.held is None or self.held == -1:
             return False
+        if self._frozen:
+            self._note({"act": "MODIFY", "bucket": "REFUSED",
+                        "reason": "hand frozen after unnamed bank answers (v.6 streak law)"})
+            return False
         mt5 = self._m()
         live = self._live()
         p = live.get(self.held)
@@ -346,20 +457,26 @@ class DemoMirror:
                         "ticket": self.held})
             self.held = -1
             return False
+        want = self._mp(new_sl)                 # mapped to bank currency AND to its ruler (v.6)
+        if self._eq(float(getattr(p, "sl", 0.0) or 0.0), want):
+            return True                         # equal to the ruler = nothing to ask; the storm dies
         req = {"action": getattr(mt5, "TRADE_ACTION_SLTP", 5), "position": int(self.held),
-               "symbol": self.symbol, "sl": round(float(new_sl), 3),
-               "tp": round(float(getattr(p, "tp", 0.0) or 0.0), 3)}
+               "symbol": self.symbol, "sl": want,
+               "tp": self._q(float(getattr(p, "tp", 0.0) or 0.0))}
         result, bucket, reason, attempts = self._send(req)
         ok = False
-        for _ in range(5):
-            p2 = self._live().get(self.held)
-            if p2 is not None and abs(float(getattr(p2, "sl", 0.0) or 0.0) - float(new_sl)) <= 1e-6:
+        for _ in range(4):                      # ONE short glance now; the rest waits for the
+            p2 = self._live().get(self.held)    # next breath - brokers are eventually-true, and
+            if p2 is not None and self._eq(float(getattr(p2, "sl", 0.0) or 0.0), want):
                 ok = True
                 break
-            time.sleep(0.2)
+            time.sleep(0.15)                    # 1e-6-vs-rounded doubt cost 61 lines on 11-26
+        if not ok and bucket in ("OK", "PARTIAL"):
+            self._pending = {"ticket": int(self.held), "want": want, "at": time.time()}
         self._note({"act": "MODIFY", "bucket": bucket,
-                    "proof": "VERIFIED" if ok else "NOT-CONFIRMED",
-                    "ticket": int(self.held), "sl": round(float(new_sl), 3),
+                    "proof": ("VERIFIED" if ok else
+                              "PENDING-NEXT-BREATH" if self._pending else "NOT-CONFIRMED"),
+                    "ticket": int(self.held), "sl": want, "retcode": self._rc(result),
                     "reason": reason, "attempts": attempts})
         return ok
 
@@ -369,6 +486,20 @@ class DemoMirror:
         the broker follows, divergence gets a NAME, never a guess."""
         acts: List[str] = []
         pos = shadow.get("pos") if isinstance(shadow, dict) else None
+        try:                                        # v.6 THE PADDLE: a KILL file in the sandbox
+            _kill = (ROOT / "data" / "gates_sandbox" / "KILL").exists()
+        except OSError:
+            _kill = False
+        if _kill:
+            if not self._kill_on:
+                self._kill_on = True
+                self._note({"act": "KILL", "bucket": "ON",
+                            "reason": "KILL file seen - hands frozen; the judge keeps writing; "
+                                      "delete data/gates_sandbox/KILL to release"})
+            return ["FROZEN"]
+        if self._kill_on:
+            self._kill_on = False
+            self._note({"act": "KILL", "bucket": "OFF", "reason": "paddle up - hands resume"})
         try:
             live = self._live()
         except ExecRefused as exc:
@@ -379,6 +510,7 @@ class DemoMirror:
                         "reason": "SL/TP hit or operator closed it; the paper must catch up "
                                   "before any new open (LOST-PENDING gate)"})
             self.held = -1
+            self._pending, self._basis = None, 0.0      # (v.6) no trade to map while unheld
             acts.append("LOST")
         if self.held == -1:
             if not pos:
@@ -396,15 +528,27 @@ class DemoMirror:
         if pos and self.held is not None:
             p = live.get(self.held)
             if p is not None:
+                if self._pending and self._pending.get("ticket") == self.held \
+                        and self._eq(float(getattr(p, "sl", 0.0) or 0.0), self._pending["want"]):
+                    self._note({"act": "MODIFY", "bucket": "OK", "proof": "VERIFIED-AT-BREATH",
+                                "ticket": int(self.held), "sl": self._pending["want"],
+                                "reason": "the bank applied it between breaths (v.6 deferred proof)"})
+                    self._pending = None
+                    return acts
                 tp0 = float(pos.get("tp_at_open") or pos.get("tp") or 0.0)
-                if tp0 and abs(float(getattr(p, "tp", 0.0) or 0.0) - tp0) > 1e-6:
+                if tp0 and not self._eq(float(getattr(p, "tp", 0.0) or 0.0), self._mp(tp0)):
                     self._note({"act": "WANDER", "bucket": "TP-MOVED",
-                                "reason": "broker TP differs from the FROZEN tp_at_open - "
-                                          "someone touched our position", "ticket": self.held})
+                                "reason": "broker TP differs from the FROZEN tp_at_open "
+                                          "(mapped to the bank's ruler, v.6) - someone touched "
+                                          "our position", "ticket": self.held})
                     acts.append("WANDER")
                 want_sl = float(pos.get("sl") or 0.0)
-                if want_sl and abs(float(getattr(p, "sl", 0.0) or 0.0) - want_sl) > 1e-6:
-                    acts.append("MOVED" if self.modify_sl(want_sl) else "MOVE-UNVERIFIED")
+                want_q = self._mp(want_sl)
+                if want_sl and not self._eq(float(getattr(p, "sl", 0.0) or 0.0), want_q):
+                    if self._pending and self._pending.get("want") == want_q:
+                        acts.append("MOVE-PENDING")   # awaiting proof - never knock twice (v.6)
+                    else:
+                        acts.append("MOVED" if self.modify_sl(want_sl) else "MOVE-UNVERIFIED")
             return acts
         if not pos and self.held is not None:
             acts.append("CLOSED" if self.close_mirror() else "CLOSE-UNVERIFIED")
